@@ -228,10 +228,14 @@ def test_canned_session(provider, run_dir):
     harness_events = [e for e in tool_events if e["tool"] == HARNESS_TOOL]
     assert harness_events[0]["source"] == "harness"
 
-    # §11.2: usage accounting non-zero.
+    # §11.2: usage accounting non-zero. Transient provider errors emit
+    # usage_unknown attempts at cost 0 (§5.5) before the retry succeeds —
+    # measure the first *successful* call.
     llm_events = [e for e in events if e["event"] == "llm_call"]
-    assert llm_events[0]["input_tokens"] > 0
-    assert llm_events[0]["output_tokens"] > 0
+    ok_llm = [e for e in llm_events if not e.get("usage_unknown")]
+    assert ok_llm, f"{provider}: no successful llm_call events"
+    assert ok_llm[0]["input_tokens"] > 0
+    assert ok_llm[0]["output_tokens"] > 0
     session_end = next(e for e in events if e["event"] == "session_end")
     assert session_end["reason"] == "agent"
     assert session_end["session_cost_usd"] > 0
@@ -267,7 +271,7 @@ def test_canned_session(provider, run_dir):
     # Report (SPEC §9 fixed-floor arithmetic wants the observed floor).
     print(
         f"\nSMOKE[{provider}] model={model} "
-        f"fixed_floor_input_tokens={llm_events[0]['input_tokens']} "
+        f"fixed_floor_input_tokens={ok_llm[0]['input_tokens']} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
         f"session_tokens={session_end['session_tokens']} "
         f"cost_usd={session_end['session_cost_usd']:.6f} "
