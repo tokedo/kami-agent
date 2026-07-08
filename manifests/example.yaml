@@ -1,0 +1,46 @@
+# Run manifest — copied verbatim into run/config.yaml by `kami-agent init`
+# (plus the generated wallet_address). Immutable once a run starts; re-runs
+# re-pin new SHAs in a new manifest.
+run_id: dev-smoke-001
+provider: anthropic # anthropic | openai | google
+model: claude-haiku-4-5
+
+price_table: # pinned list prices, USD per million tokens (D16)
+  input_usd_per_mtok: 1.0
+  output_usd_per_mtok: 5.0
+
+params:
+  max_tokens: 4096
+  temperature: null # sent only when set; some models reject it
+  reasoning_effort: null # anthropic → output_config.effort; openai native; google not sent
+
+caps: # SPEC §9 (session_token_cap set per model list, D17)
+  session_token_cap: 120000
+  session_tool_cap: 50
+  max_consecutive_errors: 5
+  retry_max_attempts: 5
+  tool_timeout_s: 120
+  tool_result_max_bytes: 65536
+
+budget_usd: 10.0
+t_max_days: 30
+workspace_quota_bytes: 10485760
+lock_stale_s: 7200
+
+wake: # must match the bounds frozen into prompts/system.txt
+  min_minutes: 5
+  max_minutes: 1440
+  default_minutes: 60
+
+chain_rpc_url: https://jsonrpc-yominet-1.anvil.asia-southeast.initia.xyz
+
+harness: # spawned per session as a stdio child (SPEC §2)
+  command: python3
+  args: [executor/server.py]
+  cwd: /opt/kami-harness
+  handshake_timeout_s: 60
+
+pins: # recorded on run_start; provisioning enforces them
+  agent_sha: ""
+  harness_sha: 352da9bc608f8a1118dff6738c616fcd745c28d3
+  gdd_sha: ""
