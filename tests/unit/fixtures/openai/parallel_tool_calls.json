@@ -1,0 +1,32 @@
+{
+  "id": "chatcmpl-ExampleTools01",
+  "object": "chat.completion",
+  "created": 1751980800,
+  "model": "gpt-test",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "tool_calls",
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_AAA111",
+            "type": "function",
+            "function": { "name": "workspace_list", "arguments": "{}" }
+          },
+          {
+            "id": "call_BBB222",
+            "type": "function",
+            "function": {
+              "name": "workspace_read",
+              "arguments": "{\"path\": \"reference/README.md\", \"offset\": 0, \"length\": 1024}"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "usage": { "prompt_tokens": 2521, "completion_tokens": 138, "total_tokens": 2659 }
+}

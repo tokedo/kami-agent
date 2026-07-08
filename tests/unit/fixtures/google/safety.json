@@ -1,0 +1,13 @@
+{
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [] },
+      "finishReason": "SAFETY"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2350,
+    "candidatesTokenCount": 0,
+    "totalTokenCount": 2350
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "Thought about it." }] },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2000,
+    "candidatesTokenCount": 100,
+    "thoughtsTokenCount": 250,
+    "totalTokenCount": 2350
+  }
+}
