@@ -1,0 +1,15 @@
+# Secrets — never in git
+.env*
+*.key
+
+# Local dev tooling context — the public tree stays vendor-neutral
+CLAUDE.md
+.claude/
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+dist/
+.venv/
+*.egg-info/
