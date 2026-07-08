@@ -34,5 +34,9 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# The frozen prompt strings are compared byte-exact; their lines can't wrap.
+"tests/unit/test_prompts.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
