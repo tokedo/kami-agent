@@ -143,7 +143,9 @@ def test_root_schema_oneof_accepts_every_event(event):
 def test_stop_reason_enum_matches_schema():
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     schema_enum = schema["$defs"]["llm_call"]["properties"]["stop_reason"]["enum"]
-    assert set(schema_enum) == {r.value for r in StopReason}
+    # "error" marks failed-but-logged retry attempts (SPEC §5.5), which have
+    # no provider stop reason; it never appears in an AdapterResponse.
+    assert set(schema_enum) == {r.value for r in StopReason} | {"error"}
 
 
 @pytest.mark.parametrize("event", sorted(SPEC_EVENT_TYPES))

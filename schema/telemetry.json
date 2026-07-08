@@ -85,7 +85,10 @@
         "cumulative_usd": { "type": "number", "minimum": 0 },
         "cumulative_tokens": { "type": "integer", "minimum": 0 },
         "latency_ms": { "type": "number", "minimum": 0 },
-        "stop_reason": { "enum": ["end_turn", "tool_use", "max_tokens", "refusal"] },
+        "stop_reason": {
+          "enum": ["end_turn", "tool_use", "max_tokens", "refusal", "error"],
+          "description": "SPEC §5.1 normalized enum, plus \"error\" for failed-but-logged attempts on the retry path (SPEC §5.5) where no provider stop reason exists"
+        },
         "retry_count": { "type": "integer", "minimum": 0 },
         "usage_unknown": {
           "type": "boolean",
