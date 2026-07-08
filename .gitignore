@@ -1,5 +1,6 @@
 # Secrets — never in git
 .env*
+!.env.example
 *.key
 
 # Local dev tooling context — the public tree stays vendor-neutral
