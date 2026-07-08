@@ -62,6 +62,22 @@ def test_no_apparatus_or_policy_leaks(name):
         assert word not in text, f"{name} contains {word!r}"
 
 
+def test_wake_bounds_in_frozen_prompt_match_code_defaults():
+    # The frozen prompt hardcodes the §9 default wake bounds. A manifest or
+    # code change to wake_min/wake_max must consciously re-freeze the prompt
+    # (and this test) in the same commit — they can never silently diverge.
+    from kami_agent.runner import RunConfig
+    from kami_agent.tools.scaffold import DEFAULT_WAKE_MAX_MINUTES, DEFAULT_WAKE_MIN_MINUTES
+
+    phrase = (
+        f"between {DEFAULT_WAKE_MIN_MINUTES:g} minutes and {DEFAULT_WAKE_MAX_MINUTES / 60:g} hours"
+    )
+    assert phrase in SYSTEM
+    config_defaults = RunConfig.__dataclass_fields__
+    assert config_defaults["wake_min_minutes"].default == DEFAULT_WAKE_MIN_MINUTES
+    assert config_defaults["wake_max_minutes"].default == DEFAULT_WAKE_MAX_MINUTES
+
+
 def test_kickoff_and_continue_carry_no_dynamic_content():
     # Frozen constants: no numbers, no timestamps (SPEC §3 step 6).
     for name in ("kickoff.txt", "continue.txt"):

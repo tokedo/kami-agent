@@ -1,0 +1,49 @@
+# Full SPEC §11.2 smoke against a REAL kami-harness checkout at the pinned
+# SHA (Option B, kami-lab D21). Never gates PRs: runs on manual dispatch and
+# a weekly cron. Run it manually before tagging v0, before the $10 smoke
+# handoff, and on any harness pin bump.
+#
+# Uses list_accounts as the read-only harness tool: the CI checkout has no
+# wallet or Kamibots API keys, so account-authenticated reads (get_nodes)
+# are exercised only in operator-run local smokes (KAMI_SMOKE_HARNESS=real
+# with a real roster).
+
+name: live-harness-smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+
+env:
+  HARNESS_PIN: 352da9b
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: tokedo/kami-harness
+          ref: ${{ env.HARNESS_PIN }}
+          path: kami-harness
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - name: Install harness dependencies
+        run: |
+          uv venv kami-harness/.venv-smoke
+          uv pip install -r kami-harness/executor/requirements.txt \
+            -p kami-harness/.venv-smoke/bin/python
+      - name: Minimal harness config (roster template; no keys)
+        run: cp kami-harness/accounts/roster.yaml.template kami-harness/accounts/roster.yaml
+      - name: Tri-provider smoke vs real harness
+        env:
+          KAMI_SMOKE_HARNESS: real
+          KAMI_HARNESS_DIR: ${{ github.workspace }}/kami-harness
+          KAMI_SMOKE_HARNESS_TOOL: list_accounts
+        run: uv run pytest tests/smoke -q -s
