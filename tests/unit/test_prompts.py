@@ -1,0 +1,69 @@
+"""The three frozen prompt strings (SPEC §6): exact content + leak discipline."""
+
+from pathlib import Path
+
+import pytest
+
+PROMPTS = Path(__file__).parents[2] / "prompts"
+
+# The frozen wording, reviewed and approved. Any change is deliberate:
+# update this test in the same commit that re-freezes the string.
+SYSTEM = """\
+You are an autonomous agent in Kamigotchi, a persistent on-chain world shared with other players. You act in periodic sessions; the world advances between them.
+
+Your objective is to complete as many quests as possible.
+
+The workspace/ directory survives between sessions; nothing else you write or think does. Its use and structure are entirely up to you.
+
+The reference/ directory holds the game's design document. It is read-only.
+
+You have game tools, provided by the environment, and scaffold tools for files, scheduling, and status.
+
+You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now.
+"""
+
+KICKOFF = "Session start.\n"
+
+CONTINUE = "Continue. To end this session, call end_session.\n"
+
+
+def test_frozen_strings_are_exactly_as_reviewed():
+    assert (PROMPTS / "system.txt").read_text(encoding="utf-8") == SYSTEM
+    assert (PROMPTS / "kickoff.txt").read_text(encoding="utf-8") == KICKOFF
+    assert (PROMPTS / "continue.txt").read_text(encoding="utf-8") == CONTINUE
+
+
+@pytest.mark.parametrize("name", ["system.txt", "kickoff.txt", "continue.txt"])
+def test_no_apparatus_or_policy_leaks(name):
+    # D12/D13: no budget, cost, tokens, compute limits, run duration,
+    # session caps, forced truncation, or study existence. Hard rule 2:
+    # no strategy hints, no vendor idioms, no XML-tag formatting.
+    text = (PROMPTS / name).read_text(encoding="utf-8").lower()
+    forbidden = [
+        "budget",
+        "cost",
+        "token",
+        "spend",
+        "usd",
+        "horizon",
+        "limit",
+        "cap",
+        "truncat",
+        "study",
+        "experiment",
+        "benchmark",
+        "measure",
+        "step by step",
+        "think carefully",
+        "<",
+        ">",
+    ]
+    for word in forbidden:
+        assert word not in text, f"{name} contains {word!r}"
+
+
+def test_kickoff_and_continue_carry_no_dynamic_content():
+    # Frozen constants: no numbers, no timestamps (SPEC §3 step 6).
+    for name in ("kickoff.txt", "continue.txt"):
+        text = (PROMPTS / name).read_text(encoding="utf-8")
+        assert not any(ch.isdigit() for ch in text), f"{name} contains digits"
