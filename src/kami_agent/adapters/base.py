@@ -108,6 +108,20 @@ class AdapterResponse:
     provider_meta: dict[str, Any] = field(default_factory=dict)
 
 
+class AdapterError(Exception):
+    """A provider call failed, normalized for the loop's retry policy.
+
+    ``retryable`` is True for the SPEC §5.5 backoff cases — rate limits
+    (429), server errors (5xx), and timeouts/connection failures — and
+    False for everything else (auth, bad request, unmappable response).
+    """
+
+    def __init__(self, message: str, *, retryable: bool, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
 @runtime_checkable
 class ModelAdapter(Protocol):
     """One provider adapter; native tool calling, normalized in/out."""

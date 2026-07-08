@@ -1,0 +1,34 @@
+{
+  "id": "msg_01Yk3gRrMyHhfExampleTools",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-haiku-4-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "Reading the file index and the status."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01AAA111",
+      "name": "workspace_list",
+      "input": {}
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01BBB222",
+      "name": "workspace_read",
+      "input": {
+        "path": "reference/README.md",
+        "offset": 0,
+        "length": 1024
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 2521,
+    "output_tokens": 138
+  }
+}
