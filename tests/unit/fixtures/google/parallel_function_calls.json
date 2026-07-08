@@ -1,0 +1,25 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          { "text": "Reading the file index and the status." },
+          { "functionCall": { "name": "workspace_list", "args": {} } },
+          {
+            "functionCall": {
+              "name": "workspace_read",
+              "args": { "path": "reference/README.md", "offset": 0, "length": 1024 }
+            }
+          }
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2521,
+    "candidatesTokenCount": 138,
+    "totalTokenCount": 2659
+  }
+}

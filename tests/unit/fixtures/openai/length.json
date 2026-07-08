@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-ExampleLength01",
+  "object": "chat.completion",
+  "created": 1751980800,
+  "model": "gpt-test",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "length",
+      "message": { "role": "assistant", "content": "Cut off mid-" }
+    }
+  ],
+  "usage": { "prompt_tokens": 2402, "completion_tokens": 512, "total_tokens": 2914 }
+}

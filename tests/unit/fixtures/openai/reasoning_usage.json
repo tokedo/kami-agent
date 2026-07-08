@@ -1,0 +1,19 @@
+{
+  "id": "chatcmpl-ExampleReason01",
+  "object": "chat.completion",
+  "created": 1751980800,
+  "model": "gpt-test",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "Considered answer." }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 2000,
+    "completion_tokens": 340,
+    "total_tokens": 2340,
+    "completion_tokens_details": { "reasoning_tokens": 120 }
+  }
+}

@@ -8,6 +8,8 @@ authors = [{ name = "Anatoly Zaytsev (tokedo)" }]
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.79",
+    "google-genai>=1.0",
+    "openai>=1.60",
     "mcp>=1.9",
     "jsonschema>=4.18",
 ]

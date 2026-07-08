@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-ExampleFilter01",
+  "object": "chat.completion",
+  "created": 1751980800,
+  "model": "gpt-test",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "content_filter",
+      "message": { "role": "assistant", "content": null }
+    }
+  ],
+  "usage": { "prompt_tokens": 2350, "completion_tokens": 0, "total_tokens": 2350 }
+}

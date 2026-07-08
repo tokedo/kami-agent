@@ -1,0 +1,13 @@
+{
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "Cut off mid-" }] },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2402,
+    "candidatesTokenCount": 512,
+    "totalTokenCount": 2914
+  }
+}

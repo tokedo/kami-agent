@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-ExampleText01",
+  "object": "chat.completion",
+  "created": 1751980800,
+  "model": "gpt-test",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "The workspace is empty." }
+    }
+  ],
+  "usage": { "prompt_tokens": 2314, "completion_tokens": 41, "total_tokens": 2355 }
+}

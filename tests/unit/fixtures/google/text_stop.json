@@ -1,0 +1,13 @@
+{
+  "candidates": [
+    {
+      "content": { "role": "model", "parts": [{ "text": "The workspace is empty." }] },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2314,
+    "candidatesTokenCount": 41,
+    "totalTokenCount": 2355
+  }
+}
