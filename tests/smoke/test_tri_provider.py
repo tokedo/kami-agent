@@ -44,10 +44,9 @@ HARNESS_TOOL = os.environ.get("KAMI_SMOKE_HARNESS_TOOL", "get_nodes")
 # tokens, and spending (MUSU/skill points), so generic money words stay out.
 D12_FORBIDDEN = [
     "budget",
-    "usd",
+    "_usd",  # cost_usd / cumulative_usd / …; bare "usd" false-positives on base62 ids
     "horizon",
     "t_max",
-    "cumulative_usd",
     "session_token_cap",
     "session_tool_cap",
     "max_consecutive_errors",
