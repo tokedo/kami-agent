@@ -1,0 +1,36 @@
+# Builds the SPEC §10 image and proves `kami-agent init` — wallet gen,
+# run-dir layout from the example manifest, and all three connectivity
+# checks (chain RPC, provider API, MCP handshake against the bundled
+# pinned harness) — passes inside the container. Manual dispatch; run
+# before tagging and on packaging changes.
+
+name: docker-smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t kami-agent .
+      - name: In-container init with live connectivity checks
+        run: |
+          mkdir -p /tmp/run
+          cp manifests/example.yaml /tmp/run/manifest.yaml
+          docker run --rm -e ANTHROPIC_API_KEY -v /tmp/run:/srv/run kami-agent \
+            kami-agent init --manifest /srv/run/manifest.yaml --run-dir /srv/run \
+            | tee /tmp/init.out
+          grep -q "chain RPC ok" /tmp/init.out
+          grep -q "provider API ok" /tmp/init.out
+          grep -q "harness ok (kamigotchi-executor" /tmp/init.out
+          test -f /tmp/run/prompts/system.txt
+          test -f /tmp/run/config.yaml
+      - name: In-container status
+        run: |
+          docker run --rm -v /tmp/run:/srv/run kami-agent | tee /tmp/status.out
+          grep -q '"run_status": "active"' /tmp/status.out
