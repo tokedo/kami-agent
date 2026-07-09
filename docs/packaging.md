@@ -38,6 +38,7 @@ firewall allows outbound traffic ONLY to:
 | the run's model provider API — `api.anthropic.com`, `api.openai.com`, or `generativelanguage.googleapis.com` | the only per-run variable |
 | the chain RPC host (manifest `chain_rpc_url`) | harness reads/writes world state |
 | `api.kamibots.xyz` | the harness's game API |
+| `api.prod.kamigotchi.io` | Kamiden indexer + Kamigaze snapshot (market/order-book reads, KWOB bootstrap) |
 
 Everything else — including the other two providers — is denied. DNS for
 the allowlisted hosts is permitted; nothing agent-visible discloses the

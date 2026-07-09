@@ -1,10 +1,10 @@
 {
   "harness": {
     "name": "kamigotchi-executor",
-    "version": "1.0.0",
-    "sha": "352da9b"
+    "version": "1.1.0",
+    "sha": "7b0319f"
   },
-  "tools_hash": "sha256:687ed31ff3db9217f012db529a7f830afe1202aa2907943f1b7f63dd59713bae",
+  "tools_hash": "sha256:a5de304bb7866c6e51637b69a4c195ee7ba4de29131d144f2e2604ca1533f565",
   "tools": [
     {
       "name": "list_accounts",
@@ -156,6 +156,21 @@
           }
         },
         "title": "get_all_strategiesArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_all_strategy_statuses",
+      "description": "Live container status for every Kamibots strategy on this account.\n\nQueries the Kamibots container-status endpoint, which reports the\nactual running containers — including ones absent from the\nget_all_strategies database listing.\n\nArgs:\n    account: Account label.\n",
+      "input_schema": {
+        "properties": {
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "title": "get_all_strategy_statusesArguments",
         "type": "object"
       }
     },
@@ -814,6 +829,32 @@
       }
     },
     {
+      "name": "feed_level_allocate_batch",
+      "description": "Per kami: FEED consumable items, then LEVEL to a target, then ALLOCATE skills.\n\nRuns the three phases as one server-side loop per kami, in FEED →\nLEVEL → ALLOCATE order (feeding lands XP before the level transactions\nconsume it). Every use/level/skill upgrade is its own transaction (no\non-chain batching), sent sequentially with nonce-retry. Kamis must be\nRESTING.\n\nEach target dict:\n    {\"kami_id\": int,\n     \"feed_item_id\": int   (optional; consumable to use on the kami),\n     \"feed_count\": int     (optional; how many feed_item_id to use),\n     \"target_level\": int   (optional),\n     \"skill_plan\": [{\"skill_index\": int, \"points\": int}, ...] (optional)}\n\nFailures are captured per kami: an error is recorded in that kami's\nresult row and its remaining phases are skipped (a failed feed does not\nlevel into missing XP); the loop continues with the next kami. The\nlevel phase re-reads the live level and stops early if a level\ntransaction reverts. The server-side loop keeps running even if the\nMCP client call times out; completed work is still applied on-chain.\n\nArgs:\n    targets: List of per-kami target dicts (see above).\n    account: Account label.\n\nReturns:\n    {count, ok, results: [{kami_id, fed?, leveled?, allocated?, error?}]}\n",
+      "input_schema": {
+        "properties": {
+          "targets": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Targets",
+            "type": "array"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "targets"
+        ],
+        "title": "feed_level_allocate_batchArguments",
+        "type": "object"
+      }
+    },
+    {
       "name": "use_item_batch",
       "description": "Use the same item on a kami multiple times. Executes sequentially.\n\nWorks for any consumable: food (HP), XP potions, buff potions, etc.\nRetries on transient RPC errors.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    item_id: Item ID (e.g. 11411 for Fortified XP Potion, 11302 for Burger).\n    count: Number of times to use the item.\n    account: Account label.\n",
       "input_schema": {
@@ -927,6 +968,72 @@
       }
     },
     {
+      "name": "equip_all_batch",
+      "description": "Equip an inventory item to many kamis (server-side loop, dry-run gated).\n\nEach entry is {\"kami_id\": int, \"item_index\": int}. Per entry: an\neth_call dry-run of system.kami.equip from the operator — if it would\nrevert (Kami_Pet_Slot already full, item not in inventory, kami not\nRESTING) the entry is SKIPPED with the revert reason and no transaction\nis sent; otherwise the equip is submitted with nonce-retry. The pet\nslot must be empty first (unequip_all_batch clears occupied slots).\nKamis must be RESTING.\n\nOne item per kami (Kami_Pet_Slot is the only equipment slot). Duplicate\nkami_ids are de-duplicated; a delay_seconds pause is inserted between\ncycles. The server-side loop keeps running even if the MCP client call\ntimes out.\n\nArgs:\n    equips: List of {\"kami_id\": int, \"item_index\": int} dicts.\n    account: Account label.\n    delay_seconds: Pause between cycles (default 2.0; 0 disables).\n\nReturns:\n    {account, requested, equipped, skipped, errors,\n     results: [{kami_id, item_index, status, tx_hash?/reason?}]}.\n    Items are equipped from the account inventory into the\n    Kami_Pet_Slot.\n",
+      "input_schema": {
+        "properties": {
+          "equips": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Equips",
+            "type": "array"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          },
+          "delay_seconds": {
+            "default": 2.0,
+            "title": "Delay Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "equips"
+        ],
+        "title": "equip_all_batchArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "unequip_all_batch",
+      "description": "Unequip a slot from many kamis (server-side loop, dry-run gated).\n\nPer kami: an eth_call dry-run of system.kami.unequip(kamiID, slot_type)\n— if the slot is EMPTY the kami is SKIPPED and no transaction is sent;\notherwise the unequip is submitted with nonce-retry. The freed item\nreturns to the account inventory. Kamis must be RESTING. Duplicate\nkami_ids are de-duplicated; a delay_seconds pause is inserted between\ncycles. The server-side loop keeps running even if the MCP client call\ntimes out.\n\nKami_Pet_Slot is currently the only equipment slot in the game, so the\ndefault slot_type unequips all equipment.\n\nArgs:\n    kami_ids: Kami token indices to unequip.\n    slot_type: Equipment slot name (default \"Kami_Pet_Slot\").\n    account: Account label.\n    delay_seconds: Pause between cycles (default 2.0; 0 disables).\n\nReturns:\n    {account, slot_type, requested, unequipped, skipped_empty, errors,\n     results: [{kami_id, status, tx_hash?/reason?}]}\n",
+      "input_schema": {
+        "properties": {
+          "kami_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Kami Ids",
+            "type": "array"
+          },
+          "slot_type": {
+            "default": "Kami_Pet_Slot",
+            "title": "Slot Type",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          },
+          "delay_seconds": {
+            "default": 2.0,
+            "title": "Delay Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "kami_ids"
+        ],
+        "title": "unequip_all_batchArguments",
+        "type": "object"
+      }
+    },
+    {
       "name": "list_kami",
       "description": "List a Kami for sale on KamiSwap. Kami must be RESTING and not soulbound.\n\nThe Kami stays in your wallet but enters LISTED state (can't harvest/move).\nUses the operator wallet.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    price_eth: Listing price as a decimal string in ETH (e.g. \"0.1\").\n    expiry: Expiration unix timestamp. 0 = no expiration.\n    account: Account label.\n",
       "input_schema": {
@@ -959,6 +1066,96 @@
       }
     },
     {
+      "name": "get_kami_market_listings",
+      "description": "List active KamiSwap listings (kamis offered for sale in ETH).\n\nReads from the Kamiden gRPC indexer (public, no auth). Returns each\nlisting's kami_index, price (ETH and wei), seller account entity ID,\non-chain order ID, expiry, and creation timestamp. Already-purchased\nlistings are always excluded.\n\nArgs:\n    size: Max listings to request from the indexer (server caps).\n    include_expired: If False, drops entries whose expiry has passed.\n    max_price_eth: Decimal ETH string (e.g. \"0.05\"); drops listings\n        priced above it. Empty string = no price cap.\n    sort: \"price\" (cheapest first), \"timestamp\" (newest first), or\n        \"kami\" (by kami index).\n\nReturns:\n    {count, listings: [{kami_index, price_eth, price_wei, order_id_hex,\n     seller_account_id, expiry, created_at}]}\n",
+      "input_schema": {
+        "properties": {
+          "size": {
+            "default": 200,
+            "title": "Size",
+            "type": "integer"
+          },
+          "include_expired": {
+            "default": false,
+            "title": "Include Expired",
+            "type": "boolean"
+          },
+          "max_price_eth": {
+            "default": "",
+            "title": "Max Price Eth",
+            "type": "string"
+          },
+          "sort": {
+            "default": "price",
+            "enum": [
+              "price",
+              "timestamp",
+              "kami"
+            ],
+            "title": "Sort",
+            "type": "string"
+          }
+        },
+        "title": "get_kami_market_listingsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "buy_kami",
+      "description": "Buy one or more listed kamis on KamiSwap with ETH. Owner wallet.\n\nResolves each kami's active listing via the Kamiden indexer, sums the\nlive listing prices, and sends a single batch purchase transaction\ncarrying exactly that total as its value. The batch is all-or-nothing:\nif any listing fails (expired, already sold), the whole transaction\nreverts. Bought kamis join this account's roster and enter a 1-hour\npurchase cooldown.\n\nArgs:\n    kami_ids: Kami token indices to buy (e.g. [1116, 428]). A single\n        kami is a 1-element list.\n    max_total_eth: Decimal ETH string (e.g. \"0.012\"). The call aborts\n        BEFORE sending if the live sum of listing prices exceeds this,\n        so a listing repriced between browsing and buying cannot raise\n        the amount spent.\n    account: Account label; pays with this account's owner wallet.\n\nReturns the tx result (tx_hash, status, gas_used) plus per-kami\npurchase details and the ETH total.\n",
+      "input_schema": {
+        "properties": {
+          "kami_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Kami Ids",
+            "type": "array"
+          },
+          "max_total_eth": {
+            "title": "Max Total Eth",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kami_ids",
+          "max_total_eth"
+        ],
+        "title": "buy_kamiArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "cancel_kami_listing",
+      "description": "Cancel this account's KamiSwap listing(s). Operator wallet.\n\nReturns each kami from LISTED back to RESTING. The cancel system takes\none order ID per transaction, so multiple kami_ids run as a server-side\nloop (one tx each, continue-on-error; per-kami status is reported in\nthe result). Order IDs are resolved via the Kamiden indexer; only\nlistings made by this account are matched. Expired listings can be\ncancelled too — cancelling is what frees a kami stuck in LISTED after\nits listing expires.\n\nArgs:\n    kami_ids: Kami token indices whose listings to cancel.\n    account: Account label (must be the seller).\n\nReturns:\n    {account, cancelled, failed, results: [{kami_index, listing_id,\n     price_eth, status, tx_hash?, error?}]}\n",
+      "input_schema": {
+        "properties": {
+          "kami_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Kami Ids",
+            "type": "array"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kami_ids"
+        ],
+        "title": "cancel_kami_listingArguments",
+        "type": "object"
+      }
+    },
+    {
       "name": "take_trade",
       "description": "Take (execute) a pending trade as the taker. Owner wallet.\n\nPays the maker's buy items from your inventory and escrows them; the\ntrade moves to EXECUTED status until the maker calls complete().\n\nTo buy items the maker is selling for MUSU (Q29 \"Buy at Marketplace\"),\npass a trade where buy_item=1 (MUSU). Discover candidate trade IDs via\n`list_open_sell_offers`.\n\nArgs:\n    trade_id: Trade entity ID (decimal or hex string starting with 0x).\n    account: Account label.\n",
       "input_schema": {
@@ -982,7 +1179,7 @@
     },
     {
       "name": "list_open_sell_offers",
-      "description": "Discover open sell offers from OTHER players (taker = buyer side).\n\nThe Kamiden indexer's GetOpenOffers requires a maker account filter — there\nis no global \"all offers\" endpoint. We work around this by seeding the search\nwith counterparties from `seed_account`'s historical trades, then querying\neach one's open offers. Returns offers where MAKER sells items for MUSU\n(i.e., where TAKER is the buyer), sorted cheapest-first by total MUSU cost.\n\nEach returned `trade_id` is the argument `take_trade()` expects.\n\nDiscovery is bounded by the seed account's trade history: counterparties\nabsent from that history are not surfaced.\n\nArgs:\n    seed_account: Account label whose trade history seeds the search.\n    max_offers: Cap the number of offers returned.\n",
+      "description": "Discover open sell offers from OTHER players (taker = buyer side).\n\nThe Kamiden indexer's GetOpenOffers requires a maker account filter — there\nis no global \"all offers\" endpoint. We work around this by seeding the search\nwith counterparties from `seed_account`'s historical trades, then querying\neach one's open offers. Returns offers where MAKER sells items for MUSU\n(i.e., where TAKER is the buyer), sorted cheapest-first by total MUSU cost.\n\nEach returned `trade_id` is the argument `take_trade()` expects.\n\nDiscovery is bounded by the seed account's trade history: counterparties\nabsent from that history are not surfaced. get_item_orderbook reads the\ncomplete per-item book directly from chain state.\n\nArgs:\n    seed_account: Account label whose trade history seeds the search.\n    max_offers: Cap the number of offers returned.\n",
       "input_schema": {
         "properties": {
           "seed_account": {
@@ -1002,7 +1199,7 @@
     },
     {
       "name": "get_account_trades",
-      "description": "Show open and recently executed trades for this account.\n\nReturns item names, quantities, MUSU amounts, unit prices, and status\nfor every active trade listing. Uses the Kamiden indexer for rich data\nand on-chain dry-runs to detect EXECUTED trades ready for completion.\n\nArgs:\n    account: Account label.\n",
+      "description": "Show this account's open trades (maker side) with exact status.\n\nReads trade entities directly from chain state via the indexed\nIDOwnsTrade reverse mapping, so the list is ground truth: PENDING\ntrades are cancellable (cancel_trade), EXECUTED trades have been\ntaken and are ready to finalize (complete_trade). Side is from the\nmaker's perspective: SELL = items offered for MUSU, BUY = MUSU\noffered for items.\n\nArgs:\n    account: Account label.\n\nReturns:\n    {account, pending, executed, total_open, trades: [{trade_id_hex,\n     status, action, summary, item_name, item_index, item_amount,\n     musu_amount, unit_price, side}], pending_summary?,\n     executed_trades?}\n",
       "input_schema": {
         "properties": {
           "account": {
@@ -1012,6 +1209,111 @@
           }
         },
         "title": "get_account_tradesArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_item_orderbook",
+      "description": "Order book for one item — every open trade, all makers. Read-only.\n\nReplicates the in-game World Order Book view by reading trade entities\ndirectly from chain state (event-log discovery plus batched component\nreads). Complete: unlike list_open_sell_offers, it sees every open\ntrade regardless of maker. The first call in a server session scans\nchain history (~15-30s); later calls are incremental. Requires the\none-time trade-ID bootstrap (executor/kwob_bootstrap.py, see SETUP.md);\nwithout it the call raises instead of returning partial data.\n\nReturned from the taker's perspective:\n  asks — makers SELLING this item for MUSU, cheapest first. Taking one\n         (take_trade) pays MUSU and receives the items.\n  bids — makers BUYING this item with MUSU, highest price first.\n         Taking one gives the items and receives MUSU (minus trade tax).\n\nOrders made by any roster account carry an \"own\" tag with the account\nlabel; the contract rejects taking your own trade.\n\nArgs:\n    item_index: Item index (e.g. 1004). MUSU (index 1) is not allowed —\n        it is the quote currency.\n    side: \"buy\" (asks only), \"sell\" (bids only), or \"both\".\n\nReturns:\n    {item_index, item_name, open_trades_all_items, skipped,\n     asks?/best_ask?, bids?/best_bid?} where each order is\n    {trade_id, qty, musu_total, unit_price, maker_account_id, own?}.\n",
+      "input_schema": {
+        "properties": {
+          "item_index": {
+            "title": "Item Index",
+            "type": "integer"
+          },
+          "side": {
+            "default": "both",
+            "enum": [
+              "buy",
+              "sell",
+              "both"
+            ],
+            "title": "Side",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_index"
+        ],
+        "title": "get_item_orderbookArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "transfer_kami",
+      "description": "Transfer in-world kami(s) to another account via system.kami.send.\n\nA purely in-game operator-to-operator transfer: the kamis stay staked\nand playable; no NFT transfer or marketplace sale is involved. The\nrecipient is addressed by OPERATOR wallet — either resolved from a\nroster account label (to_account) or given directly as a 0x address\n(to_address); exactly one of the two must be set.\n\nConstraints (from system.kami.send):\n  - 1..9 kamis per transaction, no duplicates.\n  - Each kami must be owned by the source account and RESTING or\n    LISTED (an active listing is auto-cancelled by the send);\n    HARVESTING or DEAD reverts.\n  - Send-to-self reverts.\n\nEach kami's state and ownership are pre-checked on-chain, then the\nwhole batch is dry-run via eth_call. Nothing is submitted unless the\ndry-run succeeds, so a doomed transfer spends no transaction.\n\nArgs:\n    kami_ids: Kami token indices to send (e.g. [10021]). 1..9 entries.\n    to_account: Destination roster account label.\n    to_address: Destination operator address (0x...); alternative to\n        to_account.\n    account: Source account label.\n\nReturns the tx result (tx_hash, status, gas_used) plus destination\nand per-kami pre-check details.\n",
+      "input_schema": {
+        "properties": {
+          "kami_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Kami Ids",
+            "type": "array"
+          },
+          "to_account": {
+            "default": "",
+            "title": "To Account",
+            "type": "string"
+          },
+          "to_address": {
+            "default": "",
+            "title": "To Address",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kami_ids"
+        ],
+        "title": "transfer_kamiArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "transfer_items",
+      "description": "Transfer in-world items to another account via system.item.transfer.\n\nMoves items from the source account's inventory to the destination\naccount's inventory. Signed by the source OWNER wallet. The recipient\nis addressed by account entity ID — the uint256 of their OWNER wallet\naddress — either resolved from a roster account label (to_account) or\ngiven directly as a 0x owner address (to_address); exactly one of the\ntwo must be set. The destination must be a registered in-game account.\n\nConstraints (from system.item.transfer):\n  - 1..8 DISTINCT item types per transaction; item_indices and amounts\n    are parallel arrays, all amounts > 0.\n  - Fee: 15 MUSU per item TYPE regardless of amount, deducted from the\n    source inventory (e.g. transferring 3 item types costs 45 MUSU).\n\nThe whole transfer is dry-run via eth_call before submitting; nothing\nis sent unless the dry-run succeeds, so a doomed transfer (insufficient\nbalance, unregistered destination) spends no transaction.\n\nArgs:\n    item_indices: Item indices to send (e.g. [30004, 30026]). 1..8\n        distinct entries.\n    amounts: Quantities, parallel to item_indices (e.g. [1, 7]). All > 0.\n    to_account: Destination roster account label.\n    to_address: Destination owner address (0x...); alternative to\n        to_account.\n    account: Source account label.\n\nReturns the tx result (tx_hash, status, gas_used) plus destination,\nitem, and fee details.\n",
+      "input_schema": {
+        "properties": {
+          "item_indices": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Item Indices",
+            "type": "array"
+          },
+          "amounts": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Amounts",
+            "type": "array"
+          },
+          "to_account": {
+            "default": "",
+            "title": "To Account",
+            "type": "string"
+          },
+          "to_address": {
+            "default": "",
+            "title": "To Address",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_indices",
+          "amounts"
+        ],
+        "title": "transfer_itemsArguments",
         "type": "object"
       }
     },
@@ -1361,6 +1663,43 @@
       }
     },
     {
+      "name": "speed_craft_batch",
+      "description": "Craft a stamina-gated recipe N times, restoring stamina between crafts.\n\nAccount stamina caps at 100 and regenerates ~1/min, so a recipe costing\nmore than 50 stamina cannot be crafted back-to-back naturally, and a\nsingle craft_item(amount=N) for N>1 needs N×cost ≤ 100 or it reverts.\nThis tool interleaves, per cycle:\n    1. use ONE stamina_item_id (account stamina restore) — its own tx\n    2. craft ONE unit of recipe_index                     — its own tx\nThere is no on-chain batching; transactions go out sequentially with\nnonce-retry. Consumes `count` stamina items plus `count`× the recipe\ninputs from the account inventory.\n\nStop-on-error: if a stamina-use or craft transaction errors or reverts,\nthe loop halts and returns partial progress. The server-side loop keeps\nrunning even if the MCP client call times out.\n\nArgs:\n    recipe_index: Recipe to craft (see catalogs/recipes.csv).\n    count: Number of crafts (one stamina item consumed per craft).\n    stamina_item_id: Account stamina-restore item index (default 21205,\n        +80 stamina; see catalogs/items.csv for alternatives).\n    account: Account label.\n    delay_seconds: Pause between cycles (default 0).\n\nReturns:\n    {account, recipe_index, stamina_item_id, requested, crafted,\n     stamina_used, last_error, success}\n",
+      "input_schema": {
+        "properties": {
+          "recipe_index": {
+            "title": "Recipe Index",
+            "type": "integer"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "stamina_item_id": {
+            "default": 21205,
+            "title": "Stamina Item Id",
+            "type": "integer"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          },
+          "delay_seconds": {
+            "default": 0.0,
+            "title": "Delay Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "recipe_index",
+          "count"
+        ],
+        "title": "speed_craft_batchArguments",
+        "type": "object"
+      }
+    },
+    {
       "name": "get_scavenge_points",
       "description": "Check accumulated scavenge points + claimable tiers for a node.\n\nReads the Value component on the scavenge instance entity (per-account\npoints) and the registry entity (per-node tier cost). Returns 0 points\nif the account has never harvested at this node (instance not created).\n\nArgs:\n    node_index: Harvest node index (e.g., 16 for Techno Temple).\n    account: Account label.\n",
       "input_schema": {
@@ -1470,6 +1809,83 @@
           "node_index"
         ],
         "title": "scavenge_claim_and_revealArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "sacrifice_kami",
+      "description": "PERMANENTLY sacrifice a kami at the Temple of the Wheel (room 19).\n\nBurns the kami forever in exchange for an equipment item (\"microkami\").\nIRREVERSIBLE — the kami is destroyed. This single call is the whole\naction: it commits the sacrifice, and the item reveal fires\nautomatically on-chain a few blocks later; the equipment lands in the\naccount inventory. Operator wallet.\n\nPreconditions (enforced on-chain; verified here by an eth_call dry-run\nbefore any transaction is sent, so a doomed sacrifice spends nothing):\n  - The account's operator must be located in room 19 (Temple of the\n    Wheel).\n  - The kami must be owned by `account` and RESTING.\n\nArgs:\n    kami_id: Kami token index to sacrifice (e.g. 16403).\n    account: Account label.\n\nReturns the tx result (tx_hash, status, gas_used) plus the kami's\npre-send state and the commit entity IDs extracted from the receipt\n(input for sacrifice_reveal if the auto-reveal ever fails).\n",
+      "input_schema": {
+        "properties": {
+          "kami_id": {
+            "title": "Kami Id",
+            "type": "integer"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kami_id"
+        ],
+        "title": "sacrifice_kamiArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "sacrifice_kami_batch",
+      "description": "PERMANENTLY sacrifice many kamis at the Temple of the Wheel (room 19).\n\nIRREVERSIBLE — each sacrificed kami is destroyed. Server-side\nsequential loop of single-kami sacrifice commits (there is no on-chain\nbatch commit). Per kami: an eth_call dry-run gates the commit — a\ndoomed one is skipped with its revert reason and no transaction —\nthen the commit is submitted with nonce-retry. Each kami's equipment\nreveal fires automatically on-chain; the items land in the account\ninventory. Duplicate kami_ids are de-duplicated.\n\nA delay_seconds pause is inserted between cycles. The server-side loop\nkeeps running even if the MCP client call times out.\n\nPreconditions per kami (enforced on-chain, checked by the dry-run):\noperator in room 19, kami owned by `account`, kami RESTING.\n\nArgs:\n    kami_ids: Kami token indices to sacrifice.\n    account: Account label.\n    delay_seconds: Pause between cycles (default 3.0; 0 disables).\n\nReturns:\n    {account, requested, submitted, skipped,\n     results: [{kami_id, status, tx_hash?/reason?, block?}]}\n",
+      "input_schema": {
+        "properties": {
+          "kami_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Kami Ids",
+            "type": "array"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          },
+          "delay_seconds": {
+            "default": 3.0,
+            "title": "Delay Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "kami_ids"
+        ],
+        "title": "sacrifice_kami_batchArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "sacrifice_reveal",
+      "description": "Manually reveal sacrifice commit(s) — recovery path only.\n\nThe sacrifice reveal fires automatically on-chain after sacrifice_kami;\nthis tool exists to recover a commit whose auto-reveal failed to fire.\nTakes the commit_ids returned by sacrifice_kami. The reveal must run in\na later block than the commit. Operator wallet.\n\nArgs:\n    commit_ids: Commit entity IDs from sacrifice_kami.\n    account: Account label.\n\nReturns the batch tx result (tx_hash, status, gas_used) plus the\ncommit IDs revealed.\n",
+      "input_schema": {
+        "properties": {
+          "commit_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Commit Ids",
+            "type": "array"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit_ids"
+        ],
+        "title": "sacrifice_revealArguments",
         "type": "object"
       }
     }
