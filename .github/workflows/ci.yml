@@ -42,9 +42,10 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      # Stopgap while the Gemini key is free-tier: flash-lite's tiny daily
-      # bucket exhausts under CI; 2.5-flash has its own (and exercises the
-      # D16 thinking-token fold live). Remove once billing is enabled.
+      # Deliberate (not a quota stopgap; the key is billed now):
+      # 2.5-flash is a thinking model, so every CI run exercises the D16
+      # reasoning-token fold and the D22 thought-signature round-trip live,
+      # which flash-lite would not.
       SMOKE_GEMINI_MODEL: gemini-2.5-flash
     steps:
       - uses: actions/checkout@v4
