@@ -31,11 +31,21 @@ jobs:
   # running would fail for the wrong reason.
   smoke:
     runs-on: ubuntu-latest
+    # One live-provider run at a time repo-wide: concurrent runs contend for
+    # the same per-minute provider quotas (observed: parallel main pushes
+    # flaking gemini free tier).
+    concurrency:
+      group: live-provider-smoke
+      cancel-in-progress: false
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # Stopgap while the Gemini key is free-tier: flash-lite's tiny daily
+      # bucket exhausts under CI; 2.5-flash has its own (and exercises the
+      # D16 thinking-token fold live). Remove once billing is enabled.
+      SMOKE_GEMINI_MODEL: gemini-2.5-flash
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
