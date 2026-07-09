@@ -1,8 +1,10 @@
-# kami-agent — Reference Scaffold Specification (v1)
+# kami-agent — Reference Scaffold Specification (v1.1)
 
-Status: **v1 — approved for implementation** (supersedes v0 draft;
-§13 open decisions resolved as D12–D15, engineering semantics fixed as
-D16–D19 — see kami-lab `DECISIONS.md`)
+Status: **v1.1 — approved for implementation** (v1 superseded the v0
+draft; §13 open decisions resolved as D12–D15, engineering semantics
+fixed as D16–D19; v1.1 amends §11 per D21 — CI smoke split into a
+per-PR recorded-surface gate and a scheduled live-harness tier — see
+kami-lab `DECISIONS.md`)
 Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
 Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
 documentation), `kami-lab` (experiment orchestration — private).
@@ -357,21 +359,33 @@ Notes:
 
 ## 11. Smoke test (CI gate)
 
-Two tiers, both required:
+Three tiers (D21):
 
 1. **Adapter unit tier (no network):** recorded provider fixtures exercise
    each adapter's normalization — message mapping, parallel-intent
    extraction, stop-reason mapping, token-accounting invariant (§5.2,
    including the Gemini reasoning-token fold), retry classification.
-2. **Tri-provider live tier:** one canned session per adapter against each
-   provider's cheapest tier, live RPC read-only, tiny caps: read status →
-   list files → read a `reference/` file (slice) → call one read-only harness
-   tool → write one workspace file → set next wake → end session. Asserts:
-   all tool calls parsed natively, usage accounting non-zero, telemetry
-   events validate against the §8 schema, no budget/horizon strings in any
-   agent-visible message (D12 leak check).
+2. **Tri-provider recorded-surface tier (per-PR gate):** one canned session
+   per adapter against each provider's cheapest tier — real provider APIs;
+   fake harness serving the *recorded* tool surface of the pinned
+   kami-harness (committed fixture plus a consistency test guarding pin
+   bumps); simulated tool execution; tiny caps: read status → list files →
+   read a `reference/` file (slice) → call one read-only harness tool →
+   write one workspace file → set next wake → end session. Asserts: all
+   tool calls parsed natively, usage accounting non-zero, telemetry events
+   validate against the §8 schema, no budget/horizon strings in any
+   agent-visible message (D12 leak check). Fork PRs skip cleanly (repo
+   secrets are not exposed to forks).
+3. **Live-harness tier (scheduled/manual, never gates PRs):** the same
+   canned session against a real kami-harness checkout at the pinned SHA
+   with live read-only RPC. Runs on manual dispatch, on a weekly schedule,
+   and on any harness pin bump; operator-run with an authenticated roster
+   before tagging v0 and before the $10 smoke handoff. Non-gating by
+   design: chain-RPC flakiness must not block unrelated PRs, and the
+   pinned harness cannot drift under CI.
 
-Runs on every PR to kami-agent.
+Tiers 1–2 run on every PR to kami-agent. The $10 smoke run (kami-lab
+experiment 001, DESIGN §6) remains the end-to-end acceptance test.
 
 ## 12. Non-goals for v0
 
