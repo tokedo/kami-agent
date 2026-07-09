@@ -31,6 +31,12 @@ jobs:
   # running would fail for the wrong reason.
   smoke:
     runs-on: ubuntu-latest
+    # One live-provider run at a time repo-wide: concurrent runs contend for
+    # the same per-minute provider quotas (observed: parallel main pushes
+    # flaking gemini free tier).
+    concurrency:
+      group: live-provider-smoke
+      cancel-in-progress: false
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
