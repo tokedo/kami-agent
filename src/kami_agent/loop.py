@@ -168,6 +168,9 @@ class AgentLoop:
                 AssistantMessage(
                     text="\n\n".join(response.text_blocks) if response.text_blocks else None,
                     tool_calls=response.tool_calls,
+                    # D22: copied verbatim for same-session replay by the
+                    # emitting adapter; the loop never inspects it.
+                    provider_state=response.provider_state,
                 )
             )
             # Context guard (D17): post-call, silent; the response's intents

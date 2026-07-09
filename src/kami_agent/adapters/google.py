@@ -31,6 +31,7 @@ from kami_agent.adapters.base import (
     AdapterResponse,
     AssistantMessage,
     Message,
+    ProviderState,
     SamplingParams,
     StopReason,
     ToolCall,
@@ -39,6 +40,8 @@ from kami_agent.adapters.base import (
     Usage,
     UserMessage,
 )
+
+PROVIDER = "google"
 
 _REFUSAL_FINISHES = {
     "SAFETY",
@@ -108,11 +111,20 @@ def _to_wire_contents(messages: list[Message]) -> list[genai_types.Content]:
                 genai_types.Content(role="user", parts=[genai_types.Part(text=message.text)])
             )
         elif isinstance(message, AssistantMessage):
+            # The id→name map is needed for function responses regardless of
+            # which replay path builds the model turn.
+            for call in message.tool_calls:
+                call_names[call.id] = call.name
+            state = message.provider_state
+            if state is not None and state.provider == PROVIDER:
+                # D22 replay: the original response parts, thought
+                # signatures included, passed back unchanged.
+                contents.append(genai_types.Content(role="model", parts=list(state.payload)))
+                continue
             parts: list[genai_types.Part] = []
             if message.text:
                 parts.append(genai_types.Part(text=message.text))
             for call in message.tool_calls:
-                call_names[call.id] = call.name
                 parts.append(
                     genai_types.Part(
                         function_call=genai_types.FunctionCall(name=call.name, args=call.args)
@@ -161,6 +173,12 @@ def _normalize(response: Any) -> AdapterResponse:
         minted = call.id or f"call_{len(tool_calls) + 1}"
         tool_calls.append(ToolCall(id=minted, name=call.name or "", args=dict(call.args or {})))
 
+    # D22: thought signatures ride on parts; keep the original parts for
+    # verbatim same-session replay when any are present.
+    provider_state = None
+    if any(getattr(part, "thought_signature", None) for part in parts):
+        provider_state = ProviderState(provider=PROVIDER, payload=tuple(parts))
+
     usage = response.usage_metadata
     thoughts = getattr(usage, "thoughts_token_count", None)
     candidates_tokens = (usage.candidates_token_count or 0) if usage else 0
@@ -168,6 +186,7 @@ def _normalize(response: Any) -> AdapterResponse:
         text_blocks=text_blocks,
         tool_calls=tuple(tool_calls),
         stop_reason=_normalize_stop_reason(candidate.finish_reason, bool(tool_calls)),
+        provider_state=provider_state,
         usage=Usage(
             input_tokens=(usage.prompt_token_count or 0) if usage else 0,
             # The D16 fold: Gemini reports thoughts outside the candidate

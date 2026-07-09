@@ -1,10 +1,11 @@
-# kami-agent — Reference Scaffold Specification (v1.1)
+# kami-agent — Reference Scaffold Specification (v1.2)
 
-Status: **v1.1 — approved for implementation** (v1 superseded the v0
+Status: **v1.2 — approved for implementation** (v1 superseded the v0
 draft; §13 open decisions resolved as D12–D15, engineering semantics
-fixed as D16–D19; v1.1 amends §11 per D21 — CI smoke split into a
-per-PR recorded-surface gate and a scheduled live-harness tier — see
-kami-lab `DECISIONS.md`)
+fixed as D16–D19; v1.1 amended §11 per D21 — CI smoke split into a
+per-PR recorded-surface gate and a scheduled live-harness tier; v1.2
+amends §5.1 per D22 — opaque provider reasoning state on assistant
+messages — see kami-lab `DECISIONS.md`)
 Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
 Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
 documentation), `kami-lab` (experiment orchestration — private).
@@ -149,10 +150,19 @@ class ModelAdapter(Protocol):
 
 - `Message` is one of:
   - `{role: "user", text}`
-  - `{role: "assistant", text?, tool_calls?: [{id, name, args}]}`
+  - `{role: "assistant", text?, tool_calls?: [{id, name, args}], provider_state?}`
   - `{role: "tool_result", tool_call_id, content, is_error: bool}`
   The adapter maps these to the provider's wire format (system prompt as a
   separate param where native; tool-result pairing per provider convention).
+- **Provider reasoning state (D22):** `provider_state` is an opaque,
+  adapter-owned payload (e.g. Anthropic signed thinking blocks, Gemini
+  thought signatures) set by the emitting adapter on the assistant message
+  and replayed by that same adapter on subsequent calls **within the same
+  session**. The loop never inspects it; it never crosses sessions (D8)
+  and never reaches telemetry; transcripts record messages as sent.
+  Adapters for providers with no replayable state leave it unset. An
+  adapter must tolerate `provider_state` it did not produce by ignoring it
+  (defense in depth — a run never switches adapters mid-session).
 - `ToolDef = {name, description, input_schema}` — JSON Schema authored once,
   translated per provider. Schemas restrict themselves to the feature subset
   all three providers accept (objects, scalars, arrays, enums, required; no

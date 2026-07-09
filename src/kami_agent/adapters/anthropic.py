@@ -22,6 +22,7 @@ from kami_agent.adapters.base import (
     AdapterResponse,
     AssistantMessage,
     Message,
+    ProviderState,
     SamplingParams,
     StopReason,
     ToolCall,
@@ -36,6 +37,8 @@ from kami_agent.adapters.base import (
 # Anything absent — e.g. "pause_turn" (server tools, never requested) — is
 # unmappable and raises: a silently misclassified stop reason would corrupt
 # the loop's control flow.
+PROVIDER = "anthropic"
+
 _STOP_REASONS: dict[str | None, StopReason] = {
     "end_turn": StopReason.END_TURN,
     "tool_use": StopReason.TOOL_USE,
@@ -91,6 +94,12 @@ def _to_wire_messages(messages: list[Message]) -> list[dict[str, Any]]:
         if isinstance(message, UserMessage):
             wire.append({"role": "user", "content": [{"type": "text", "text": message.text}]})
         elif isinstance(message, AssistantMessage):
+            state = message.provider_state
+            if state is not None and state.provider == PROVIDER:
+                # D22 replay: the original response content blocks (signed
+                # thinking blocks included), passed back unchanged.
+                wire.append({"role": "assistant", "content": list(state.payload)})
+                continue
             content: list[dict[str, Any]] = []
             if message.text:
                 content.append({"type": "text", "text": message.text})
@@ -141,6 +150,11 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
         for block in response.content
         if block.type == "tool_use"
     )
+    # D22: when the turn carries (signed/redacted) thinking blocks, keep the
+    # complete original content for verbatim same-session replay.
+    provider_state = None
+    if any(block.type in ("thinking", "redacted_thinking") for block in response.content):
+        provider_state = ProviderState(provider=PROVIDER, payload=tuple(response.content))
     usage = Usage(
         input_tokens=response.usage.input_tokens,
         # Anthropic's count already includes reasoning/thinking tokens (D16);
@@ -152,6 +166,7 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
         tool_calls=tool_calls,
         stop_reason=_normalize_stop_reason(response.stop_reason),
         usage=usage,
+        provider_state=provider_state,
         provider_meta=response.model_dump(mode="json"),
     )
 
