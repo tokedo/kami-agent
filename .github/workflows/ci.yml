@@ -42,6 +42,10 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # Stopgap while the Gemini key is free-tier: flash-lite's tiny daily
+      # bucket exhausts under CI; 2.5-flash has its own (and exercises the
+      # D16 thinking-token fold live). Remove once billing is enabled.
+      SMOKE_GEMINI_MODEL: gemini-2.5-flash
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
