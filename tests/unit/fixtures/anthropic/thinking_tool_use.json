@@ -1,0 +1,29 @@
+{
+  "id": "msg_01Bk6jUuPbKkiExampleThink",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-test-thinking",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "The workspace listing comes first.",
+      "signature": "EvcRsignedThinkingSignatureBase64=="
+    },
+    {
+      "type": "text",
+      "text": "Listing the workspace."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01CCC333",
+      "name": "workspace_list",
+      "input": {}
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 2600,
+    "output_tokens": 210
+  }
+}

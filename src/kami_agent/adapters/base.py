@@ -36,9 +36,25 @@ class UserMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderState:
+    """Opaque provider reasoning state on an assistant message (D22).
+
+    Set by the emitting adapter (e.g. Anthropic signed thinking blocks,
+    Gemini thought signatures) and replayed by that same adapter within
+    the same session. The loop never inspects ``payload``; it never
+    crosses sessions and never reaches telemetry. Adapters ignore state
+    they did not produce (matched on ``provider``).
+    """
+
+    provider: str
+    payload: Any
+
+
+@dataclass(frozen=True, slots=True)
 class AssistantMessage:
     text: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    provider_state: ProviderState | None = None
     role: Literal["assistant"] = "assistant"
 
 
@@ -99,12 +115,15 @@ class AdapterResponse:
     """Normalized model response (SPEC §5.1).
 
     ``provider_meta`` is logged raw and never parsed by the loop.
+    ``provider_state`` (D22) is copied verbatim onto the assistant
+    message for same-session replay by the emitting adapter.
     """
 
     text_blocks: tuple[str, ...]
     tool_calls: tuple[ToolCall, ...]
     stop_reason: StopReason
     usage: Usage
+    provider_state: ProviderState | None = None
     provider_meta: dict[str, Any] = field(default_factory=dict)
 
 

@@ -1,0 +1,23 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          { "text": "Listing the workspace." },
+          {
+            "functionCall": { "name": "workspace_list", "args": {} },
+            "thoughtSignature": "Q3RRQmFUaG91Z2h0U2lnbmF0dXJl"
+          }
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2600,
+    "candidatesTokenCount": 90,
+    "thoughtsTokenCount": 180,
+    "totalTokenCount": 2870
+  }
+}

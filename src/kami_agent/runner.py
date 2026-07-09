@@ -334,13 +334,21 @@ def _message_dict(message: Message) -> dict[str, Any]:
     if isinstance(message, UserMessage):
         return {"role": "user", "text": message.text}
     if isinstance(message, AssistantMessage):
-        return {
+        entry: dict[str, Any] = {
             "role": "assistant",
             "text": message.text,
             "tool_calls": [
                 {"id": c.id, "name": c.name, "args": c.args} for c in message.tool_calls
             ],
         }
+        if message.provider_state is not None:
+            # Transcripts record messages as sent (D22); telemetry never
+            # carries provider state.
+            entry["provider_state"] = {
+                "provider": message.provider_state.provider,
+                "payload": _jsonable(message.provider_state.payload),
+            }
+        return entry
     if isinstance(message, ToolResultMessage):
         return {
             "role": "tool_result",
@@ -349,3 +357,17 @@ def _message_dict(message: Message) -> dict[str, Any]:
             "is_error": message.is_error,
         }
     raise TypeError(f"unknown message type: {message!r}")
+
+
+def _jsonable(obj: Any) -> Any:
+    """Best-effort JSON view of an opaque payload for the transcript."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(item) for item in obj]
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json", exclude_none=True)
+    return repr(obj)
