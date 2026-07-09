@@ -20,9 +20,9 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import sys
 from dataclasses import asdict
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +42,23 @@ from kami_agent.state import load_state
 from kami_agent.supervisor import uninstall_cron
 from kami_agent.telemetry import TelemetryWriter
 
-REPO_PROMPTS = Path(__file__).resolve().parents[2] / "prompts"
-
 PROVIDERS = ("anthropic", "openai", "google")
+
+PROMPT_NAMES = ("system.txt", "kickoff.txt", "continue.txt")
+
+
+def _prompts_source() -> Any:
+    """The frozen prompt files: package data first, dev checkout fallback.
+
+    The canonical copies ship inside the wheel (kami_agent/prompts) so
+    ``init`` works under any install, including the Docker image; the
+    repo-root ``prompts/`` tree remains for the brief's layout and is
+    kept byte-identical by a unit test.
+    """
+    packaged = resources.files("kami_agent") / "prompts"
+    if (packaged / "system.txt").is_file():
+        return packaged
+    return Path(__file__).resolve().parents[2] / "prompts"
 
 
 # --- manifest ------------------------------------------------------------------
@@ -190,7 +204,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     # the image (D14) — warn, don't fail, when absent in dev.
     prompts_dir = run_dir / "prompts"
     if not prompts_dir.exists():
-        shutil.copytree(REPO_PROMPTS, prompts_dir)
+        prompts_dir.mkdir()
+        source = _prompts_source()
+        for name in PROMPT_NAMES:
+            (prompts_dir / name).write_text(
+                (source / name).read_text(encoding="utf-8"), encoding="utf-8"
+            )
     (run_dir / "workspace").mkdir(exist_ok=True)
     (run_dir / "transcripts").mkdir(exist_ok=True)
     if not (run_dir / "reference").exists():

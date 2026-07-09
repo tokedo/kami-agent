@@ -212,9 +212,44 @@ def test_canned_session(provider, run_dir):
         outcome = run_session(config, adapter, harness_factory=lambda: harness)
     finally:
         harness.close()
-    assert outcome == SESSION_RAN
 
     events = list(read_events(run_dir / "telemetry.jsonl"))
+    try:
+        _assert_canned_session(provider, model, run_dir, harness, outcome, events)
+    except AssertionError:
+        _dump_diagnostics(provider, run_dir, events)
+        raise
+
+
+def _dump_diagnostics(provider, run_dir, events):
+    """On failure, put what the model actually did into the CI log."""
+    print(f"\n--- SMOKE DIAGNOSTICS [{provider}] ---")
+    for event in events:
+        kind = event["event"]
+        if kind == "llm_call":
+            print(
+                f"llm_call stop={event['stop_reason']} in={event['input_tokens']} "
+                f"out={event['output_tokens']} retry={event['retry_count']} "
+                f"usage_unknown={event.get('usage_unknown', False)}"
+            )
+        elif kind == "tool_call":
+            print(
+                f"tool_call {event['tool']} ok={event['ok']} "
+                f"skipped={event.get('skipped', False)} err={event.get('error', '')[:120]}"
+            )
+        elif kind == "session_end":
+            print(f"session_end reason={event['reason']}")
+    transcript = run_dir / "transcripts" / "session-0001.jsonl"
+    if transcript.exists():
+        for line in transcript.read_text(encoding="utf-8").splitlines():
+            message = json.loads(line)
+            if message["role"] == "assistant":
+                calls = [c["name"] for c in message["tool_calls"]]
+                print(f"assistant calls={calls} text={(message['text'] or '')[:100]!r}")
+
+
+def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
+    assert outcome == SESSION_RAN
 
     # §11.2: telemetry events validate against the §8 schema.
     for event in events:

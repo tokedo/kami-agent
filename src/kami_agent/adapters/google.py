@@ -189,6 +189,12 @@ def _normalize_stop_reason(finish_reason: Any, has_tool_calls: bool) -> StopReas
         return StopReason.MAX_TOKENS
     if name in _REFUSAL_FINISHES:
         return StopReason.REFUSAL
+    if name == "MALFORMED_FUNCTION_CALL":
+        # A transient Gemini generation artifact: the turn carries no usable
+        # tool call. Normalized to end_turn so the loop's §5.4 path applies —
+        # frozen continuation string, counts as one error — instead of
+        # killing the session over a provider quirk.
+        return StopReason.END_TURN
     raise AdapterError(f"unmappable google finish_reason: {name!r}", retryable=False)
 
 
