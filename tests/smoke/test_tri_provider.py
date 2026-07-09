@@ -206,7 +206,9 @@ def test_canned_session(provider, run_dir):
             run_id=f"smoke-{provider}",
             model=model,
             prices=spec["prices"],
-            caps=LoopCaps(session_token_cap=150_000, session_tool_cap=12),
+            # retry_max_attempts=8: backoff must outlast a 60 s free-tier quota
+            # window (observed: gemini 429s for >31 s, the default-5 span).
+            caps=LoopCaps(session_token_cap=150_000, session_tool_cap=12, retry_max_attempts=8),
             budget_usd=5.0,
         )
         outcome = run_session(config, adapter, harness_factory=lambda: harness)
