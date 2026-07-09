@@ -996,6 +996,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "eth-account" },
     { name = "google-genai" },
+    { name = "httpx" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "openai" },
@@ -1004,7 +1005,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "hypothesis" },
     { name = "pytest" },
     { name = "ruff" },
@@ -1015,6 +1015,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.79" },
     { name = "eth-account", specifier = ">=0.11" },
     { name = "google-genai", specifier = ">=1.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.18" },
     { name = "mcp", specifier = ">=1.9" },
     { name = "openai", specifier = ">=1.60" },
@@ -1023,7 +1024,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27" },
     { name = "hypothesis", specifier = ">=6" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.8" },

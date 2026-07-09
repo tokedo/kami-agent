@@ -193,9 +193,21 @@ def test_max_tokens_and_safety_normalization():
     assert response.text_blocks == ()
 
 
-def test_unmappable_finish_reason_raises():
+def test_malformed_function_call_maps_to_continuation_path():
+    # Known transient Gemini artifact → end_turn with no tool calls, so the
+    # loop sends the frozen continuation string (§5.4) instead of dying.
     fixture = json.loads((FIXTURES / "text_stop.json").read_text())
     fixture["candidates"][0]["finishReason"] = "MALFORMED_FUNCTION_CALL"
+    fixture["candidates"][0]["content"]["parts"] = []
+    adapter, _ = make_adapter(genai_types.GenerateContentResponse.model_validate(fixture))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.stop_reason is StopReason.END_TURN
+    assert response.tool_calls == ()
+
+
+def test_unmappable_finish_reason_raises():
+    fixture = json.loads((FIXTURES / "text_stop.json").read_text())
+    fixture["candidates"][0]["finishReason"] = "OTHER"
     adapter, _ = make_adapter(genai_types.GenerateContentResponse.model_validate(fixture))
     with pytest.raises(AdapterError) as excinfo:
         adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)

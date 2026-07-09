@@ -62,6 +62,19 @@ def test_no_apparatus_or_policy_leaks(name):
         assert word not in text, f"{name} contains {word!r}"
 
 
+def test_packaged_prompts_match_repo_prompts():
+    # The wheel ships the frozen strings as package data (kami_agent/prompts)
+    # so `init` works under any install; the repo-root prompts/ tree is the
+    # brief's canonical layout. The two copies must stay byte-identical.
+    from importlib import resources
+
+    packaged = resources.files("kami_agent") / "prompts"
+    for name in ("system.txt", "kickoff.txt", "continue.txt"):
+        assert (packaged / name).read_text(encoding="utf-8") == (PROMPTS / name).read_text(
+            encoding="utf-8"
+        ), f"packaged {name} diverges from prompts/{name}"
+
+
 def test_wake_bounds_in_frozen_prompt_match_code_defaults():
     # The frozen prompt hardcodes the §9 default wake bounds. A manifest or
     # code change to wake_min/wake_max must consciously re-freeze the prompt
