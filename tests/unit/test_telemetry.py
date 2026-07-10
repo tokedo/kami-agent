@@ -3,6 +3,7 @@
 import json
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 import jsonschema
 import pytest
@@ -115,6 +116,25 @@ def writer(tmp_path):
 def test_schema_is_valid_draft_2020_12():
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator.check_schema(schema)
+
+
+def test_schema_resolves_inside_the_installed_package():
+    # The schema must load package-relative (importlib.resources), never
+    # repo-relative: under a site-packages install a repo-relative path
+    # escapes the package, and every emit — init's run_start first — crashes.
+    import kami_agent
+
+    package_dir = Path(kami_agent.__file__).resolve().parent
+    assert SCHEMA_PATH.is_file()
+    assert package_dir in SCHEMA_PATH.resolve().parents
+
+
+def test_packaged_schema_matches_repo_schema():
+    # The wheel ships the schema as package data (kami_agent/schema); the
+    # repo-root schema/ tree is the brief's canonical layout. The two copies
+    # must stay byte-identical (same rule as the frozen prompts).
+    repo_copy = Path(__file__).parents[2] / "schema" / "telemetry.json"
+    assert SCHEMA_PATH.read_bytes() == repo_copy.read_bytes()
 
 
 def test_schema_covers_exactly_the_spec_events():

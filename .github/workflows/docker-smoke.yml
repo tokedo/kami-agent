@@ -23,7 +23,10 @@ jobs:
       - name: Build image
         run: docker build -t kami-agent .
       - name: In-container init with live connectivity checks
+        # pipefail: the Actions default shell would take tee's exit code and
+        # mask an init crash whose earlier stdout still satisfies the greps.
         run: |
+          set -o pipefail
           mkdir -p /tmp/run
           cp manifests/example.yaml /tmp/run/manifest.yaml
           docker run --rm -e ANTHROPIC_API_KEY -e MAINNET_RPC_URL \
@@ -34,9 +37,13 @@ jobs:
           grep -q "mainnet RPC ok" /tmp/init.out
           grep -q "provider API ok" /tmp/init.out
           grep -q "harness ok (kamigotchi-executor" /tmp/init.out
+          # printed only after the run_start emit succeeds — asserts init
+          # reached the end, not just its connectivity checks
+          grep -q "^initialized /srv/run" /tmp/init.out
           test -f /tmp/run/prompts/system.txt
           test -f /tmp/run/config.yaml
       - name: In-container status
         run: |
+          set -o pipefail
           docker run --rm -v /tmp/run:/srv/run kami-agent | tee /tmp/status.out
           grep -q '"run_status": "active"' /tmp/status.out

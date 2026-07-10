@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
+  "title": "kami-agent telemetry event (SPEC §8)",
+  "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC §7.1); every event is flushed synchronously before the action it describes is considered complete.",
+  "oneOf": [
+    { "$ref": "#/$defs/run_start" },
+    { "$ref": "#/$defs/session_start" },
+    { "$ref": "#/$defs/llm_call" },
+    { "$ref": "#/$defs/tool_call" },
+    { "$ref": "#/$defs/workspace_write" },
+    { "$ref": "#/$defs/workspace_delete" },
+    { "$ref": "#/$defs/schedule_next" },
+    { "$ref": "#/$defs/session_end" },
+    { "$ref": "#/$defs/run_complete" }
+  ],
+  "$defs": {
+    "common": {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(\\+00:00|Z)$",
+          "description": "ISO-8601 UTC"
+        },
+        "run_id": { "type": "string" },
+        "session": { "type": "integer", "minimum": 0 },
+        "event": { "type": "string" }
+      },
+      "required": ["ts", "run_id", "session", "event"]
+    },
+    "run_start": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "run_start" },
+        "manifest_hash": { "type": "string" },
+        "model": { "type": "string" },
+        "harness_sha": { "type": "string" },
+        "agent_sha": { "type": "string" },
+        "gdd_sha": { "type": "string" },
+        "harness_tools": { "type": "array", "items": { "type": "string" } },
+        "price_table": { "type": "object" }
+      },
+      "required": [
+        "manifest_hash",
+        "model",
+        "harness_sha",
+        "agent_sha",
+        "gdd_sha",
+        "harness_tools",
+        "price_table"
+      ],
+      "unevaluatedProperties": false
+    },
+    "session_start": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "session_start" },
+        "trigger": { "enum": ["scheduled", "manual"] },
+        "budget_remaining_usd": { "type": "number" },
+        "wallclock_elapsed_s": { "type": "number", "minimum": 0 },
+        "tools_hash": { "type": "string" }
+      },
+      "required": ["trigger", "budget_remaining_usd", "wallclock_elapsed_s", "tools_hash"],
+      "unevaluatedProperties": false
+    },
+    "llm_call": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "llm_call" },
+        "model": { "type": "string" },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Includes reasoning/thinking tokens (D16)"
+        },
+        "reasoning_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Informational subset of output_tokens, when the provider reports it"
+        },
+        "cost_usd": { "type": "number", "minimum": 0 },
+        "cumulative_usd": { "type": "number", "minimum": 0 },
+        "cumulative_tokens": { "type": "integer", "minimum": 0 },
+        "latency_ms": { "type": "number", "minimum": 0 },
+        "stop_reason": {
+          "enum": ["end_turn", "tool_use", "max_tokens", "refusal", "error"],
+          "description": "SPEC §5.1 normalized enum, plus \"error\" for failed-but-logged attempts on the retry path (SPEC §5.5) where no provider stop reason exists"
+        },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "usage_unknown": {
+          "type": "boolean",
+          "description": "True when a failed-but-billed attempt's usage was unknowable; logged at cost 0 (SPEC §5.5)"
+        },
+        "continuation": {
+          "type": "boolean",
+          "description": "True when this call follows a continuation send (SPEC §5.4)"
+        }
+      },
+      "required": [
+        "model",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd",
+        "cumulative_usd",
+        "cumulative_tokens",
+        "latency_ms",
+        "stop_reason",
+        "retry_count"
+      ],
+      "unevaluatedProperties": false
+    },
+    "tool_call": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "tool_call" },
+        "tool": { "type": "string" },
+        "source": { "enum": ["harness", "scaffold"] },
+        "path": {
+          "type": "string",
+          "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC §8)"
+        },
+        "duration_ms": { "type": "number", "minimum": 0 },
+        "ok": { "type": "boolean" },
+        "error": { "type": "string" },
+        "truncated": { "type": "boolean" },
+        "original_bytes": { "type": "integer", "minimum": 0 },
+        "skipped": {
+          "type": "boolean",
+          "description": "True for intents skipped because end_session took effect earlier in the same batch (D18)"
+        },
+        "tx_hash": { "type": "string" }
+      },
+      "required": ["tool", "source", "duration_ms", "ok"],
+      "unevaluatedProperties": false
+    },
+    "workspace_write": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "workspace_write" },
+        "path": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "workspace_total_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["path", "bytes", "workspace_total_bytes"],
+      "unevaluatedProperties": false
+    },
+    "workspace_delete": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "workspace_delete" },
+        "path": { "type": "string" },
+        "workspace_total_bytes": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["path", "workspace_total_bytes"],
+      "unevaluatedProperties": false
+    },
+    "schedule_next": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "schedule_next" },
+        "source": { "enum": ["agent", "default"] },
+        "requested_min": {
+          "type": "number",
+          "description": "Agent-requested minutes, pre-clamp; absent when source is default"
+        },
+        "clamped_min": { "type": "number", "minimum": 0 },
+        "next_wake_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(\\+00:00|Z)$"
+        }
+      },
+      "required": ["source", "clamped_min", "next_wake_at"],
+      "unevaluatedProperties": false
+    },
+    "session_end": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "session_end" },
+        "reason": { "enum": ["agent", "token_cap", "tool_cap", "errors", "crash"] },
+        "llm_calls": { "type": "integer", "minimum": 0 },
+        "tool_calls": { "type": "integer", "minimum": 0 },
+        "session_cost_usd": { "type": "number", "minimum": 0 },
+        "session_tokens": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["reason", "llm_calls", "tool_calls", "session_cost_usd", "session_tokens"],
+      "unevaluatedProperties": false
+    },
+    "run_complete": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "run_complete" },
+        "reason": { "enum": ["budget", "t_max", "manual"] },
+        "totals": {
+          "type": "object",
+          "properties": {
+            "sessions": { "type": "integer", "minimum": 0 },
+            "llm_calls": { "type": "integer", "minimum": 0 },
+            "cumulative_usd": { "type": "number", "minimum": 0 },
+            "cumulative_tokens": { "type": "integer", "minimum": 0 },
+            "overspend_usd": { "type": "number", "minimum": 0 }
+          },
+          "required": [
+            "sessions",
+            "llm_calls",
+            "cumulative_usd",
+            "cumulative_tokens",
+            "overspend_usd"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": ["reason", "totals"],
+      "unevaluatedProperties": false
+    }
+  }
+}

@@ -2,7 +2,8 @@
 
 telemetry.jsonl is the source of truth for all accounting (SPEC §7.1);
 state.json is a rebuildable cache. Every event is validated against
-``schema/telemetry.json`` and flushed to disk synchronously
+the §8 schema (``kami_agent/schema/telemetry.json``) and flushed to
+disk synchronously
 (write → flush → fsync) before the action it describes is considered
 complete (SPEC §1.4), so a crash at any point loses at most the event
 being written.
@@ -18,12 +19,16 @@ import os
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from functools import cache
+from importlib import resources
 from pathlib import Path
 from typing import IO, Any
 
 import jsonschema
 
-SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schema" / "telemetry.json"
+# The schema ships inside the wheel (kami_agent/schema) so validation works
+# under any install, including the Docker image; the repo-root schema/ copy
+# remains for the brief's layout and is kept byte-identical by a unit test.
+SCHEMA_PATH = Path(str(resources.files("kami_agent") / "schema" / "telemetry.json"))
 
 _COMMON_FIELDS = frozenset({"ts", "run_id", "session", "event"})
 
