@@ -43,4 +43,4 @@ harness: # spawned per session as a stdio child (SPEC §2)
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
   harness_sha: 1e7c9dad48efad567fa082617a6b48e2452b4ff0
-  gdd_sha: ""
+  gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # D30 cleanup; game content byte-identical to c2c5a1b
