@@ -1,8 +1,8 @@
-# Builds the SPEC §10 image and proves `kami-agent init` — wallet gen,
-# run-dir layout from the example manifest, and all three connectivity
-# checks (chain RPC, provider API, MCP handshake against the bundled
-# pinned harness) — passes inside the container. Manual dispatch; run
-# before tagging and on packaging changes.
+# Builds the SPEC §10 image and proves `kami-agent init` — run-dir layout
+# from the example manifest and all four connectivity checks (chain RPC,
+# mainnet RPC, provider API, MCP handshake against the bundled pinned
+# harness) — passes inside the container. Manual dispatch; run before
+# tagging and on packaging changes.
 
 name: docker-smoke
 
@@ -14,6 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # init's connectivity check dials this (eth_chainId == 1), so the
+      # offline placeholder won't do here: repo secret if set, else a
+      # keyless public endpoint.
+      MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL || 'https://ethereum-rpc.publicnode.com' }}
     steps:
       - uses: actions/checkout@v4
       - name: Build image
@@ -22,10 +26,12 @@ jobs:
         run: |
           mkdir -p /tmp/run
           cp manifests/example.yaml /tmp/run/manifest.yaml
-          docker run --rm -e ANTHROPIC_API_KEY -v /tmp/run:/srv/run kami-agent \
+          docker run --rm -e ANTHROPIC_API_KEY -e MAINNET_RPC_URL \
+            -v /tmp/run:/srv/run kami-agent \
             kami-agent init --manifest /srv/run/manifest.yaml --run-dir /srv/run \
             | tee /tmp/init.out
           grep -q "chain RPC ok" /tmp/init.out
+          grep -q "mainnet RPC ok" /tmp/init.out
           grep -q "provider API ok" /tmp/init.out
           grep -q "harness ok (kamigotchi-executor" /tmp/init.out
           test -f /tmp/run/prompts/system.txt

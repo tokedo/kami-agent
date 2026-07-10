@@ -16,7 +16,7 @@ on:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
 
 env:
-  HARNESS_PIN: e344729841f6a35799fb02b771467f1f32711be6 # v1.2.0 (e344729)
+  HARNESS_PIN: 6f4554e0fea4b3ec18d3bb9a71f14f6ad337e246 # v1.3.0 (6f4554e)
 
 jobs:
   live:
@@ -46,4 +46,9 @@ jobs:
           KAMI_SMOKE_HARNESS: real
           KAMI_HARNESS_DIR: ${{ github.workspace }}/kami-harness
           KAMI_SMOKE_HARNESS_TOOL: list_accounts
+          # The harness (v1.3.0+) refuses to start without MAINNET_RPC_URL.
+          # Real endpoint: repo secret if set, else a keyless public one —
+          # the canned session is read-only and never dials mainnet, but
+          # the live tier should mirror production config, not a stub.
+          MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL || 'https://ethereum-rpc.publicnode.com' }}
         run: uv run pytest tests/smoke -q -s

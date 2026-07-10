@@ -1,11 +1,13 @@
-# kami-agent — Reference Scaffold Specification (v1.2)
+# kami-agent — Reference Scaffold Specification (v1.3)
 
-Status: **v1.2 — approved for implementation** (v1 superseded the v0
+Status: **v1.3 — approved for implementation** (v1 superseded the v0
 draft; §13 open decisions resolved as D12–D15, engineering semantics
 fixed as D16–D19; v1.1 amended §11 per D21 — CI smoke split into a
 per-PR recorded-surface gate and a scheduled live-harness tier; v1.2
-amends §5.1 per D22 — opaque provider reasoning state on assistant
-messages — see kami-lab `DECISIONS.md`)
+amended §5.1 per D22 — opaque provider reasoning state on assistant
+messages; v1.3 amends §10 per D27 — init performs validation and
+connectivity checks only, operator-wallet creation is a harness tool
+the agent calls in-run — see kami-lab `DECISIONS.md`)
 Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
 Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
 documentation), `kami-lab` (experiment orchestration — private).
@@ -265,7 +267,7 @@ The three frozen strings shipped per run: `prompts/system.txt`,
 run/
 ├── config.yaml          # full run manifest copy: model, adapter, pinned SHAs
 │                        # (kami-harness, kami-agent, gdd), price table, caps,
-│                        # wallet address, all §9 parameters
+│                        # all §9 parameters
 ├── state.json           # scaffold-owned CACHE: session_counter, cumulative_usd,
 │                        # cumulative_tokens, next_wake_at, run_status,
 │                        # first_session_at
@@ -357,11 +359,18 @@ Notes:
 - One Docker image (or cloud-init) containing kami-agent + pinned
   kami-harness + bundled GDD snapshot at `reference/`. The image is identical
   across a study's VMs; per-run `config.yaml` (manifest copy) and `.env`
-  (API key, wallet key) are injected at provision time. Closed-world egress
-  allowlist (D14) is applied at the VM level: provider API + chain RPC only.
-- `kami-agent init` — generates wallet, writes config from a manifest, runs a
-  connectivity check (chain RPC, provider API, MCP handshake), emits
-  `run_start`.
+  (provider API key, owner wallet key, `MAINNET_RPC_URL` — the harness
+  refuses to start without it) are injected at provision time. Closed-world
+  egress allowlist (D14) is applied at the VM level: provider API + the
+  chain RPC endpoints the harness uses (Yominet + Ethereum mainnet) only.
+- `kami-agent init` — performs validation and connectivity checks only:
+  validates the manifest, scaffolds the run directory, runs connectivity
+  checks (chain RPC, mainnet RPC — `eth_chainId` must answer 1, provider
+  API, MCP handshake) so misprovisioning fails at bring-up rather than
+  mid-run, and emits `run_start`. There is no key path through init: it
+  never generates, imports, or writes any key. Operator-wallet creation
+  is a harness tool (`create_operator_wallet`) the agent calls in-run;
+  the key is generated and persisted inside the harness server process.
 - `kami-agent run-session` — executes one session (what the supervisor
   invokes).
 - `kami-agent status` — prints state.json summary (operator-facing; not an
