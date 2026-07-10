@@ -16,7 +16,7 @@ on:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
 
 env:
-  HARNESS_PIN: 7b0319f240d29491a7f2b6b954d55bf1bf171850 # v1.1.0 (7b0319f)
+  HARNESS_PIN: e344729841f6a35799fb02b771467f1f32711be6 # v1.2.0 (e344729)
 
 jobs:
   live:

@@ -1,10 +1,10 @@
 {
   "harness": {
     "name": "kamigotchi-executor",
-    "version": "1.1.0",
-    "sha": "7b0319f"
+    "version": "1.2.0",
+    "sha": "e344729"
   },
-  "tools_hash": "sha256:a5de304bb7866c6e51637b69a4c195ee7ba4de29131d144f2e2604ca1533f565",
+  "tools_hash": "sha256:f1045b08c92eb950cea30c40af8e400086699cb632d1149ba02026fb40d20876",
   "tools": [
     {
       "name": "list_accounts",
@@ -42,6 +42,63 @@
           }
         },
         "title": "store_operator_keyArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_gas_balance",
+      "description": "ETH balances of the operator and owner wallets, per account.\n\nGas on Yominet is paid in ETH by whichever wallet signs a\ntransaction: the operator for gameplay txs, the owner for\ntrades/mints/funding. A plain ETH transfer burns ~113k gas\n(Initia MiniEVM), not the standard 21k — ~0.0000003 ETH at the\nflat 0.0025 gwei gas price.\n\nArgs:\n    account: Account label. Empty string (default) returns every\n        configured account.\n\nReturns:\n    {balances: {label: {operator_address, operator_eth,\n    owner_address, owner_eth}}} — owner fields present only when\n    the account has an owner key configured.\n",
+      "input_schema": {
+        "properties": {
+          "account": {
+            "default": "",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "title": "get_gas_balanceArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "fund_operator",
+      "description": "Send ETH from the owner wallet to the same account's operator wallet.\n\nPlain value transfer signed by the owner key. The recipient is\npinned to this account's operator address from the registry; an\narbitrary recipient is not expressible. Fails before sending if the\nowner balance does not cover the amount plus the gas provision\n(250k gas at the flat price; a plain transfer burns ~113k on\nYominet's Initia MiniEVM).\n\nArgs:\n    amount_eth: Amount as a decimal string in ETH (e.g. \"0.01\").\n    account: Account label (must have an owner key in .env).\n\nReturns:\n    Transaction result (tx_hash, status, block, gas_used) plus\n    direction, amount_eth, and post-transaction operator_eth and\n    owner_eth balances.\n",
+      "input_schema": {
+        "properties": {
+          "amount_eth": {
+            "title": "Amount Eth",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount_eth"
+        ],
+        "title": "fund_operatorArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "withdraw_operator",
+      "description": "Send ETH from the operator wallet to the same account's owner wallet.\n\nPlain value transfer signed by the operator key. The recipient is\npinned to this account's owner address from the registry; an\narbitrary recipient is not expressible. Fails before sending if the\noperator balance does not cover the amount plus the gas provision\n(250k gas at the flat price; a plain transfer burns ~113k on\nYominet's Initia MiniEVM).\n\nArgs:\n    amount_eth: Decimal string in ETH (e.g. \"0.005\"), or \"all\"\n        (default) to send the full operator balance minus the gas\n        reserve.\n    account: Account label (must have an owner key in .env, so the\n        owner address is known).\n\nReturns:\n    Transaction result (tx_hash, status, block, gas_used) plus\n    direction, the amount_eth actually sent, and post-transaction\n    operator_eth and owner_eth balances.\n",
+      "input_schema": {
+        "properties": {
+          "amount_eth": {
+            "default": "all",
+            "title": "Amount Eth",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "title": "withdraw_operatorArguments",
         "type": "object"
       }
     },

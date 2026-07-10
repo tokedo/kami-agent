@@ -42,5 +42,5 @@ harness: # spawned per session as a stdio child (SPEC §2)
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: 352da9bc608f8a1118dff6738c616fcd745c28d3
+  harness_sha: e344729841f6a35799fb02b771467f1f32711be6
   gdd_sha: ""
