@@ -5,7 +5,7 @@
 FROM python:3.13-slim
 
 ARG HARNESS_REPO=https://github.com/tokedo/kami-harness
-ARG HARNESS_SHA=e344729841f6a35799fb02b771467f1f32711be6
+ARG HARNESS_SHA=6f4554e0fea4b3ec18d3bb9a71f14f6ad337e246
 ARG GDD_REPO=
 ARG GDD_SHA=
 
@@ -33,7 +33,9 @@ RUN if [ -n "$GDD_REPO" ]; then \
     fi
 
 WORKDIR /srv/run
-# Provisioning: mount/inject /srv/run/config.yaml and /srv/run/.env, then
+# Provisioning: mount/inject /srv/run/config.yaml and /srv/run/.env — the
+# .env must set MAINNET_RPC_URL (the harness refuses to start without it)
+# alongside the provider API key and owner wallet key — then
 #   kami-agent init --manifest /srv/run/config.yaml --run-dir /srv/run
 # and install the supervisor cron entry:
 #   kami-agent run-session --run-dir /srv/run

@@ -37,8 +37,9 @@ Coming in v0.
 
 Coming in v0. Planned commands (SPEC §10):
 
-- `kami-agent init` — wallet generation, config from a run manifest,
-  connectivity check
+- `kami-agent init` — manifest validation, run-dir scaffolding,
+  connectivity checks (init handles no key material; operator-wallet
+  creation is a harness tool the agent calls in-run)
 - `kami-agent run-session` — execute one session (what the supervisor invokes)
 - `kami-agent status` — operator-facing state summary
 

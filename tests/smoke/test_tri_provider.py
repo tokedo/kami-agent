@@ -167,8 +167,16 @@ def make_harness():
         )
         if not Path(harness_dir).exists():
             pytest.skip(f"KAMI_SMOKE_HARNESS=real but {harness_dir} does not exist")
+        # Pass the environment through (the MCP SDK's default child env
+        # drops it): the harness refuses to start without MAINNET_RPC_URL.
+        # The canned session is read-only and never dials mainnet, so the
+        # offline placeholder suffices when no real endpoint is configured.
+        env = {**os.environ}
+        env.setdefault("MAINNET_RPC_URL", "http://127.0.0.1:9/offline-test")
         return ReadOnlyHarness(
-            HarnessClient(python, ["executor/server.py"], cwd=harness_dir, handshake_timeout_s=90)
+            HarnessClient(
+                python, ["executor/server.py"], cwd=harness_dir, env=env, handshake_timeout_s=90
+            )
         )
     if not FIXTURE.exists():
         pytest.skip("recorded harness tool surface fixture missing")

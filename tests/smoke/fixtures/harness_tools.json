@@ -1,10 +1,10 @@
 {
   "harness": {
     "name": "kamigotchi-executor",
-    "version": "1.2.0",
-    "sha": "e344729"
+    "version": "1.3.0",
+    "sha": "6f4554e"
   },
-  "tools_hash": "sha256:f1045b08c92eb950cea30c40af8e400086699cb632d1149ba02026fb40d20876",
+  "tools_hash": "sha256:8c9f5f068e4ec72c0595e47f592f9da40bf5d7e2e4c4b959d0bf1be2b3fc9901",
   "tools": [
     {
       "name": "list_accounts",
@@ -12,6 +12,45 @@
       "input_schema": {
         "properties": {},
         "title": "list_accountsArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "create_operator_wallet",
+      "description": "Generate an operator keypair for an account and persist it.\n\nRequires {LABEL}_OWNER_KEY to already exist in the keys file\n(~/.blocklife-keys/.env); refuses if {LABEL}_OPERATOR_KEY already\nexists — operator rotation via system.account.set.operator is not\nimplemented. The keypair is generated inside the server process,\nthe private key is written to the keys file next to the owner key,\nthe account is loaded into the live registry, and its public\naddresses are recorded in accounts/roster.yaml. Only public\naddresses are returned; key material never leaves the server\nprocess. Registration of the on-chain account that binds this\noperator is a separate transaction (register_account).\n\nArgs:\n    account: Account label (alphanumeric/underscore; must have an\n        owner key in the keys file and no operator key yet).\n\nReturns:\n    {account, operator_address, owner_address, key_saved, roster} —\n    roster is the roster.yaml update outcome (\"created\", \"added\",\n    \"already_present\", or \"failed: <reason>\").\n",
+      "input_schema": {
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "title": "create_operator_walletArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "register_account",
+      "description": "Register the in-game account: one owner-signed transaction that\ncreates the account entity, sets the display name, and binds the\noperator address.\n\nRegistration binds an operator address; operator keypairs are\ncreated with create_operator_wallet. The call is dry-run via\neth_call before sending, so common reverts (\"Account: exists for\nOwner\", \"Account: exists for Operator\", \"Account: name taken\")\nsurface without spending gas. Gas limit 2M (883k observed). A newly\nregistered account starts in Room 1 (Misty Riverside) with 100\nstamina.\n\nArgs:\n    name: Display name, 1-15 bytes, unique across the game. No\n        whitespace (the official client rejects it even though the\n        contract allows it).\n    account: Account label (must have an owner key in the keys\n        file and an operator address in the registry).\n\nReturns:\n    Transaction result (tx_hash, status, block, gas_used) plus\n    name, operator_address, owner_address, account_entity_id, and\n    starting_room.\n",
+      "input_schema": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "register_accountArguments",
         "type": "object"
       }
     },
@@ -27,21 +66,6 @@
           }
         },
         "title": "register_kamibotsArguments",
-        "type": "object"
-      }
-    },
-    {
-      "name": "store_operator_key",
-      "description": "Send the account's operator key to Kamibots for strategy execution.\n\nThe key is encrypted at rest (AES-256-GCM) on Kamibots servers.\nRequires register_kamibots() to have completed first (needs the API key).\n\nArgs:\n    account: Account label.\n",
-      "input_schema": {
-        "properties": {
-          "account": {
-            "default": "main",
-            "title": "Account",
-            "type": "string"
-          }
-        },
-        "title": "store_operator_keyArguments",
         "type": "object"
       }
     },
@@ -99,6 +123,55 @@
           }
         },
         "title": "withdraw_operatorArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "bridge_eth_from_mainnet",
+      "description": "Bridge ETH from Ethereum mainnet to Yominet gas ETH.\n\nOne mainnet transaction (LayerZero OFT to Initia L1, auto-forwarded\nover IBC to Yominet) converts mainnet ETH into native Yominet gas\nETH arriving at the SAME account's owner address — the recipient is\npinned to the registry address and is not expressible as a\nparameter. Arrival is typically ~5 min, up to ~20 min observed;\nbridge_status(tx_hash) reports transfer state. Amounts transit a\n6-decimal denom. The owner's mainnet balance is checked against\namount + bridge fee + max gas before signing. Returns immediately\nafter broadcast with status \"submitted\" and the tx_hash; the\nreceipt is not awaited. Requires MAINNET_RPC_URL (the server fails\nat startup when it is unset).\n\nArgs:\n    amount_eth: Amount as a decimal string in ETH (e.g. \"0.01\").\n        Max 6 decimal places.\n    account: Account label; its owner key signs on mainnet.\n    dry_run: If true, returns the quote (fees, estimated duration,\n        balance check) without signing or broadcasting anything.\n\nReturns:\n    Quote fields (account, amount_eth, bridge_fee_eth,\n    mainnet_gas_max_eth, mainnet_balance_eth,\n    estimated_duration_seconds, recipient_yominet); a broadcast\n    additionally returns tx_hash and status \"submitted\", a dry run\n    dry_run=true instead.\n",
+      "input_schema": {
+        "properties": {
+          "amount_eth": {
+            "title": "Amount Eth",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "amount_eth"
+        ],
+        "title": "bridge_eth_from_mainnetArguments",
+        "type": "object"
+      }
+    },
+    {
+      "name": "bridge_status",
+      "description": "State of a mainnet->Yominet bridge transfer, plus arrival balance.\n\nRegisters the hash with the router's tracker (best-effort,\nidempotent), polls the router's status endpoint, and reads the\naccount's current Yominet owner balance. `state` is the router's\ntransfer state; `completed` is true at STATE_COMPLETED_SUCCESS.\nArrival is typically ~5 min after mainnet inclusion, up to ~20 min\nobserved.\n\nArgs:\n    tx_hash: Mainnet transaction hash returned by\n        bridge_eth_from_mainnet.\n    account: Account label whose Yominet owner balance is reported.\n\nReturns:\n    {tx_hash, state, completed, yominet_owner_eth, detail} —\n    yominet_owner_eth is null when the account has no owner key\n    configured.\n",
+      "input_schema": {
+        "properties": {
+          "tx_hash": {
+            "title": "Tx Hash",
+            "type": "string"
+          },
+          "account": {
+            "default": "main",
+            "title": "Account",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tx_hash"
+        ],
+        "title": "bridge_statusArguments",
         "type": "object"
       }
     },

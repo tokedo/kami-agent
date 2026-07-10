@@ -1,17 +1,20 @@
 """CLI entry points: kami-agent init | run-session | status (SPEC §10).
 
-- ``init``: generate a wallet, write the run directory from a manifest,
-  run a connectivity check (chain RPC, provider API, MCP handshake),
-  emit ``run_start``.
+- ``init``: validate the manifest, write the run directory from it, run
+  connectivity checks (chain RPC, mainnet RPC, provider API, MCP
+  handshake), emit ``run_start``. init never generates, imports, or
+  writes any key — operator-wallet creation is a harness tool
+  (``create_operator_wallet``) the agent calls in-run, and the key is
+  generated and persisted inside the harness server process.
 - ``run-session``: execute one session — what the supervisor's cron
   entry invokes.
 - ``status``: print the state.json summary. Operator-facing only; never
   an agent channel (D12).
 
-The manifest is a YAML file copied verbatim into ``run/config.yaml``
-(plus the generated wallet address); see ``manifests/example.yaml``.
-Secrets (provider API key, wallet private key) live in ``.env`` files
-only — never in the manifest, config copy, or telemetry.
+The manifest is a YAML file copied verbatim into ``run/config.yaml``;
+see ``manifests/example.yaml``. Secrets (provider API key, owner wallet
+key) plus ``MAINNET_RPC_URL`` live in the run-dir ``.env``, injected at
+provision time — never in the manifest, config copy, or telemetry.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ from typing import Any
 
 import httpx
 import yaml
-from eth_account import Account
 
 from kami_agent.adapters.anthropic import AnthropicAdapter
 from kami_agent.adapters.base import ModelAdapter, SamplingParams, UserMessage
@@ -118,11 +120,14 @@ def harness_factory(manifest: dict[str, Any]):
         return None
 
     def factory() -> HarnessClient:
+        # Always pass the scaffold's environment through: the MCP SDK's
+        # default child env drops it, and the harness refuses to start
+        # without MAINNET_RPC_URL (v1.3.0+). Manifest harness.env wins.
         return HarnessClient(
             harness["command"],
             list(harness.get("args", [])),
             cwd=harness.get("cwd"),
-            env={**os.environ, **harness.get("env", {})} if harness.get("env") else None,
+            env={**os.environ, **harness.get("env", {})},
             handshake_timeout_s=harness.get("handshake_timeout_s", 60.0),
         )
 
@@ -153,6 +158,22 @@ def check_chain_rpc(rpc_url: str) -> str:
     response.raise_for_status()
     block = int(response.json()["result"], 16)
     return f"chain RPC ok (block {block})"
+
+
+def check_mainnet_rpc(rpc_url: str) -> str:
+    """The harness requires MAINNET_RPC_URL at startup; verify it at bring-up."""
+    response = httpx.post(
+        rpc_url,
+        json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+        timeout=30,
+    )
+    response.raise_for_status()
+    chain_id = int(response.json()["result"], 16)
+    if chain_id != 1:
+        raise SystemExit(
+            f"MAINNET_RPC_URL answered chain id {chain_id}, expected 1 (Ethereum mainnet)"
+        )
+    return "mainnet RPC ok (chain id 1)"
 
 
 def check_provider(manifest: dict[str, Any]) -> str:
@@ -188,16 +209,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     load_env_file(run_dir / ".env")
 
-    # Wallet: address into the config copy; private key into .env only.
-    account = Account.create()
-    env_path = run_dir / ".env"
-    with env_path.open("a", encoding="utf-8") as f:
-        f.write(f"WALLET_ADDRESS={account.address}\n")
-        f.write(f"WALLET_PRIVATE_KEY={account.key.hex()}\n")
-    env_path.chmod(0o600)
-
+    # No key path through init: the operator wallet is created in-run by
+    # the harness tool create_operator_wallet, and the owner key arrives
+    # in .env at provision time. init only validates and scaffolds.
     config = {k: v for k, v in manifest.items() if not k.startswith("_")}
-    config["wallet_address"] = account.address
     (run_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     # Frozen prompts + agent-owned workspace; reference/ is provisioned by
@@ -222,6 +237,13 @@ def cmd_init(args: argparse.Namespace) -> int:
         rpc_url = manifest.get("chain_rpc_url")
         if rpc_url:
             print(check_chain_rpc(rpc_url))
+        mainnet_rpc_url = os.environ.get("MAINNET_RPC_URL")
+        if not mainnet_rpc_url:
+            raise SystemExit(
+                "MAINNET_RPC_URL is not set — the harness refuses to start "
+                "without it; set it in the run-dir .env"
+            )
+        print(check_mainnet_rpc(mainnet_rpc_url))
         print(check_provider(manifest))
         harness_line, harness_tool_names = check_harness(manifest)
         print(harness_line)
@@ -239,7 +261,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             harness_tools=harness_tool_names,
             price_table=manifest["price_table"],
         )
-    print(f"initialized {run_dir} (run_id {manifest['run_id']}, wallet {account.address})")
+    print(f"initialized {run_dir} (run_id {manifest['run_id']})")
     return 0
 
 
