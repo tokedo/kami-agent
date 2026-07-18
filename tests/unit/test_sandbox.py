@@ -31,6 +31,27 @@ def test_workspace_and_reference_paths_resolve(run_dir):
     assert root == "reference"
 
 
+def test_bare_paths_are_workspace_relative(run_dir):
+    # Paths are relative to the workspace root: "notes/a.md" and
+    # "workspace/notes/a.md" name the same file.
+    bare = resolve_path(run_dir, "notes/a.md")
+    prefixed = resolve_path(run_dir, "workspace/notes/a.md")
+    assert bare == prefixed
+    assert bare[1] == "workspace"
+
+
+def test_exactly_one_leading_workspace_segment_is_stripped(run_dir):
+    # A workspace subtree literally named workspace/ stays addressable.
+    resolved, root = resolve_path(run_dir, "workspace/workspace/n.md")
+    assert root == "workspace"
+    assert resolved == (run_dir / "workspace" / "workspace" / "n.md").resolve()
+    # A workspace subtree named reference/ is only reachable via the
+    # workspace/ prefix; a bare "reference/..." addresses the read-only tree.
+    resolved, root = resolve_path(run_dir, "workspace/reference/n.md")
+    assert root == "workspace"
+    assert resolved == (run_dir / "workspace" / "reference" / "n.md").resolve()
+
+
 def test_roots_themselves_resolve(run_dir):
     assert resolve_path(run_dir, "workspace")[1] == "workspace"
     assert resolve_path(run_dir, "reference")[1] == "reference"
@@ -54,18 +75,23 @@ def test_internal_dot_segments_that_stay_inside_are_fine(run_dir):
         "workspace/../../etc/passwd",
         "reference/../state.json",
         "workspace/../prompts/system.txt",
-        "telemetry.jsonl",
-        "state.json",
-        "prompts/system.txt",
-        "",
-        ".",
         "workspace/notes/../../../kami",
         "bad\x00path",
     ],
 )
-def test_escapes_and_run_dir_internals_rejected(run_dir, path):
+def test_escapes_rejected(run_dir, path):
     with pytest.raises(SandboxError):
         resolve_path(run_dir, path)
+
+
+@pytest.mark.parametrize("path", ["telemetry.jsonl", "state.json", "prompts/system.txt"])
+def test_bare_paths_cannot_reach_run_dir_internals(run_dir, path):
+    # Workspace-relative bare paths land inside workspace/ — never on the
+    # run-directory files they happen to be named after.
+    resolved, root = resolve_path(run_dir, path)
+    assert root == "workspace"
+    assert resolved.is_relative_to((run_dir / "workspace").resolve())
+    assert resolved != (run_dir / path).resolve()
 
 
 _SEGMENTS = st.one_of(

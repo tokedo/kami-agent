@@ -32,6 +32,15 @@ from kami_agent.adapters.base import (
     UserMessage,
 )
 from kami_agent.governor import PriceTable, cost_usd
+from kami_agent.repetition import (
+    DEFAULT_IDENTICAL_CAP,
+    DEFAULT_MIN_DISTINCT,
+    DEFAULT_SAME_TOOL_ERROR_CAP,
+    DEFAULT_WINDOW,
+    RepetitionTracker,
+    RepetitionTrip,
+    is_error_or_revert,
+)
 from kami_agent.telemetry import TelemetryWriter
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS, SCAFFOLD_TOOL_NAMES, ScaffoldTools
@@ -43,6 +52,13 @@ REASON_AGENT = "agent"
 REASON_TOKEN_CAP = "token_cap"
 REASON_TOOL_CAP = "tool_cap"
 REASON_ERRORS = "errors"
+REASON_REPETITION = "repetition"
+
+# Carried-wake outcomes (SessionResult.carried_wake): _carry_wake runs only
+# on the token_cap / tool_cap / repetition paths — never "errors", never
+# intents skipped by end_session (D18).
+CARRIED_APPLIED = "applied"
+CARRIED_INVALID = "invalid"
 
 _FILE_TOOLS = frozenset({"workspace_write", "workspace_read", "workspace_list", "workspace_delete"})
 
@@ -82,11 +98,22 @@ class LoopCaps:
     retry_max_attempts: int = 5
     tool_timeout_s: float = 120.0
     tool_result_max_bytes: int = 65536
+    repetition_identical_cap: int = DEFAULT_IDENTICAL_CAP
+    repetition_window: int = DEFAULT_WINDOW
+    repetition_min_distinct: int = DEFAULT_MIN_DISTINCT
+    repetition_same_tool_error_cap: int = DEFAULT_SAME_TOOL_ERROR_CAP
 
 
 @dataclass
 class SessionResult:
-    """What the runner needs to emit session_end and update state."""
+    """What the runner needs to emit session_end and update state.
+
+    ``repetition`` names the tripped breaker rule and its telemetry
+    fields when ``reason`` is ``repetition``. ``carried_wake`` is
+    ``"applied"`` / ``"invalid"`` when a cap-skipped final-turn
+    ``set_next_wake`` intent was carried (or discarded as invalid) at
+    teardown, else None.
+    """
 
     reason: str
     llm_calls: int
@@ -96,6 +123,8 @@ class SessionResult:
     cumulative_usd: float
     cumulative_tokens: int
     messages: list[Message] = field(default_factory=list)
+    repetition: RepetitionTrip | None = None
+    carried_wake: str | None = None
 
 
 class AgentLoop:
@@ -153,6 +182,14 @@ class AgentLoop:
         self._consecutive_errors = 0
         self._session_cost_usd = 0.0
         self._session_tokens = 0
+        self._repetition = RepetitionTracker(
+            identical_cap=caps.repetition_identical_cap,
+            window=caps.repetition_window,
+            min_distinct=caps.repetition_min_distinct,
+            same_tool_error_cap=caps.repetition_same_tool_error_cap,
+        )
+        self._repetition_trip: RepetitionTrip | None = None
+        self._carried_wake: str | None = None
 
     # --- public --------------------------------------------------------------
 
@@ -174,9 +211,10 @@ class AgentLoop:
                 )
             )
             # Context guard (D17): post-call, silent; the response's intents
-            # are never executed.
+            # are never executed (a final-turn set_next_wake is carried).
             usage = response.usage
             if usage.input_tokens + usage.output_tokens >= self._caps.session_token_cap:
+                self._carry_wake(response.tool_calls)
                 return self._result(REASON_TOKEN_CAP, messages)
             if not response.tool_calls:
                 # §5.4: the loop cannot advance on its own — send the frozen
@@ -225,6 +263,36 @@ class AgentLoop:
                 continue
             latency_ms = (time.perf_counter() - start) * 1000
             usage = response.usage
+            if (
+                not response.text_blocks
+                and not response.tool_calls
+                and usage.input_tokens == 0
+                and usage.output_tokens == 0
+            ):
+                # Empty response with zero usage: a provider fault, not an
+                # assistant turn — retried under the §5.5 backoff instead of
+                # leaking into the continuation/error path. Empty-but-billed
+                # responses (nonzero usage) keep the §5.4 handling.
+                self._llm_calls += 1
+                self._emit_llm_call(
+                    input_tokens=0,
+                    output_tokens=0,
+                    reasoning_tokens=None,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
+                    cost=0.0,
+                    latency_ms=latency_ms,
+                    stop_reason=response.stop_reason.value,
+                    retry_count=attempt,
+                    usage_unknown=False,
+                    continuation=continuation,
+                    empty_response=True,
+                )
+                if attempt >= self._caps.retry_max_attempts:
+                    return None
+                self._sleep(min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * 2**attempt))
+                attempt += 1
+                continue
             cost = cost_usd(usage, self._prices)
             tokens = usage.input_tokens + usage.output_tokens
             self._llm_calls += 1
@@ -261,6 +329,7 @@ class AgentLoop:
         retry_count: int,
         usage_unknown: bool,
         continuation: bool,
+        empty_response: bool = False,
     ) -> None:
         fields: dict[str, Any] = {
             "model": self._model,
@@ -284,6 +353,8 @@ class AgentLoop:
             fields["usage_unknown"] = True
         if continuation:
             fields["continuation"] = True
+        if empty_response:
+            fields["empty_response"] = True
         self._telemetry.emit("llm_call", session=self._session, **fields)
 
     # --- tool execution (SPEC §5.3–5.4, D18, D19) -------------------------------
@@ -293,7 +364,7 @@ class AgentLoop:
 
         Returns the session_end reason if the session must end, else None.
         """
-        for intent in calls:
+        for index, intent in enumerate(calls):
             if self._scaffold.session_ended:
                 # end_session took effect earlier in this batch (D18).
                 self._emit_tool_call(
@@ -329,11 +400,21 @@ class AgentLoop:
                 self._consecutive_errors += 1
                 if self._consecutive_errors >= self._caps.max_consecutive_errors:
                     return REASON_ERRORS
-            if (
-                not self._scaffold.session_ended
-                and self._executed_intents >= self._caps.session_tool_cap
-            ):
-                return REASON_TOOL_CAP
+            if not self._scaffold.session_ended:
+                # Repetition breaker: evaluated after every executed call,
+                # ends the session exactly as tool_cap does (silent, D13).
+                trip = self._repetition.record(
+                    intent.name,
+                    intent.args,
+                    error_or_revert=outcome["error_or_revert"],
+                )
+                if trip is not None:
+                    self._repetition_trip = trip
+                    self._carry_wake(calls[index + 1 :])
+                    return REASON_REPETITION
+                if self._executed_intents >= self._caps.session_tool_cap:
+                    self._carry_wake(calls[index + 1 :])
+                    return REASON_TOOL_CAP
         return REASON_AGENT if self._scaffold.session_ended else None
 
     def _execute_intent(self, intent: ToolCall) -> dict[str, Any]:
@@ -350,6 +431,7 @@ class AgentLoop:
                 "duration_ms": (time.perf_counter() - start) * 1000,
                 "truncated": capped.truncated,
                 "original_bytes": capped.original_bytes if capped.truncated else None,
+                "error_or_revert": True,
             }
 
         validator = self._validators.get(intent.name)
@@ -386,6 +468,9 @@ class AgentLoop:
             "truncated": capped.truncated,
             "original_bytes": capped.original_bytes if capped.truncated else None,
             "tx_hash": tx_hash,
+            # Classified on the raw (pre-truncation) content: success-shaped
+            # harness results can still carry an on-chain revert.
+            "error_or_revert": is_error_or_revert(True, content),
         }
 
     def _run_with_timeout(self, intent: ToolCall) -> tuple[str, str | None]:
@@ -458,6 +543,35 @@ class AgentLoop:
         self._tool_events += 1
         self._telemetry.emit("tool_call", session=self._session, **fields)
 
+    # --- carried set_next_wake ---------------------------------------------------
+
+    def _carry_wake(self, unexecuted: tuple[ToolCall, ...]) -> None:
+        """Execute the ONE cap-skipped final-turn set_next_wake intent.
+
+        Called only on the token_cap / tool_cap / repetition paths, with
+        the intents the cap prevented from executing. The last set_next_wake among
+        them wins (normal last-call-wins semantics), validated and
+        clamped exactly as a normal call; invalid args are discarded with
+        the discard recorded (``carried_wake = "invalid"``), leaving any
+        previously executed wake state untouched. No other skipped intent
+        is ever executed. No tool_call event, no tool result message: the
+        agent never observes the carried execution.
+        """
+        candidates = [c for c in unexecuted if c.name == "set_next_wake"]
+        if not candidates:
+            return
+        intent = candidates[-1]
+        validator = self._validators["set_next_wake"]
+        if any(validator.iter_errors(intent.args)):
+            self._carried_wake = CARRIED_INVALID
+            return
+        try:
+            self._scaffold.execute("set_next_wake", intent.args)
+        except ToolError:
+            self._carried_wake = CARRIED_INVALID
+            return
+        self._carried_wake = CARRIED_APPLIED
+
     # --- result ----------------------------------------------------------------
 
     def _result(self, reason: str, messages: list[Message]) -> SessionResult:
@@ -470,6 +584,8 @@ class AgentLoop:
             cumulative_usd=self._cumulative_usd,
             cumulative_tokens=self._cumulative_tokens,
             messages=messages,
+            repetition=self._repetition_trip,
+            carried_wake=self._carried_wake,
         )
 
 

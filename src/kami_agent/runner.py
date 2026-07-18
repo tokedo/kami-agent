@@ -31,7 +31,7 @@ from kami_agent.adapters.base import (
 )
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
 from kami_agent.harness import HarnessError, tools_hash
-from kami_agent.loop import AgentLoop, GameTools, LoopCaps
+from kami_agent.loop import CARRIED_APPLIED, CARRIED_INVALID, AgentLoop, GameTools, LoopCaps
 from kami_agent.state import (
     RUN_COMPLETE,
     crashed_session,
@@ -210,7 +210,7 @@ def _run_one_session(
             tools_hash=hash_value,
         )
 
-    def emit_schedule(scaffold_tools: ScaffoldTools) -> None:
+    def emit_schedule(scaffold_tools: ScaffoldTools, carried_wake: str | None = None) -> None:
         # 9. Emitted every session, including the wake_default case (§8).
         if scaffold_tools.clamped_wake_min is not None:
             source = "agent"
@@ -228,6 +228,13 @@ def _run_one_session(
         }
         if requested is not None:
             fields["requested_min"] = requested
+        # Carried set_next_wake: the applied value came from a cap-skipped
+        # final-turn intent; an invalid one was discarded (the discard is
+        # recorded, prior wake state — if any — stands).
+        if carried_wake == CARRIED_APPLIED:
+            fields["carried"] = True
+        elif carried_wake == CARRIED_INVALID:
+            fields["carried_invalid"] = True
         writer.emit("schedule_next", session=session, **fields)
         state.next_wake_at = next_wake_at
 
@@ -286,22 +293,25 @@ def _run_one_session(
         )
         result = loop.run()
 
-        # 8. Persist: session_end, transcript, state cache.
-        writer.emit(
-            "session_end",
-            session=session,
-            reason=result.reason,
-            llm_calls=result.llm_calls,
-            tool_calls=result.tool_calls,
-            session_cost_usd=result.session_cost_usd,
-            session_tokens=result.session_tokens,
-        )
+        # 8. Persist: session_end, transcript, state cache. A repetition
+        # ending carries its rule and trigger stats (SPEC §8, additive).
+        end_fields: dict[str, Any] = {
+            "reason": result.reason,
+            "llm_calls": result.llm_calls,
+            "tool_calls": result.tool_calls,
+            "session_cost_usd": result.session_cost_usd,
+            "session_tokens": result.session_tokens,
+        }
+        if result.repetition is not None:
+            end_fields["repetition_rule"] = result.repetition.rule
+            end_fields.update(result.repetition.fields)
+        writer.emit("session_end", session=session, **end_fields)
         _write_transcript(run_dir, session, result.messages)
         state.cumulative_usd = result.cumulative_usd
         state.cumulative_tokens = result.cumulative_tokens
 
         # 9. Schedule.
-        emit_schedule(scaffold)
+        emit_schedule(scaffold, result.carried_wake)
         save_state(state, state_path)
         return SESSION_RAN
     finally:

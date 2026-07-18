@@ -23,6 +23,10 @@ caps: # SPEC §9 (session_token_cap set per model list, D17)
   retry_max_attempts: 5
   tool_timeout_s: 120
   tool_result_max_bytes: 65536
+  repetition_identical_cap: 5 # repetition breaker: consecutive identical calls (same signature, D43)
+  repetition_window: 30 # repetition breaker: trailing-call window size
+  repetition_min_distinct: 4 # repetition breaker: distinct-signature floor in a full window
+  repetition_same_tool_error_cap: 8 # repetition breaker: consecutive same-tool error/revert run
 
 budget_usd: 10.0
 t_max_days: 30

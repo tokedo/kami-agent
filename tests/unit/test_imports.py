@@ -21,6 +21,7 @@ MODULES = [
     "kami_agent.tools.scaffold",
     "kami_agent.tools.truncation",
     "kami_agent.governor",
+    "kami_agent.repetition",
     "kami_agent.telemetry",
     "kami_agent.state",
     "kami_agent.supervisor",
