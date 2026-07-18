@@ -181,6 +181,26 @@ def test_the_reasoning_token_fold():
     assert response.usage.input_tokens == 2000
 
 
+def test_absent_cache_fields_normalize_to_zero():
+    adapter, _ = make_adapter(load_fixture("text_stop"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.usage.cache_read_tokens == 0
+    assert response.usage.cache_write_tokens == 0
+
+
+def test_cached_content_tokens_are_a_component_not_an_addition():
+    # promptTokenCount already INCLUDES cached tokens (SPEC §5.2): the
+    # total passes through unchanged; cachedContentTokenCount is the read
+    # component and implicit caching has no write premium.
+    adapter, _ = make_adapter(load_fixture("cached_usage"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.usage.input_tokens == 16881
+    assert response.usage.cache_read_tokens == 15900
+    assert response.usage.cache_write_tokens == 0
+    uncached = response.usage.input_tokens - response.usage.cache_read_tokens
+    assert uncached == 981
+
+
 def test_max_tokens_and_safety_normalization():
     adapter, _ = make_adapter(load_fixture("max_tokens"))
     assert (

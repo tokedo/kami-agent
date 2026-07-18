@@ -1,0 +1,19 @@
+{
+  "id": "chatcmpl-ExampleCache01",
+  "object": "chat.completion",
+  "created": 1751980800,
+  "model": "gpt-test",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "The workspace is empty." }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 13741,
+    "completion_tokens": 41,
+    "total_tokens": 13782,
+    "prompt_tokens_details": { "cached_tokens": 12800 }
+  }
+}

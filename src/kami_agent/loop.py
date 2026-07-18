@@ -209,6 +209,8 @@ class AgentLoop:
                     input_tokens=0,
                     output_tokens=0,
                     reasoning_tokens=None,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
                     cost=0.0,
                     latency_ms=latency_ms,
                     stop_reason="error",
@@ -234,6 +236,8 @@ class AgentLoop:
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
                 cost=cost,
                 latency_ms=latency_ms,
                 stop_reason=response.stop_reason.value,
@@ -249,6 +253,8 @@ class AgentLoop:
         input_tokens: int,
         output_tokens: int,
         reasoning_tokens: int | None,
+        cache_read_tokens: int,
+        cache_write_tokens: int,
         cost: float,
         latency_ms: float,
         stop_reason: str,
@@ -260,6 +266,11 @@ class AgentLoop:
             "model": self._model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            # Cache decomposition (SPEC §5.2): input_tokens is the total;
+            # these are its components, preserved so per-component provider
+            # CSV columns reconcile exactly.
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "cost_usd": cost,
             "cumulative_usd": self._cumulative_usd,
             "cumulative_tokens": self._cumulative_tokens,

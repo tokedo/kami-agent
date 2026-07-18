@@ -458,6 +458,67 @@ def test_cost_and_cumulative_accounting(run_dir):
     assert llm_events[1]["cumulative_tokens"] == 3300
 
 
+def test_cache_decomposition_reaches_telemetry_and_cost(run_dir):
+    # SPEC §5.2/§8: llm_call preserves the cache decomposition and cost_usd
+    # prices the components; cumulative_tokens stays input+output (total).
+    cached = AdapterResponse(
+        text_blocks=(),
+        tool_calls=(end_call(),),
+        stop_reason=StopReason.TOOL_USE,
+        usage=Usage(
+            input_tokens=10_000, output_tokens=100, cache_read_tokens=8_000, cache_write_tokens=500
+        ),
+    )
+    adapter = ScriptedAdapter(cached)
+    prices = PriceTable(
+        input_usd_per_mtok=3.0,
+        output_usd_per_mtok=15.0,
+        cache_read_usd_per_mtok=0.30,
+        cache_write_usd_per_mtok=3.75,
+    )
+    caps = LoopCaps(session_token_cap=100_000)
+    scaffold = ScaffoldTools(run_dir, session_number=1)
+    telemetry = TelemetryWriter(run_dir / "telemetry.jsonl", run_id="test-run")
+    loop = AgentLoop(
+        adapter=adapter,
+        model="test-model",
+        system="s",
+        kickoff_text=KICKOFF,
+        continuation_text=CONTINUE,
+        scaffold=scaffold,
+        game=None,
+        telemetry=telemetry,
+        session=1,
+        params=PARAMS,
+        prices=prices,
+        caps=caps,
+        sleep=lambda s: None,
+    )
+    result = loop.run()
+    (event,) = events_of(run_dir, "llm_call")
+    assert event["input_tokens"] == 10_000
+    assert event["cache_read_tokens"] == 8_000
+    assert event["cache_write_tokens"] == 500
+    expected = (1_500 * 3.0 + 8_000 * 0.30 + 500 * 3.75 + 100 * 15.0) / 1e6
+    assert event["cost_usd"] == pytest.approx(expected)
+    # cumulative_tokens semantics unchanged: total input + output.
+    assert event["cumulative_tokens"] == 10_100
+    assert result.session_tokens == 10_100
+
+
+def test_failed_attempts_emit_zero_cache_fields(run_dir):
+    adapter = ScriptedAdapter(
+        AdapterError("boom", retryable=True),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter)
+    loop.run()
+    failed = events_of(run_dir, "llm_call")[0]
+    assert failed["usage_unknown"] is True
+    assert failed["cache_read_tokens"] == 0
+    assert failed["cache_write_tokens"] == 0
+
+
 def test_cumulative_carries_across_sessions(run_dir):
     adapter = ScriptedAdapter(response(end_call(), tokens=(1000, 100)))
     caps = {"session_token_cap": 100_000}

@@ -13,8 +13,12 @@ Provider quirks handled here and nowhere else:
   safety-class terminations map to ``refusal``;
 - ``reasoning_effort`` has no native equivalent and is not sent
   (adapters tolerate provider-specific param subsets, §5.5);
-- caching-neutral (D16): implicit provider-side caching may occur but is
-  never requested; retries are the loop's job (SPEC §5.5).
+- implicit provider-side caching is measured, not managed (SPEC §5.2):
+  nothing is requested, but ``cachedContentTokenCount`` is normalized
+  into ``cache_read_tokens``. ``promptTokenCount`` already INCLUDES
+  cached tokens, so canonical ``input_tokens`` passes through unchanged;
+  there is no write premium (``cache_write_tokens`` = 0);
+- retries are the loop's job (SPEC §5.5).
 """
 
 from __future__ import annotations
@@ -182,17 +186,23 @@ def _normalize(response: Any) -> AdapterResponse:
     usage = response.usage_metadata
     thoughts = getattr(usage, "thoughts_token_count", None)
     candidates_tokens = (usage.candidates_token_count or 0) if usage else 0
+    cached = getattr(usage, "cached_content_token_count", None) if usage else None
     return AdapterResponse(
         text_blocks=text_blocks,
         tool_calls=tuple(tool_calls),
         stop_reason=_normalize_stop_reason(candidate.finish_reason, bool(tool_calls)),
         provider_state=provider_state,
         usage=Usage(
+            # promptTokenCount already INCLUDES cached tokens (§5.2): the
+            # total passes through; cachedContentTokenCount is the read
+            # component (0 when absent) and implicit caching has no write
+            # premium.
             input_tokens=(usage.prompt_token_count or 0) if usage else 0,
             # The D16 fold: Gemini reports thoughts outside the candidate
             # count; output_tokens must include them.
             output_tokens=candidates_tokens + (thoughts or 0),
             reasoning_tokens=thoughts,
+            cache_read_tokens=cached or 0,
         ),
         provider_meta=response.model_dump(mode="json"),
     )

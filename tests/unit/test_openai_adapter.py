@@ -189,6 +189,26 @@ def test_reasoning_tokens_subset_extracted():
     assert response.usage.reasoning_tokens == 120
 
 
+def test_absent_cache_fields_normalize_to_zero():
+    adapter, _ = make_adapter(load_fixture("text_stop"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.usage.cache_read_tokens == 0
+    assert response.usage.cache_write_tokens == 0
+
+
+def test_cached_prompt_tokens_are_a_component_not_an_addition():
+    # prompt_tokens already INCLUDES cached tokens (SPEC §5.2): the total
+    # passes through unchanged; cached_tokens is the read component and
+    # automatic caching has no write premium.
+    adapter, _ = make_adapter(load_fixture("cached_usage"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.usage.input_tokens == 13741
+    assert response.usage.cache_read_tokens == 12800
+    assert response.usage.cache_write_tokens == 0
+    uncached = response.usage.input_tokens - response.usage.cache_read_tokens
+    assert uncached == 941
+
+
 def test_length_and_content_filter_normalization():
     adapter, _ = make_adapter(load_fixture("length"))
     assert (
