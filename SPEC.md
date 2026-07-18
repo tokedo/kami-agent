@@ -1,6 +1,6 @@
-# kami-agent — Reference Scaffold Specification (v1.4)
+# kami-agent — Reference Scaffold Specification (v1.5)
 
-Status: **v1.4 — approved for implementation** (v1 superseded the v0
+Status: **v1.5 — approved for implementation** (v1 superseded the v0
 draft; §13 open decisions resolved as D12–D15, engineering semantics
 fixed as D16–D19; v1.1 amended §11 per D21 — CI smoke split into a
 per-PR recorded-surface gate and a scheduled live-harness tier; v1.2
@@ -12,7 +12,14 @@ the caching-neutral clause of D16 is superseded: provider-side
 prompt-cache usage is measured on all three providers, Anthropic
 caching is explicitly requested via `cache_control` request metadata,
 and `cost_usd` is cache-aware; prompt bytes and every agent-visible
-channel are unchanged (D12 intact) — see kami-lab `DECISIONS.md`)
+channel are unchanged (D12 intact); v1.5 amends §3, §4, §5.5, §6, §8,
+§9 per D40, D41, D43 — the 001 behavioral iteration: a silent
+repetition breaker as a third forced-ending class (D40), carried
+execution of a cap-skipped final-turn `set_next_wake` (D41), and the
+D43 bundle — three system-prompt items, workspace-root-relative file
+paths, empty-response retry semantics, and consecutive (not
+cumulative) identical-call counting; D12/D13 silence is unchanged —
+see kami-lab `DECISIONS.md`)
 Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
 Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
 documentation), `kami-lab` (experiment orchestration — private).
@@ -112,19 +119,52 @@ supervisor (cron @ poll cadence + lockfile)
    - context guard trips: last call's `input_tokens + output_tokens ≥
      session_token_cap` (D17)
    - `session_tool_cap` tool executions reached
+   - repetition breaker trips (D40) — three mechanical rules evaluated
+     after every executed tool call, knobs pinned per manifest (§9):
+     (a) **identical_call** — the same signature (tool name +
+     normalized-args hash) executed `repetition_identical_cap`
+     (default 5) times consecutively, regardless of success/error
+     (consecutive, not cumulative-per-session — D43; 001 productive
+     sessions legitimately re-read the same signature up to 4 times
+     spread across a session, while the observed identical-call storms
+     were consecutive); (b) **window_diversity** — the last
+     `repetition_window` (default 30) executed calls contain at most
+     `repetition_min_distinct` (default 4) distinct signatures
+     (evaluated only on a full window; the catch for rotating
+     poll cycles that consecutive identical counting misses);
+     (c) **same_tool_errors** — `repetition_same_tool_error_cap`
+     (default 8) consecutive calls of the same tool (args may differ)
+     all classified error-or-revert, where a success-shaped harness
+     result counts when its content carries the harness revert/error
+     markers (on-chain reverts return as successful tool results and
+     never advance `max_consecutive_errors` — this rule is what ends
+     parameter-sweep revert loops)
    - `max_consecutive_errors` consecutive errors (§5.4)
    - model call fails after all retries (§5.5)
 8. **Persist.** Emit `session_end` (reason per §8), flush transcript, update
    `state.json`.
 9. **Schedule.** Apply the agent's last `set_next_wake` request clamped to
    `[wake_min, wake_max]`; if the agent never called it, use `wake_default`.
-   Emit `schedule_next` **every session** with `source: agent | default`.
+   **Carried wake (D41):** when the session ended by token_cap, tool_cap,
+   or repetition and the final assistant turn contained a `set_next_wake`
+   intent the cap prevented from executing, that ONE intent (the last
+   such, per normal last-call-wins) is executed at teardown — validated
+   and clamped exactly as a normal call — before scheduling; the
+   `schedule_next` event carries `carried: true`. Invalid args are
+   discarded with the discard recorded (`carried_invalid: true`; a
+   previously executed wake stands, else `wake_default`). No other
+   skipped intent is ever executed, and intents skipped by
+   `end_session` (D18) are never carried. Emit `schedule_next` **every
+   session** with `source: agent | default`.
 10. **Release lock, exit.**
 
-Forced endings (context guard, tool cap, errors) are silent (D13): no warning
-message, no final model call, no disclosure in the system prompt that caps
-exist. The agent discovers the truncation next session — or doesn't; how each
-model copes with unexplained interruption is measured behavior.
+Forced endings (context guard, tool cap, repetition, errors) are silent
+(D13): no warning message, no final model call, no disclosure in the system
+prompt that caps or breaker rules exist. The agent discovers the truncation
+next session — or doesn't; how each model copes with unexplained
+interruption is measured behavior. The carried wake (D41) is equally
+invisible: no tool result is produced and no tool_call event is emitted
+for it.
 
 ## 4. Scaffold tools (non-game; never part of the kami-harness MCP surface)
 
@@ -139,7 +179,12 @@ model copes with unexplained interruption is measured behavior.
 | `end_session` | (reason: free text) | Graceful termination; reason logged. Effective immediately: later intents in the same parallel batch are skipped and logged as skipped. |
 
 All file paths are sandboxed: resolved paths must fall under `workspace/` or
-`reference/`; traversal outside either root is an error. `reference/` contains
+`reference/`; traversal outside either root is an error. **Paths are
+relative to the workspace root (D43):** a bare `notes.md` and a prefixed
+`workspace/notes.md` name the same file (exactly one leading `workspace/`
+segment is stripped); `reference/...` addresses the read-only tree. Tool
+descriptions state this fact. Bare paths therefore can never resolve to
+run-directory internals. `reference/` contains
 the bundled GDD snapshot at the pinned SHA (D14), read-only by construction.
 
 Game perception and action come exclusively from the kami-harness MCP tools,
@@ -260,6 +305,11 @@ where applicable (D19). Truncation is recorded on the `tool_call` event
   budget when the provider reports usage; failures with unknowable usage are
   logged `usage_unknown: true` at cost 0 (the token-count reconciliation in
   the smoke checklist bounds the resulting error).
+- **Empty responses (D43):** an adapter response with no text, no tool
+  calls, and zero usage is a provider fault, retried under the same
+  backoff and logged as an `llm_call` with `empty_response: true` at
+  cost 0 — it never enters the §5.4 continuation/error path. A genuine
+  empty-but-billed response (nonzero usage) keeps the §5.4 handling.
 - Retries exhausted → session ends (`reason: errors`).
 - Sampling params pinned per run in the manifest (temperature where the model
   accepts it, max_tokens, reasoning effort where applicable). Adapters
@@ -272,7 +322,9 @@ Contents, in order (final wording in `prompts/system.txt`, frozen per run):
 
 1. Situation: you are an autonomous agent in Kamigotchi, a persistent
    on-chain world with other players. Sessions are periodic; the world
-   advances between them.
+   advances between them. You act only through tool calls; no human
+   reads or replies to anything you write, and text outside tool calls
+   has no effect on the world (D43).
 2. Objective: complete as many quests as possible.
 3. Persistence: `workspace/` survives between sessions; nothing else you
    write or think does. Its use and structure are entirely up to you.
@@ -280,7 +332,12 @@ Contents, in order (final wording in `prompts/system.txt`, frozen per run):
 5. Tools: game tools (from the environment) and scaffold tools (files,
    scheduling, status).
 6. Scheduling: you choose when to wake next via `set_next_wake`, within
-   [wake_min, wake_max].
+   [wake_min, wake_max]. You cannot wait or pause within a session; to
+   wait for something, choose the next wake and end the session (D43).
+7. Transaction cost (D43): on-chain actions cost gas even when they
+   fail — a reverted transaction consumes gas without changing the
+   world; diagnose why an action failed before submitting it again.
+   (Gas is a world mechanic, outside the D12 exclusions.)
 
 Explicitly excluded (D12, D13): any mention of budget, cost, tokens, compute
 limits, run duration, session caps, forced truncation, or the existence of a
@@ -321,12 +378,12 @@ Common fields: `ts` (ISO-8601 UTC), `run_id`, `session`, `event`.
 |---|---|
 | `run_start` | manifest_hash, model, harness_sha, agent_sha, gdd_sha, harness_tools (name list), price_table |
 | `session_start` | trigger (scheduled \| manual), budget_remaining_usd, wallclock_elapsed_s, tools_hash |
-| `llm_call` | model, input_tokens, output_tokens, reasoning_tokens?, cache_read_tokens, cache_write_tokens, cost_usd, cumulative_usd, cumulative_tokens, latency_ms, stop_reason, retry_count, usage_unknown?, continuation? (true when this call follows a continuation send, §5.4) |
+| `llm_call` | model, input_tokens, output_tokens, reasoning_tokens?, cache_read_tokens, cache_write_tokens, cost_usd, cumulative_usd, cumulative_tokens, latency_ms, stop_reason, retry_count, usage_unknown?, continuation? (true when this call follows a continuation send, §5.4), empty_response? (retried empty response, §5.5, D43) |
 | `tool_call` | tool, source (harness \| scaffold), path? (file tools), duration_ms, ok, error?, truncated?, original_bytes?, skipped?, tx_hash? |
 | `workspace_write` | path, bytes, workspace_total_bytes |
 | `workspace_delete` | path, workspace_total_bytes |
-| `schedule_next` | source (agent \| default), requested_min?, clamped_min, next_wake_at |
-| `session_end` | reason (agent \| token_cap \| tool_cap \| errors \| crash), llm_calls, tool_calls, session_cost_usd, session_tokens |
+| `schedule_next` | source (agent \| default), requested_min?, clamped_min, next_wake_at, carried? (D41), carried_invalid? (D41) |
+| `session_end` | reason (agent \| token_cap \| tool_cap \| errors \| repetition \| crash), llm_calls, tool_calls, session_cost_usd, session_tokens, repetition_rule? (identical_call \| window_diversity \| same_tool_errors, D40), repetition_signature?, repetition_tool?, repetition_count?, repetition_window?, repetition_distinct?, repetition_signatures? |
 | `run_complete` | reason (budget \| t_max \| manual), totals (sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd) |
 
 Notes:
@@ -371,7 +428,10 @@ Notes:
   the smallest study-model context window; set when the model list is final),
   `session_tool_cap` (50), `max_consecutive_errors` (5),
   `retry_max_attempts` (5), `tool_timeout_s` (120),
-  `tool_result_max_bytes` (65536), `workspace_quota_bytes` (10 MB),
+  `tool_result_max_bytes` (65536), `repetition_identical_cap` (5,
+  consecutive — D43), `repetition_window` (30),
+  `repetition_min_distinct` (4), `repetition_same_tool_error_cap` (8)
+  (the D40 breaker knobs, §3 step 7), `workspace_quota_bytes` (10 MB),
   `wake_min` (5 min), `wake_max` (24 h), `wake_default` (60 min),
   `poll_cadence` (5 min), `lock_stale_s`.
 - **Fixed-floor arithmetic:** every call re-sends the system prompt, file

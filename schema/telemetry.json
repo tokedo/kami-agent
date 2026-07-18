@@ -218,7 +218,7 @@
         },
         "repetition_signature": {
           "type": "string",
-          "description": "identical_call: the tripping signature (tool name + normalized-args hash)"
+          "description": "identical_call: the consecutively repeated signature (tool name + normalized-args hash)"
         },
         "repetition_tool": {
           "type": "string",
@@ -227,7 +227,7 @@
         "repetition_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "identical_call: executions of the tripping signature this session; same_tool_errors: length of the consecutive error/revert run"
+          "description": "identical_call: length of the consecutive identical-call run (D43); same_tool_errors: length of the consecutive error/revert run"
         },
         "repetition_window": {
           "type": "integer",

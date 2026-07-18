@@ -122,7 +122,8 @@ def test_identical_reverted_retries_trip_identical_call_at_5(run_dir):
     result = run_loop(run_dir, adapter, game)
     assert result.reason == "repetition"
     assert result.repetition.rule == "identical_call"
-    # Trip point: the 5th identical execution, well before tool_cap (50).
+    # Trip point: the 5th consecutive identical execution, well before
+    # tool_cap (50). 001's storms were consecutive (D43).
     assert len(tool_events(run_dir)) == 5
     assert result.repetition.fields["repetition_count"] == 5
     expected_sig = signature("quest_accept", {"quest_index": 3})
@@ -161,27 +162,13 @@ def cycle_intents(n):
     ][:n]
 
 
-def test_rotating_poll_loop_trips_at_defaults(run_dir):
-    # With the default knobs the identical-call rule dominates the window
-    # rule (pigeonhole: a full 30-call window with <= 4 distinct signatures
-    # contains a signature repeated >= 8 >= 5 times, which trips earlier):
-    # the first cycled signature reaches 5 executions at call 17.
+def test_rotating_poll_loop_trips_window_diversity_at_defaults(run_dir):
+    # Consecutive identical counting (D43) never fires on a rotating cycle
+    # (identical streak resets every call); the window rule is the designed
+    # catch — full window (30) holding only 4 distinct signatures.
     game = ScriptedGame({"get_active_quests": SUCCESS, "get_account_kamis": SUCCESS})
     adapter = ScriptedAdapter(*[response(intent) for intent in cycle_intents(48)])
     result = run_loop(run_dir, adapter, game)
-    assert result.reason == "repetition"
-    assert result.repetition.rule == "identical_call"
-    assert len(tool_events(run_dir)) == 17
-    assert result.repetition.fields["repetition_signature"] == signature("get_status", {})
-
-
-def test_rotating_poll_loop_trips_window_diversity_when_identical_cap_is_higher(run_dir):
-    # The window rule is the live catch for rotating read-sets under any
-    # manifest that pins a higher identical cap: full window (30) with only
-    # 4 distinct signatures.
-    game = ScriptedGame({"get_active_quests": SUCCESS, "get_account_kamis": SUCCESS})
-    adapter = ScriptedAdapter(*[response(intent) for intent in cycle_intents(48)])
-    result = run_loop(run_dir, adapter, game, repetition_identical_cap=50)
     assert result.reason == "repetition"
     assert result.repetition.rule == "window_diversity"
     assert len(tool_events(run_dir)) == 30
@@ -190,6 +177,23 @@ def test_rotating_poll_loop_trips_window_diversity_when_identical_cap_is_higher(
     assert sorted(result.repetition.fields["repetition_signatures"]) == sorted(
         signature(name, args) for name, args in CYCLE
     )
+
+
+def test_interleaved_evasion_shape_trips_window_diversity(run_dir):
+    # A,A,A,A,B repeating: each identical streak stops at 4 (under the
+    # consecutive cap), but the 30-call window holds only 2 distinct
+    # signatures — a rotating read-set by another name (audit D43 note).
+    intents = []
+    for block in range(8):
+        for j in range(4):
+            intents.append(call("get_status", {}, f"a{block}-{j}"))
+        intents.append(call("workspace_list", {}, f"b{block}"))
+    adapter = ScriptedAdapter(*[response(intent) for intent in intents])
+    result = run_loop(run_dir, adapter, game=None)
+    assert result.reason == "repetition"
+    assert result.repetition.rule == "window_diversity"
+    assert len(tool_events(run_dir)) == 30
+    assert result.repetition.fields["repetition_distinct"] == 2
 
 
 # --- 001 pathology 4: parameter sweep, consecutive reverts (44-47x in 001) -------
@@ -228,8 +232,8 @@ def test_sweep_of_loop_level_errors_still_ends_via_error_cap_first(run_dir):
 def test_productive_session_with_occasional_retries_does_not_trip(run_dir):
     # 34 executed calls: varied tools, distinct args, two identical failed
     # retries of the same read (then success), get_status polled 4 times —
-    # every signature stays under the identical cap, every full 30-window
-    # holds well over 4 distinct signatures, and no same-tool error run
+    # no identical run reaches 5 consecutive, every full 30-window holds
+    # well over 4 distinct signatures, and no same-tool error run
     # approaches 8.
     game = ScriptedGame({"get_kami": SUCCESS})
     intents = []
@@ -292,6 +296,21 @@ def test_is_error_or_revert_classification():
     assert not is_error_or_revert(True, json.dumps({"error": None}))
     assert not is_error_or_revert(True, "plain text result")
     assert not is_error_or_revert(True, json.dumps({"results": [{"error": "row-level"}]}))
+
+
+def test_identical_call_streak_is_consecutive_not_cumulative():
+    # D43: 4 identical, a different call, 4 more identical — 8 total in the
+    # session, never 5 in a row — must NOT trip; 5 in a row must.
+    tracker = RepetitionTracker(window=1000)
+    for _ in range(2):
+        for _ in range(4):
+            assert tracker.record("get_status", {}, error_or_revert=False) is None
+        assert tracker.record("workspace_list", {}, error_or_revert=False) is None
+    for _ in range(4):
+        assert tracker.record("get_status", {}, error_or_revert=False) is None
+    trip = tracker.record("get_status", {}, error_or_revert=False)
+    assert trip is not None and trip.rule == "identical_call"
+    assert trip.fields["repetition_count"] == 5
 
 
 def test_same_tool_error_streak_resets_on_success_and_on_tool_change():

@@ -7,16 +7,18 @@ mechanical rules, each with a manifest-pinned knob (SPEC §9 caps):
 
 - **identical_call** (``repetition_identical_cap``, default 5): the same
   signature — tool name + normalized-args hash — executed that many
-  times within a session, regardless of success/error.
+  times CONSECUTIVELY, regardless of success/error. Consecutive, not
+  cumulative-per-session (D43): in 001 the maximum identical count in
+  productive sessions was 4 legitimate re-reads, so a cumulative cap
+  would clip productive behavior with a one-call margin, while the
+  observed identical-call storms were consecutive and still trip at 5.
 - **window_diversity** (``repetition_window`` 30 /
   ``repetition_min_distinct`` 4): over the last ``window`` executed
   calls the number of distinct signatures is at or below the floor —
   the session is cycling a small read-set. Evaluated only once the
-  window is full. Note: with the default knobs the identical-call rule
-  dominates (any full 30-call window with <= 4 distinct signatures
-  contains a signature repeated >= 8 >= 5 times, which tripped earlier);
-  the rule is live mechanism for manifests that pin a higher
-  identical cap.
+  window is full. This is the catch for rotating poll loops (and
+  interleaved shapes like A,A,A,A,B repeating) that consecutive
+  identical-call counting misses.
 - **same_tool_errors** (``repetition_same_tool_error_cap``, default 8):
   that many consecutive executed calls of the same tool (args may
   differ) all classified error-or-revert. On-chain reverts surface as
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter, deque
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,7 +104,8 @@ class RepetitionTracker:
     min_distinct: int = DEFAULT_MIN_DISTINCT
     same_tool_error_cap: int = DEFAULT_SAME_TOOL_ERROR_CAP
 
-    _counts: Counter[str] = field(default_factory=Counter)
+    _last_sig: str | None = None
+    _identical_streak: int = 0
     _recent: deque[str] = field(default_factory=deque)
     _streak_tool: str | None = None
     _streak: int = 0
@@ -112,7 +115,11 @@ class RepetitionTracker:
     ) -> RepetitionTrip | None:
         """Fold one executed call in; return the trip if any rule fires."""
         sig = signature(name, args)
-        self._counts[sig] += 1
+        if sig == self._last_sig:
+            self._identical_streak += 1
+        else:
+            self._last_sig = sig
+            self._identical_streak = 1
         self._recent.append(sig)
         if len(self._recent) > self.window:
             self._recent.popleft()
@@ -126,10 +133,10 @@ class RepetitionTracker:
             self._streak_tool = None
             self._streak = 0
 
-        if self._counts[sig] >= self.identical_cap:
+        if self._identical_streak >= self.identical_cap:
             return RepetitionTrip(
                 RULE_IDENTICAL,
-                {"repetition_signature": sig, "repetition_count": self._counts[sig]},
+                {"repetition_signature": sig, "repetition_count": self._identical_streak},
             )
         if len(self._recent) >= self.window:
             distinct = sorted(set(self._recent))
