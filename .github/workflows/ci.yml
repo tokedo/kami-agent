@@ -23,6 +23,38 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest tests/unit
 
+  # One full run-session under a cron-like environment: minimal PATH,
+  # explicit HOME, non-interactive shell, no provider keys (stub adapter),
+  # fake MCP harness fixture spawned by absolute interpreter path. Guards
+  # the two 001 launch-day defect classes: PATH-dependent binary resolution
+  # and missing-env assumptions. Success is judged by explicit markers and
+  # real exit codes — output goes to a file, grep runs on the file (never
+  # through a pipe), and every command's status fails the step directly.
+  cron-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - name: run one session under a cron-like environment
+        run: |
+          CRON_HOME="$RUNNER_TEMP/cron-home"
+          RUN_DIR="$RUNNER_TEMP/cron-run/run"
+          OUT="$RUNNER_TEMP/cron-smoke.out"
+          mkdir -p "$CRON_HOME"
+          set +e
+          env -i PATH=/usr/bin:/bin HOME="$CRON_HOME" sh -c \
+            "'$PWD/.venv/bin/python' '$PWD/tests/cron_smoke/stub_session.py' '$RUN_DIR'" \
+            > "$OUT" 2>&1
+          status=$?
+          set -e
+          echo "--- session output (exit $status) ---"
+          cat "$OUT"
+          test "$status" -eq 0
+          grep -q "^initialized " "$OUT"
+          grep -qx "session_ran" "$OUT"
+          "$PWD/.venv/bin/python" "$PWD/tests/cron_smoke/check_telemetry.py" "$RUN_DIR"
+
   # Tri-provider live tier (SPEC §11.2, amended per kami-lab D21): real
   # provider APIs against the recorded harness tool surface with simulated
   # tool execution. The full live-harness variant is the separate

@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC §8)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC §7.1); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -112,6 +112,10 @@
         "continuation": {
           "type": "boolean",
           "description": "True when this call follows a continuation send (SPEC §5.4)"
+        },
+        "empty_response": {
+          "type": "boolean",
+          "description": "True for a provider response with no text, no tool calls, and zero usage — treated as a retryable provider error under the SPEC §5.5 backoff, logged at cost 0"
         }
       },
       "required": [
@@ -186,6 +190,14 @@
           "type": "string",
           "format": "date-time",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(\\+00:00|Z)$"
+        },
+        "carried": {
+          "type": "boolean",
+          "description": "True when the applied wake came from a cap-skipped final-turn set_next_wake intent, executed (validated and clamped as normal) at session teardown on a token_cap/tool_cap/repetition ending"
+        },
+        "carried_invalid": {
+          "type": "boolean",
+          "description": "True when the cap-skipped final-turn set_next_wake intent had invalid args and was discarded; the schedule falls back to normal semantics (prior agent-set wake if one executed, else wake_default)"
         }
       },
       "required": ["source", "clamped_min", "next_wake_at"],
@@ -195,11 +207,43 @@
       "allOf": [{ "$ref": "#/$defs/common" }],
       "properties": {
         "event": { "const": "session_end" },
-        "reason": { "enum": ["agent", "token_cap", "tool_cap", "errors", "crash"] },
+        "reason": { "enum": ["agent", "token_cap", "tool_cap", "errors", "repetition", "crash"] },
         "llm_calls": { "type": "integer", "minimum": 0 },
         "tool_calls": { "type": "integer", "minimum": 0 },
         "session_cost_usd": { "type": "number", "minimum": 0 },
-        "session_tokens": { "type": "integer", "minimum": 0 }
+        "session_tokens": { "type": "integer", "minimum": 0 },
+        "repetition_rule": {
+          "enum": ["identical_call", "window_diversity", "same_tool_errors"],
+          "description": "Which repetition-breaker rule ended the session; present when reason is repetition"
+        },
+        "repetition_signature": {
+          "type": "string",
+          "description": "identical_call: the tripping signature (tool name + normalized-args hash)"
+        },
+        "repetition_tool": {
+          "type": "string",
+          "description": "same_tool_errors: the tool whose consecutive error/revert run tripped"
+        },
+        "repetition_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "identical_call: executions of the tripping signature this session; same_tool_errors: length of the consecutive error/revert run"
+        },
+        "repetition_window": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "window_diversity: the evaluated window size (repetition_window knob)"
+        },
+        "repetition_distinct": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "window_diversity: distinct signatures observed in the window"
+        },
+        "repetition_signatures": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "window_diversity: the distinct signatures the session was cycling"
+        }
       },
       "required": ["reason", "llm_calls", "tool_calls", "session_cost_usd", "session_tokens"],
       "unevaluatedProperties": false

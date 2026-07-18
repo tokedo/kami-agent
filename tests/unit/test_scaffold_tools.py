@@ -54,6 +54,18 @@ def test_write_creates_parents_and_reports(tools, run_dir, emitted):
     ]
 
 
+def test_bare_and_prefixed_paths_name_the_same_file(tools, run_dir, emitted):
+    # Paths are relative to the workspace root: "notes.md" ==
+    # "workspace/notes.md" (one leading workspace/ segment stripped).
+    tools.execute("workspace_write", {"path": "notes.md", "content": "bare"})
+    assert (run_dir / "workspace" / "notes.md").read_text() == "bare"
+    assert tools.execute("workspace_read", {"path": "workspace/notes.md"}) == "bare"
+    # Telemetry paths stay canonical (workspace/-prefixed) either way.
+    assert emitted[0][1]["path"] == "workspace/notes.md"
+    tools.execute("workspace_delete", {"path": "notes.md"})
+    assert not (run_dir / "workspace" / "notes.md").exists()
+
+
 def test_write_overwrites_whole_file(tools, run_dir):
     tools.execute("workspace_write", {"path": "workspace/f.txt", "content": "long old content"})
     tools.execute("workspace_write", {"path": "workspace/f.txt", "content": "new"})

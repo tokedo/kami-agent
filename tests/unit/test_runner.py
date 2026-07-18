@@ -201,6 +201,64 @@ def test_default_schedule_when_agent_never_calls_set_next_wake(run_dir):
     assert schedule["next_wake_at"] == (T0 + timedelta(minutes=60)).isoformat()
 
 
+# --- repetition ending + carried set_next_wake ------------------------------------
+
+
+def test_repetition_ending_emits_rule_fields_and_carried_wake(run_dir):
+    # Five identical polls trip the identical-call rule; the tripping
+    # batch's unexecuted set_next_wake is carried into schedule_next.
+    def status_call(i):
+        return ToolCall(id=f"s{i}", name="get_status", args={})
+
+    script = [response(status_call(i)) for i in range(4)]
+    script.append(response(status_call(4), wake_call(75)))
+    adapter = ScriptedAdapter(*script)
+    outcome = run_session(config_for(run_dir), adapter, clock=Clock())
+    assert outcome == SESSION_RAN
+
+    end = events_of(run_dir, "session_end")[0]
+    assert end["reason"] == "repetition"
+    assert end["repetition_rule"] == "identical_call"
+    assert end["repetition_count"] == 5
+    assert end["repetition_signature"].startswith("get_status:")
+
+    schedule = events_of(run_dir, "schedule_next")[0]
+    assert schedule["source"] == "agent"
+    assert schedule["carried"] is True
+    assert schedule["requested_min"] == 75
+    assert schedule["clamped_min"] == 75.0
+
+
+def test_invalid_carried_wake_falls_back_to_default_with_discard_recorded(run_dir):
+    def status_call(i):
+        return ToolCall(id=f"s{i}", name="get_status", args={})
+
+    script = [response(status_call(i)) for i in range(4)]
+    script.append(
+        response(
+            status_call(4),
+            ToolCall(id="w", name="set_next_wake", args={"minutes_from_now": "soon"}),
+        )
+    )
+    adapter = ScriptedAdapter(*script)
+    assert run_session(config_for(run_dir), adapter, clock=Clock()) == SESSION_RAN
+    schedule = events_of(run_dir, "schedule_next")[0]
+    assert schedule["source"] == "default"
+    assert schedule["carried_invalid"] is True
+    assert "carried" not in schedule
+    assert schedule["clamped_min"] == 60.0
+
+
+def test_normal_session_emits_no_carried_fields(run_dir):
+    adapter = ScriptedAdapter(response(wake_call(90), end_call()))
+    run_session(config_for(run_dir), adapter, clock=Clock())
+    schedule = events_of(run_dir, "schedule_next")[0]
+    assert "carried" not in schedule
+    assert "carried_invalid" not in schedule
+    end = events_of(run_dir, "session_end")[0]
+    assert "repetition_rule" not in end
+
+
 # --- boundary checks (D13) --------------------------------------------------------
 
 

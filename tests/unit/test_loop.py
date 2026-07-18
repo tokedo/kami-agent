@@ -546,6 +546,191 @@ def test_cumulative_carries_across_sessions(run_dir):
     assert result.cumulative_tokens == 1_001_100
 
 
+# --- carried set_next_wake (cap-skipped final-turn intent) -------------------------
+
+
+def test_token_cap_carries_final_turn_wake_intent(run_dir):
+    adapter = ScriptedAdapter(
+        response(
+            call("get_status", id_="s1"),
+            call("set_next_wake", {"minutes_from_now": 45}, id_="w2"),
+            tokens=(59_000, 2_000),
+        ),
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter, session_token_cap=60_000)
+    result = loop.run()
+    assert result.reason == "token_cap"
+    assert result.carried_wake == "applied"
+    # Validated and clamped exactly as normal; no tool_call event, no
+    # tool-result message — the agent never observes the carried execution.
+    assert (scaffold.requested_wake_min, scaffold.clamped_wake_min) == (45, 45.0)
+    assert events_of(run_dir, "tool_call") == []
+    assert not any(isinstance(m, ToolResultMessage) for m in result.messages)
+
+
+def test_tool_cap_carries_unexecuted_wake_from_tripping_batch(run_dir):
+    adapter = ScriptedAdapter(
+        response(
+            call("get_status", id_="s1"),
+            call("workspace_list", id_="l2"),
+            call("set_next_wake", {"minutes_from_now": 30}, id_="w3"),
+        )
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter, session_tool_cap=2)
+    result = loop.run()
+    assert result.reason == "tool_cap"
+    assert result.carried_wake == "applied"
+    assert scaffold.clamped_wake_min == 30.0
+    assert len(events_of(run_dir, "tool_call")) == 2  # the carried intent emits none
+
+
+def test_last_unexecuted_wake_wins_and_overrides_executed_one(run_dir):
+    # Normal last-call-wins semantics extend to the carried intent.
+    adapter = ScriptedAdapter(
+        response(
+            call("set_next_wake", {"minutes_from_now": 60}, id_="w1"),
+            call("get_status", id_="s2"),
+            call("set_next_wake", {"minutes_from_now": 120}, id_="w3"),
+            call("set_next_wake", {"minutes_from_now": 240}, id_="w4"),
+        )
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter, session_tool_cap=2)
+    result = loop.run()
+    assert result.reason == "tool_cap"
+    assert result.carried_wake == "applied"
+    assert scaffold.clamped_wake_min == 240.0
+
+
+def test_invalid_carried_wake_is_discarded_and_recorded(run_dir):
+    adapter = ScriptedAdapter(
+        response(
+            call("get_status", id_="s1"),
+            call("set_next_wake", {"minutes_from_now": "soon"}, id_="w2"),
+            tokens=(59_000, 2_000),
+        ),
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter, session_token_cap=60_000)
+    result = loop.run()
+    assert result.reason == "token_cap"
+    assert result.carried_wake == "invalid"
+    assert scaffold.clamped_wake_min is None  # falls back to wake_default in the runner
+
+
+def test_invalid_carried_wake_leaves_prior_executed_wake_standing(run_dir):
+    adapter = ScriptedAdapter(
+        response(call("set_next_wake", {"minutes_from_now": 90}, id_="w1")),
+        response(
+            call("set_next_wake", {"minutes_from_now": "soon"}, id_="w2"),
+            tokens=(59_000, 2_000),
+        ),
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter, session_token_cap=60_000)
+    result = loop.run()
+    assert result.carried_wake == "invalid"
+    assert scaffold.clamped_wake_min == 90.0  # the executed wake stands
+
+
+def test_errors_ending_never_carries_a_wake(run_dir):
+    adapter = ScriptedAdapter(
+        response(
+            call("no_such_tool", id_="x1"),
+            call("no_such_tool", id_="x2"),
+            call("set_next_wake", {"minutes_from_now": 15}, id_="w3"),
+        )
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter, max_consecutive_errors=2)
+    result = loop.run()
+    assert result.reason == "errors"
+    assert result.carried_wake is None
+    assert scaffold.clamped_wake_min is None
+
+
+def test_end_session_skipped_wake_is_never_carried(run_dir):
+    # D18 semantics unchanged: intents skipped by end_session stay skipped.
+    adapter = ScriptedAdapter(
+        response(
+            end_call(id_="e1"),
+            call("set_next_wake", {"minutes_from_now": 15}, id_="w2"),
+        )
+    )
+    loop, scaffold, _ = make_loop(run_dir, adapter)
+    result = loop.run()
+    assert result.reason == "agent"
+    assert result.carried_wake is None
+    assert scaffold.clamped_wake_min is None
+
+
+def test_cap_without_wake_intent_carries_nothing(run_dir):
+    adapter = ScriptedAdapter(
+        response(call("get_status", id_="s1"), tokens=(59_000, 2_000)),
+    )
+    loop, _, _ = make_loop(run_dir, adapter, session_token_cap=60_000)
+    result = loop.run()
+    assert result.reason == "token_cap"
+    assert result.carried_wake is None
+
+
+# --- empty LLM responses (retryable provider fault) --------------------------------
+
+
+def empty_response():
+    return AdapterResponse(
+        text_blocks=(),
+        tool_calls=(),
+        stop_reason=StopReason.END_TURN,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+
+
+def test_empty_zero_usage_response_is_retried_with_backoff(run_dir):
+    sleeps = []
+    adapter = ScriptedAdapter(
+        empty_response(),
+        empty_response(),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter, sleeps=sleeps)
+    result = loop.run()
+    assert result.reason == "agent"
+    assert sleeps == [1.0, 2.0]
+    llm_events = events_of(run_dir, "llm_call")
+    assert [e.get("empty_response", False) for e in llm_events] == [True, True, False]
+    assert [e["retry_count"] for e in llm_events] == [0, 1, 2]
+    assert [e["cost_usd"] for e in llm_events][:2] == [0.0, 0.0]
+    # Usage was known (zero), not unknowable.
+    assert all("usage_unknown" not in e for e in llm_events)
+    # Never leaked into the continuation path: no continuation user message,
+    # no assistant turn recorded for the empty attempts.
+    assert all(not isinstance(m, UserMessage) or m.text == KICKOFF for m in result.messages)
+    assert result.llm_calls == 3
+
+
+def test_empty_responses_exhaust_retries_and_end_session(run_dir):
+    adapter = ScriptedAdapter(*[empty_response() for _ in range(3)])
+    loop, _, _ = make_loop(run_dir, adapter, retry_max_attempts=2)
+    result = loop.run()
+    assert result.reason == "errors"
+    assert result.llm_calls == 3  # initial + 2 retries, all logged
+
+
+def test_empty_but_billed_response_keeps_continuation_handling(run_dir):
+    # Nonzero usage means the provider really produced (and billed) an
+    # empty turn — the §5.4 continuation path applies, not the retry path.
+    billed_empty = AdapterResponse(
+        text_blocks=(),
+        tool_calls=(),
+        stop_reason=StopReason.END_TURN,
+        usage=Usage(input_tokens=1000, output_tokens=1),
+    )
+    adapter = ScriptedAdapter(billed_empty, response(end_call()))
+    loop, _, _ = make_loop(run_dir, adapter)
+    result = loop.run()
+    assert result.reason == "agent"
+    llm_events = events_of(run_dir, "llm_call")
+    assert "empty_response" not in llm_events[0]
+    assert llm_events[1]["continuation"] is True
+
+
 # --- misc ------------------------------------------------------------------------
 
 

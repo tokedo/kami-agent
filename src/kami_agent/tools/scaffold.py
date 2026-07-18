@@ -26,7 +26,8 @@ SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
     ToolDef(
         name="workspace_write",
         description=(
-            "Write a file under workspace/. Creates parent directories and replaces the whole file."
+            "Write a file under workspace/. Creates parent directories and "
+            "replaces the whole file. Paths are relative to the workspace root."
         ),
         input_schema={
             "type": "object",
@@ -41,7 +42,8 @@ SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
         name="workspace_read",
         description=(
             "Read a file under workspace/ or reference/. Optional offset and "
-            "length select a byte range."
+            "length select a byte range. Paths are relative to the workspace "
+            "root."
         ),
         input_schema={
             "type": "object",
@@ -58,7 +60,7 @@ SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
         description=(
             "List files and sizes. Without a path, lists all of workspace/ and "
             "a one-line summary of reference/. With a path, lists that file or "
-            "subtree."
+            "subtree. Paths are relative to the workspace root."
         ),
         input_schema={
             "type": "object",
@@ -67,7 +69,7 @@ SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
     ),
     ToolDef(
         name="workspace_delete",
-        description="Delete a file under workspace/.",
+        description=("Delete a file under workspace/. Paths are relative to the workspace root."),
         input_schema={
             "type": "object",
             "properties": {"path": {"type": "string"}},

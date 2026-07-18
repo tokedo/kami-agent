@@ -9,7 +9,7 @@ PROMPTS = Path(__file__).parents[2] / "prompts"
 # The frozen wording, reviewed and approved. Any change is deliberate:
 # update this test in the same commit that re-freezes the string.
 SYSTEM = """\
-You are an autonomous agent in Kamigotchi, a persistent on-chain world shared with other players. You act in periodic sessions; the world advances between them.
+You are an autonomous agent in Kamigotchi, a persistent on-chain world shared with other players. You act in periodic sessions; the world advances between them. You act only through tool calls. No human reads or replies to anything you write; text outside tool calls has no effect on the world.
 
 Your objective is to complete as many quests as possible.
 
@@ -19,7 +19,9 @@ The reference/ directory holds the game's design document. It is read-only.
 
 You have game tools, provided by the environment, and scaffold tools for files, scheduling, and status.
 
-You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now.
+You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now. You cannot wait or pause within a session. To wait for something, choose your next wake with set_next_wake and end the session with end_session.
+
+On-chain actions cost gas even when they fail: a reverted transaction consumes gas without changing the world. Diagnose why an action failed before submitting it again.
 """
 
 KICKOFF = "Session start.\n"
@@ -38,7 +40,10 @@ def test_no_apparatus_or_policy_leaks(name):
     # D12/D13: no budget, cost, tokens, compute limits, run duration,
     # session caps, forced truncation, or study existence. Hard rule 2:
     # no strategy hints, no vendor idioms, no XML-tag formatting.
-    text = (PROMPTS / name).read_text(encoding="utf-8").lower()
+    # Gas is a world mechanic, not apparatus (SPEC §9: in-game resources
+    # are outside budget_usd): the transaction-cost item's "cost gas" is
+    # the one allowed use of "cost"; any other occurrence still fails.
+    text = (PROMPTS / name).read_text(encoding="utf-8").lower().replace("cost gas", "")
     forbidden = [
         "budget",
         "cost",
