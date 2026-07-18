@@ -5,9 +5,11 @@ run_id: dev-smoke-001
 provider: anthropic # anthropic | openai | google
 model: claude-haiku-4-5
 
-price_table: # pinned list prices, USD per million tokens (D16)
+price_table: # pinned list prices, USD per million tokens (D16, cache-aware per SPEC §5.2)
   input_usd_per_mtok: 1.0
   output_usd_per_mtok: 5.0
+  cache_read_usd_per_mtok: 0.10 # anthropic 5m: 0.1 x input rate
+  cache_write_usd_per_mtok: 1.25 # anthropic 5m: 1.25 x input rate
 
 params:
   max_tokens: 4096

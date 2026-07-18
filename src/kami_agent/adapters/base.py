@@ -90,11 +90,22 @@ class Usage:
     fold them in when the provider reports them outside the output count.
     ``reasoning_tokens`` is an informational subset, set when the provider
     reports it.
+
+    ``input_tokens`` is the TOTAL prompt token count for the call (SPEC
+    §5.2 invariant — this is what reconciles against provider dashboards).
+    ``cache_read_tokens`` and ``cache_write_tokens`` are component subsets
+    of ``input_tokens``; the uncached remainder is ``input_tokens −
+    cache_read_tokens − cache_write_tokens``. Providers whose wire usage
+    EXCLUDES cached tokens from the prompt count (Anthropic) fold them back
+    in inside the adapter; providers whose count already includes them
+    (OpenAI, Gemini) pass the total through unchanged.
     """
 
     input_tokens: int
     output_tokens: int
     reasoning_tokens: int | None = None
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)

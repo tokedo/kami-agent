@@ -17,6 +17,7 @@ from kami_agent.adapters.base import (
     AdapterError,
     AssistantMessage,
     ModelAdapter,
+    ProviderState,
     SamplingParams,
     StopReason,
     ToolCall,
@@ -89,7 +90,17 @@ def test_request_shape_system_tools_params():
     (request,) = client.messages.calls
     assert request["model"] == "claude-haiku-4-5"
     assert request["max_tokens"] == 4096
-    assert request["system"] == "You are an agent."
+    # Breakpoint 1 (SPEC §5.2): the last system block carries cache_control;
+    # the system text itself is byte-identical to the plain-string form.
+    assert request["system"] == [
+        {
+            "type": "text",
+            "text": "You are an agent.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    # Tools are untouched (the system breakpoint already covers them —
+    # render order is tools → system → messages).
     assert request["tools"] == [
         {
             "name": "workspace_read",
@@ -97,13 +108,22 @@ def test_request_shape_system_tools_params():
             "input_schema": TOOLS[0].input_schema,
         }
     ]
+    # Rolling breakpoint: last content block of the final message.
     assert request["messages"] == [
-        {"role": "user", "content": [{"type": "text", "text": "Session start."}]}
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Session start.",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
     ]
-    # Not requested → not sent: temperature, effort, and (always) caching.
+    # Not requested → not sent: temperature and effort.
     assert "temperature" not in request
     assert "output_config" not in request
-    assert "cache_control" not in json.dumps(request)
 
 
 def test_optional_params_sent_when_set():
@@ -164,7 +184,13 @@ def test_conversation_mapping_groups_tool_results_into_one_user_message():
                 },
             ],
         },
-        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+        {
+            "role": "assistant",
+            "content": [
+                # Rolling breakpoint: last block of the final message.
+                {"type": "text", "text": "Done.", "cache_control": {"type": "ephemeral"}}
+            ],
+        },
     ]
 
 
@@ -249,6 +275,140 @@ def test_unmappable_stop_reason_raises(value):
     assert not excinfo.value.retryable
 
 
+# --- prompt caching breakpoints (SPEC §5.2) ---------------------------------
+
+
+def _cache_markers(request):
+    """Every cache_control marker in a request, as (location, block_index)."""
+    markers = []
+    system = request.get("system")
+    if isinstance(system, list):
+        for index, block in enumerate(system):
+            if isinstance(block, dict) and "cache_control" in block:
+                markers.append(("system", index))
+    for index, tool in enumerate(request.get("tools") or []):
+        if "cache_control" in tool:
+            markers.append(("tools", index))
+    for position, message in enumerate(request["messages"]):
+        for index, block in enumerate(message["content"]):
+            if isinstance(block, dict) and "cache_control" in block:
+                markers.append((f"messages[{position}]", index))
+    return markers
+
+
+def _conversation_after_turn(intents: int):
+    """kickoff → assistant turn with N intents → N grouped tool results."""
+    calls = tuple(
+        ToolCall(id=f"toolu_{i:03d}", name="workspace_read", args={"path": f"f{i}.md"})
+        for i in range(intents)
+    )
+    return [
+        UserMessage(text="Session start."),
+        AssistantMessage(text="Reading.", tool_calls=calls),
+        *(ToolResultMessage(tool_call_id=call.id, content="ok") for call in calls),
+    ]
+
+
+def test_no_system_anchors_fixed_floor_breakpoint_on_last_tool():
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    adapter.complete("", [UserMessage(text="hi")], TOOLS, PARAMS)
+    (request,) = client.messages.calls
+    assert "system" not in request
+    assert request["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_rolling_breakpoint_moves_forward_across_a_session():
+    """Simulated multi-turn session: the marker is only ever on the newest
+    message; earlier positions carry no marker on later calls (earlier
+    cache entries remain valid read points server-side)."""
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    conversation = _conversation_after_turn(2)
+
+    adapter.complete("s", conversation[:1], TOOLS, PARAMS)  # call 1: kickoff only
+    adapter.complete("s", conversation, TOOLS, PARAMS)  # call 2: turn appended
+    first, second = client.messages.calls
+
+    assert _cache_markers(first) == [("system", 0), ("messages[0]", 0)]
+    # Call 2: the kickoff block no longer carries the marker; it moved to
+    # the last block of the grouped tool-result message.
+    assert _cache_markers(second) == [("system", 0), ("messages[2]", 1)]
+    kickoff_block = second["messages"][0]["content"][0]
+    assert kickoff_block == {"type": "text", "text": "Session start."}
+
+
+def test_small_turn_gets_no_intermediate_breakpoint():
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    adapter.complete("s", _conversation_after_turn(8), TOOLS, PARAMS)
+    (request,) = client.messages.calls
+    # 9 assistant blocks + 8 result blocks = 17 ≤ 20: rolling marker only.
+    assert _cache_markers(request) == [("system", 0), ("messages[2]", 7)]
+
+
+def test_oversized_turn_gets_one_intermediate_breakpoint():
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    adapter.complete("s", _conversation_after_turn(12), TOOLS, PARAMS)
+    (request,) = client.messages.calls
+    # 13 assistant blocks + 12 result blocks = 25 > the 20-block lookback:
+    # the assistant message gets an intermediate marker on its last block
+    # so the rolling marker can still find the previous cache entry.
+    assert _cache_markers(request) == [
+        ("system", 0),
+        ("messages[1]", 12),
+        ("messages[2]", 11),
+    ]
+
+
+def test_breakpoints_never_exceed_provider_maximum():
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    adapter.complete("s", _conversation_after_turn(30), TOOLS, PARAMS)
+    (request,) = client.messages.calls
+    assert len(_cache_markers(request)) <= 4
+
+
+def test_replay_payload_annotation_is_non_destructive():
+    """D22 replay blocks are shared across calls: the annotated block is a
+    serialized copy; the original SDK objects never gain a marker."""
+    replayed = load_fixture("thinking_tool_use").content  # thinking, text, tool_use
+    state = ProviderState(provider="anthropic", payload=tuple(replayed))
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    conversation = [
+        UserMessage(text="go"),
+        AssistantMessage(text=None, tool_calls=(), provider_state=state),
+    ]
+    adapter.complete("s", conversation, [], PARAMS)
+    (request,) = client.messages.calls
+    content = request["messages"][1]["content"]
+    # First two blocks pass through as the original SDK objects.
+    assert content[0] is replayed[0]
+    assert content[1] is replayed[1]
+    # The annotated last block is a content-identical wire dict.
+    assert content[2]["type"] == "tool_use"
+    assert content[2]["id"] == replayed[2].id
+    assert content[2]["input"] == replayed[2].input
+    assert content[2]["cache_control"] == {"type": "ephemeral"}
+    # The shared payload objects are untouched for the next call's replay.
+    assert not hasattr(replayed[2], "cache_control")
+    assert state.payload[2] is replayed[2]
+
+
+def test_thinking_blocks_are_never_annotated():
+    """cache_control is invalid on thinking blocks: the breakpoint walks
+    back past them, or is skipped when no cacheable block exists."""
+    thinking = load_fixture("thinking_tool_use").content[0]
+    state = ProviderState(provider="anthropic", payload=(thinking,))
+    adapter, client = make_adapter(load_fixture("text_end_turn"))
+    conversation = [
+        UserMessage(text="go"),
+        AssistantMessage(text=None, tool_calls=(), provider_state=state),
+    ]
+    adapter.complete("s", conversation, [], PARAMS)
+    (request,) = client.messages.calls
+    # The replay message has no cacheable block → no marker inside it, and
+    # the shared payload object is untouched.
+    assert _cache_markers(request) == [("system", 0)]
+    assert request["messages"][1]["content"][0] is thinking
+
+
 # --- token accounting invariant (SPEC §5.2) --------------------------------
 
 
@@ -261,6 +421,26 @@ def test_usage_passthrough_and_reasoning_tokens_absent():
     assert response.usage.input_tokens == 2521
     assert response.usage.output_tokens == 138
     assert response.usage.reasoning_tokens is None
+    # Absent wire cache fields normalize to zero components.
+    assert response.usage.cache_read_tokens == 0
+    assert response.usage.cache_write_tokens == 0
+
+
+def test_usage_folds_cache_components_into_total_input():
+    adapter, _ = make_adapter(load_fixture("cached_usage"))
+    response = adapter.complete("s", [UserMessage(text="hi")], TOOLS, PARAMS)
+    # Anthropic's wire input_tokens EXCLUDES cached tokens; the canonical
+    # figure is the TOTAL prompt count (§5.2 invariant).
+    assert response.usage.input_tokens == 314 + 22000 + 928
+    assert response.usage.cache_read_tokens == 22000
+    assert response.usage.cache_write_tokens == 928
+    # Uncached remainder is derivable and matches the wire figure.
+    remainder = (
+        response.usage.input_tokens
+        - response.usage.cache_read_tokens
+        - response.usage.cache_write_tokens
+    )
+    assert remainder == 314
 
 
 def test_raw_usage_preserved_in_provider_meta():

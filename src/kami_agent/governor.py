@@ -18,21 +18,46 @@ REASON_T_MAX = "t_max"
 
 @dataclass(frozen=True, slots=True)
 class PriceTable:
-    """List prices in USD per million tokens, pinned per run in the manifest."""
+    """List prices in USD per million tokens, pinned per run in the manifest.
+
+    The cache columns default to None, which resolves to the input rate —
+    a manifest without them prices cached tokens at full input price
+    (the conservative pre-caching behavior: accounted >= invoiced).
+    Provider list rates at pin time: Anthropic 5m cache write = 1.25 x
+    input, read = 0.1 x input; OpenAI/Gemini bill no write premium
+    (cache_write_tokens is 0 there anyway) and publish a cached-input
+    read rate.
+    """
 
     input_usd_per_mtok: float
     output_usd_per_mtok: float
+    cache_read_usd_per_mtok: float | None = None
+    cache_write_usd_per_mtok: float | None = None
 
 
 def cost_usd(usage: Usage, prices: PriceTable) -> float:
-    """``input_tokens x price_in + output_tokens x price_out`` (D16).
+    """Cache-aware cost (D16 as amended, SPEC §5.2).
 
-    Caching-neutral: the scaffold never requests caching, and provider-side
-    auto-caching is invisible here — actual invoices are therefore <= the
-    accounted figure.
+    ``(input − cache_read − cache_write) × price_in + cache_read ×
+    price_read + cache_write × price_write + output × price_out``.
+    With all cache token fields zero this reduces exactly to the v0
+    formula regardless of the cache rates.
     """
+    read_rate = (
+        prices.cache_read_usd_per_mtok
+        if prices.cache_read_usd_per_mtok is not None
+        else prices.input_usd_per_mtok
+    )
+    write_rate = (
+        prices.cache_write_usd_per_mtok
+        if prices.cache_write_usd_per_mtok is not None
+        else prices.input_usd_per_mtok
+    )
+    uncached = usage.input_tokens - usage.cache_read_tokens - usage.cache_write_tokens
     return (
-        usage.input_tokens * prices.input_usd_per_mtok
+        uncached * prices.input_usd_per_mtok
+        + usage.cache_read_tokens * read_rate
+        + usage.cache_write_tokens * write_rate
         + usage.output_tokens * prices.output_usd_per_mtok
     ) / 1_000_000
 

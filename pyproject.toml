@@ -1,6 +1,6 @@
 [project]
 name = "kami-agent"
-version = "0.0.1"
+version = "0.1.0"
 description = "Model-agnostic reference agent scaffold for KamiBench"
 readme = "README.md"
 license = { file = "LICENSE" }

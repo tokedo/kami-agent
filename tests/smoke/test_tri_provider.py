@@ -60,21 +60,41 @@ PROVIDERS = {
         "key_env": "ANTHROPIC_API_KEY",
         "model_env": "SMOKE_ANTHROPIC_MODEL",
         "default_model": "claude-haiku-4-5",
-        "prices": PriceTable(input_usd_per_mtok=1.0, output_usd_per_mtok=5.0),
+        # Cache rates: published list prices at pin time (5m write = 1.25 x
+        # input, read = 0.1 x input).
+        "prices": PriceTable(
+            input_usd_per_mtok=1.0,
+            output_usd_per_mtok=5.0,
+            cache_read_usd_per_mtok=0.10,
+            cache_write_usd_per_mtok=1.25,
+        ),
         "adapter": lambda model: AnthropicAdapter(model),
     },
     "openai": {
         "key_env": "OPENAI_API_KEY",
         "model_env": "SMOKE_OPENAI_MODEL",
         "default_model": "gpt-4o-mini",
-        "prices": PriceTable(input_usd_per_mtok=0.15, output_usd_per_mtok=0.60),
+        # Published cached-input rate; automatic caching has no write
+        # premium (write rate = input rate; cache_write_tokens is 0).
+        "prices": PriceTable(
+            input_usd_per_mtok=0.15,
+            output_usd_per_mtok=0.60,
+            cache_read_usd_per_mtok=0.075,
+            cache_write_usd_per_mtok=0.15,
+        ),
         "adapter": lambda model: OpenAIAdapter(model),
     },
     "google": {
         "key_env": "GEMINI_API_KEY",
         "model_env": "SMOKE_GEMINI_MODEL",
         "default_model": "gemini-2.5-flash-lite",
-        "prices": PriceTable(input_usd_per_mtok=0.10, output_usd_per_mtok=0.40),
+        # Published implicit-caching cached-input rate; no write premium.
+        "prices": PriceTable(
+            input_usd_per_mtok=0.10,
+            output_usd_per_mtok=0.40,
+            cache_read_usd_per_mtok=0.01,
+            cache_write_usd_per_mtok=0.10,
+        ),
         "adapter": lambda model: GoogleAdapter(model, api_key=os.environ.get("GEMINI_API_KEY")),
     },
 }
@@ -239,6 +259,8 @@ def _dump_diagnostics(provider, run_dir, events):
         if kind == "llm_call":
             print(
                 f"llm_call stop={event['stop_reason']} in={event['input_tokens']} "
+                f"cache_read={event.get('cache_read_tokens', 0)} "
+                f"cache_write={event.get('cache_write_tokens', 0)} "
                 f"out={event['output_tokens']} retry={event['retry_count']} "
                 f"usage_unknown={event.get('usage_unknown', False)}"
             )
@@ -313,12 +335,18 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
         for word in D12_FORBIDDEN:
             assert word not in lowered, f"{provider}: D12 leak: {word!r}"
 
-    # Report (SPEC §9 fixed-floor arithmetic wants the observed floor).
+    # Report (SPEC §9 fixed-floor arithmetic wants the observed floor;
+    # the cache columns show how much of it was served from/written to
+    # provider cache, per §5.2).
+    session_cache_read = sum(e.get("cache_read_tokens", 0) for e in ok_llm)
+    session_cache_write = sum(e.get("cache_write_tokens", 0) for e in ok_llm)
     print(
         f"\nSMOKE[{provider}] model={model} "
         f"fixed_floor_input_tokens={ok_llm[0]['input_tokens']} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
         f"session_tokens={session_end['session_tokens']} "
+        f"session_cache_read={session_cache_read} "
+        f"session_cache_write={session_cache_write} "
         f"cost_usd={session_end['session_cost_usd']:.6f} "
         f"tools={len(list(harness.tool_defs))} "
         f"executed={executed}"

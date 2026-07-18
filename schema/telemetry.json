@@ -3,6 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC §8)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC §7.1); every event is flushed synchronously before the action it describes is considered complete.",
+  "version": "0.1.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -70,7 +71,11 @@
       "properties": {
         "event": { "const": "llm_call" },
         "model": { "type": "string" },
-        "input_tokens": { "type": "integer", "minimum": 0 },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "TOTAL prompt tokens for the call (SPEC §5.2); cache_read_tokens and cache_write_tokens are component subsets"
+        },
         "output_tokens": {
           "type": "integer",
           "minimum": 0,
@@ -80,6 +85,16 @@
           "type": "integer",
           "minimum": 0,
           "description": "Informational subset of output_tokens, when the provider reports it"
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Component subset of input_tokens served from provider prompt cache (SPEC §5.2); input_tokens remains the TOTAL prompt count"
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Component subset of input_tokens written to provider prompt cache (SPEC §5.2); non-zero only where writes carry a premium (Anthropic)"
         },
         "cost_usd": { "type": "number", "minimum": 0 },
         "cumulative_usd": { "type": "number", "minimum": 0 },

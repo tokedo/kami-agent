@@ -54,6 +54,8 @@ EXAMPLE_PAYLOADS = {
         "input_tokens": 1200,
         "output_tokens": 340,
         "reasoning_tokens": 120,
+        "cache_read_tokens": 800,
+        "cache_write_tokens": 100,
         "cost_usd": 0.0087,
         "cumulative_usd": 0.0512,
         "cumulative_tokens": 15400,

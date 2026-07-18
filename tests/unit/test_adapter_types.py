@@ -50,6 +50,16 @@ def test_usage_reasoning_tokens_optional():
     assert folded.reasoning_tokens == 5
 
 
+def test_usage_cache_components_default_to_zero():
+    # SPEC §5.2: input_tokens is the total; the cache components are
+    # subsets and default to 0 for providers/calls without caching.
+    usage = Usage(input_tokens=10, output_tokens=20)
+    assert usage.cache_read_tokens == 0
+    assert usage.cache_write_tokens == 0
+    cached = Usage(input_tokens=100, output_tokens=20, cache_read_tokens=70, cache_write_tokens=20)
+    assert cached.input_tokens - cached.cache_read_tokens - cached.cache_write_tokens == 10
+
+
 def test_sampling_params_defaults():
     params = SamplingParams(max_tokens=1024)
     assert params.temperature is None

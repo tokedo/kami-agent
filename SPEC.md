@@ -1,13 +1,18 @@
-# kami-agent — Reference Scaffold Specification (v1.3)
+# kami-agent — Reference Scaffold Specification (v1.4)
 
-Status: **v1.3 — approved for implementation** (v1 superseded the v0
+Status: **v1.4 — approved for implementation** (v1 superseded the v0
 draft; §13 open decisions resolved as D12–D15, engineering semantics
 fixed as D16–D19; v1.1 amended §11 per D21 — CI smoke split into a
 per-PR recorded-surface gate and a scheduled live-harness tier; v1.2
 amended §5.1 per D22 — opaque provider reasoning state on assistant
 messages; v1.3 amends §10 per D27 — init performs validation and
 connectivity checks only, operator-wallet creation is a harness tool
-the agent calls in-run — see kami-lab `DECISIONS.md`)
+the agent calls in-run; v1.4 amends §5.1–5.2, §8, §9, §12 per D39 —
+the caching-neutral clause of D16 is superseded: provider-side
+prompt-cache usage is measured on all three providers, Anthropic
+caching is explicitly requested via `cache_control` request metadata,
+and `cost_usd` is cache-aware; prompt bytes and every agent-visible
+channel are unchanged (D12 intact) — see kami-lab `DECISIONS.md`)
 Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
 Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
 documentation), `kami-lab` (experiment orchestration — private).
@@ -170,22 +175,46 @@ class ModelAdapter(Protocol):
   all three providers accept (objects, scalars, arrays, enums, required; no
   oneOf/anyOf/allOf).
 - `AdapterResponse = {text_blocks: [str], tool_calls: [{id, name, args}],
-  stop_reason, usage: {input_tokens, output_tokens, reasoning_tokens?},
-  provider_meta}` — `provider_meta` is logged raw, never parsed by the loop.
+  stop_reason, usage: {input_tokens, output_tokens, reasoning_tokens?,
+  cache_read_tokens, cache_write_tokens}, provider_meta}` —
+  `provider_meta` is logged raw, never parsed by the loop.
 - `stop_reason` normalized enum: `end_turn | tool_use | max_tokens | refusal`.
 
-### 5.2 Token accounting invariant (D16)
+### 5.2 Token accounting invariant (D16, cache-aware per D39)
 
 Adapter-reported `output_tokens` **must include reasoning/thinking tokens**
 (e.g. Gemini reports thoughts outside `candidatesTokenCount` — the adapter
 folds them in; Anthropic and OpenAI already include them). `reasoning_tokens`
 is an informational subset, logged when the provider reports it.
-`cost_usd = input_tokens × price_in + output_tokens × price_out` from the
-pinned list-price table — **caching-neutral**: the scaffold never requests
-caching (no cache_control anywhere); provider-side auto-caching (OpenAI,
-Gemini implicit) may occur but is invisible to accounting. Actual invoices
-will therefore be ≤ accounted `cumulative_usd`; reconciliation against
-provider dashboards is done on token counts, not dollars.
+
+`input_tokens` is the **TOTAL** prompt token count for the call.
+`cache_read_tokens` and `cache_write_tokens` are component subsets of it;
+the uncached remainder is `input_tokens − cache_read_tokens −
+cache_write_tokens`. Provider wire semantics differ and die inside the
+adapters: Anthropic's `usage.input_tokens` EXCLUDES cached tokens (the
+adapter folds `cache_read_input_tokens` and `cache_creation_input_tokens`
+back in); OpenAI's `prompt_tokens` and Gemini's `promptTokenCount` already
+INCLUDE cached tokens (`prompt_tokens_details.cached_tokens` /
+`cachedContentTokenCount` map to `cache_read_tokens`, 0 when absent;
+neither bills a write premium, so `cache_write_tokens` is 0 there).
+
+The scaffold **requests provider caching where explicit opt-in is
+required** — Anthropic `cache_control` breakpoints (5-minute ephemeral),
+placed per the adapter's documentation — and **measures provider-side
+automatic caching everywhere else** (OpenAI, Gemini implicit caching).
+`cache_control` is request metadata: the prompt bytes sent to the model
+are byte-identical with or without it, the system prompt and tool schemas
+are untouched, and nothing about caching, budget, or spend reaches the
+agent through any channel (D12).
+
+`cost_usd = (input_tokens − cache_read_tokens − cache_write_tokens) ×
+price_in + cache_read_tokens × price_read + cache_write_tokens ×
+price_write + output_tokens × price_out` from the pinned list-price table
+(cache-rate columns per §9). With all cache token fields zero this reduces
+exactly to the pre-v1.4 formula. Token reconciliation against provider
+dashboards remains component-exact: per-call uncached input, cache-write,
+and cache-read counts match the provider ledger columns digit-for-digit;
+dollar reconciliation stays derived, never authoritative.
 
 ### 5.3 Tool execution semantics (D18)
 
@@ -292,7 +321,7 @@ Common fields: `ts` (ISO-8601 UTC), `run_id`, `session`, `event`.
 |---|---|
 | `run_start` | manifest_hash, model, harness_sha, agent_sha, gdd_sha, harness_tools (name list), price_table |
 | `session_start` | trigger (scheduled \| manual), budget_remaining_usd, wallclock_elapsed_s, tools_hash |
-| `llm_call` | model, input_tokens, output_tokens, reasoning_tokens?, cost_usd, cumulative_usd, cumulative_tokens, latency_ms, stop_reason, retry_count, usage_unknown?, continuation? (true when this call follows a continuation send, §5.4) |
+| `llm_call` | model, input_tokens, output_tokens, reasoning_tokens?, cache_read_tokens, cache_write_tokens, cost_usd, cumulative_usd, cumulative_tokens, latency_ms, stop_reason, retry_count, usage_unknown?, continuation? (true when this call follows a continuation send, §5.4) |
 | `tool_call` | tool, source (harness \| scaffold), path? (file tools), duration_ms, ok, error?, truncated?, original_bytes?, skipped?, tx_hash? |
 | `workspace_write` | path, bytes, workspace_total_bytes |
 | `workspace_delete` | path, workspace_total_bytes |
@@ -319,7 +348,14 @@ Notes:
 
 - `budget_usd` — total inference budget (v1.0 study: 100.00; v0.1 smoke:
   10.00). `cost_usd` per call is computed per §5.2 (list price × reported
-  tokens, caching-neutral). **Boundary-checked (D13):** enforcement happens
+  tokens, cache-aware). The manifest `price_table` carries two cache-rate
+  columns alongside the input/output rates: `cache_read_usd_per_mtok` and
+  `cache_write_usd_per_mtok` (Anthropic 5m: write = 1.25 × input rate,
+  read = 0.1 × input rate; OpenAI/Gemini: read = the provider's published
+  cached-input rate, write = input rate — writes carry no premium there
+  and `cache_write_tokens` is 0 anyway). Absent columns price cached
+  tokens at the full input rate (the conservative pre-v1.4 behavior).
+  **Boundary-checked (D13):** enforcement happens
   only at session start; no mid-session budget termination; the in-flight
   session completes naturally under its session caps. Expected small
   overshoot is logged (`overspend_usd`) and the exact $100 analysis line is
@@ -339,11 +375,16 @@ Notes:
   `wake_min` (5 min), `wake_max` (24 h), `wake_default` (60 min),
   `poll_cadence` (5 min), `lock_stale_s`.
 - **Fixed-floor arithmetic:** every call re-sends the system prompt, file
-  index, and ~70 tool schemas uncached. The manifest must record the computed
+  index, and ~70 tool schemas. The manifest must record the computed
   fixed context floor (tokens) and the implied ceiling on total calls at
   `budget_usd` for that model's pricing; the $10 smoke reports the observed
   per-call floor next to the estimate. Session caps and `wake_default` are
-  chosen in light of this arithmetic, not guessed.
+  chosen in light of this arithmetic, not guessed. With provider caching
+  engaged (§5.2) the floor is still re-sent on every call but is billed at
+  cache-read rates after the first call of a session (5-minute TTL; the
+  first call writes it at the cache-write rate); the manifest records the
+  uncached floor plus the implied per-call cached floor cost, and the
+  call-ceiling arithmetic may use both figures.
 - **Context-guard headroom:** because the guard (D17) is checked post-call,
   a full turn lands in context before the next check. `session_token_cap`
   headroom below the smallest context window must therefore also cover
@@ -413,7 +454,8 @@ experiment 001, DESIGN §6) remains the end-to-end acceptance test.
   kami-lab, excluded from v0 runs)
 - Mid-session compaction or context summarization
 - Self-funding / economic self-sustainability
-- Prompt caching or cache_control of any kind (caching-neutral per D16)
+- 1h-TTL or cross-session prompt caching; explicit cache APIs on
+  OpenAI/Gemini — their automatic caching is measured, not managed (§5.2)
 - Web access or any non-harness network channel from the agent loop (D14)
 - Any UI
 

@@ -85,6 +85,10 @@ def build_run_config(manifest: dict[str, Any], run_dir: Path) -> RunConfig:
         prices=PriceTable(
             input_usd_per_mtok=prices["input_usd_per_mtok"],
             output_usd_per_mtok=prices["output_usd_per_mtok"],
+            # Absent cache columns → cached tokens bill at the input rate
+            # (conservative pre-caching behavior; see PriceTable).
+            cache_read_usd_per_mtok=prices.get("cache_read_usd_per_mtok"),
+            cache_write_usd_per_mtok=prices.get("cache_write_usd_per_mtok"),
         ),
         caps=LoopCaps(**caps),
         params=SamplingParams(

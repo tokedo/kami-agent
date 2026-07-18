@@ -11,8 +11,12 @@ Provider quirks handled here and nowhere else:
   ``completion_tokens_details.reasoning_tokens`` is the informational
   subset when reported;
 - the client is built with ``max_retries=0``: retries are the loop's
-  job (SPEC §5.5), never the SDK's; caching-neutral (D16) — provider-side
-  auto-caching may occur but is never requested.
+  job (SPEC §5.5), never the SDK's;
+- provider-side automatic caching is measured, not managed (SPEC §5.2):
+  nothing is requested, but ``prompt_tokens_details.cached_tokens`` is
+  normalized into ``cache_read_tokens``. ``prompt_tokens`` already
+  INCLUDES cached tokens, so canonical ``input_tokens`` passes through
+  unchanged; there is no write premium (``cache_write_tokens`` = 0).
 """
 
 from __future__ import annotations
@@ -136,15 +140,21 @@ def _normalize(response: Any) -> AdapterResponse:
     usage = response.usage
     details = getattr(usage, "completion_tokens_details", None)
     reasoning = getattr(details, "reasoning_tokens", None) if details is not None else None
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(prompt_details, "cached_tokens", None) if prompt_details is not None else None
     return AdapterResponse(
         text_blocks=text_blocks,
         tool_calls=tool_calls,
         stop_reason=_normalize_stop_reason(choice.finish_reason),
         usage=Usage(
+            # prompt_tokens already INCLUDES cached tokens (§5.2): the total
+            # passes through; cached_tokens is the read component (0 when
+            # absent) and automatic caching has no write premium.
             input_tokens=usage.prompt_tokens,
             # completion_tokens already includes reasoning tokens (D16).
             output_tokens=usage.completion_tokens,
             reasoning_tokens=reasoning,
+            cache_read_tokens=cached or 0,
         ),
         provider_meta=response.model_dump(mode="json"),
     )
