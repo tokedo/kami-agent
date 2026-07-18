@@ -7,12 +7,12 @@ per-PR recorded-surface gate and a scheduled live-harness tier; v1.2
 amended §5.1 per D22 — opaque provider reasoning state on assistant
 messages; v1.3 amends §10 per D27 — init performs validation and
 connectivity checks only, operator-wallet creation is a harness tool
-the agent calls in-run; v1.4 amends §5.1–5.2, §8, §9, §12 — the
-caching-neutral clause of D16 is superseded: provider-side prompt-cache
-usage is measured on all three providers, Anthropic caching is
-explicitly requested via `cache_control` request metadata, and
-`cost_usd` is cache-aware; prompt bytes and every agent-visible channel
-are unchanged (D12 intact) — see kami-lab `DECISIONS.md`)
+the agent calls in-run; v1.4 amends §5.1–5.2, §8, §9, §12 per D39 —
+the caching-neutral clause of D16 is superseded: provider-side
+prompt-cache usage is measured on all three providers, Anthropic
+caching is explicitly requested via `cache_control` request metadata,
+and `cost_usd` is cache-aware; prompt bytes and every agent-visible
+channel are unchanged (D12 intact) — see kami-lab `DECISIONS.md`)
 Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
 Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
 documentation), `kami-lab` (experiment orchestration — private).
@@ -180,7 +180,7 @@ class ModelAdapter(Protocol):
   `provider_meta` is logged raw, never parsed by the loop.
 - `stop_reason` normalized enum: `end_turn | tool_use | max_tokens | refusal`.
 
-### 5.2 Token accounting invariant (D16, cache-aware per v1.4)
+### 5.2 Token accounting invariant (D16, cache-aware per D39)
 
 Adapter-reported `output_tokens` **must include reasoning/thinking tokens**
 (e.g. Gemini reports thoughts outside `candidatesTokenCount` — the adapter
