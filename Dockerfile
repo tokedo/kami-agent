@@ -1,6 +1,6 @@
 # One image per study (docs/packaging.md): kami-agent + pinned kami-harness + the GDD
 # snapshot at reference/. Per-run config.yaml and .env are injected at
-# provision time; the closed-world egress allowlist (D14) is applied at the
+# provision time; the closed-world egress allowlist (SPEC I20) is applied at the
 # VM level — see docs/packaging.md.
 FROM python:3.13-slim
 
@@ -22,7 +22,7 @@ RUN git clone --filter=blob:none "$HARNESS_REPO" /opt/kami-harness \
     && git -C /opt/kami-harness checkout "$HARNESS_SHA" \
     && pip install --no-cache-dir -r /opt/kami-harness/executor/requirements.txt
 
-# GDD snapshot → the read-only reference/ tree (D14); optional at build
+# GDD snapshot → the read-only reference/ tree (SPEC D5); optional at build
 # time so dev images can be built without the docs repo.
 RUN if [ -n "$GDD_REPO" ]; then \
     git clone --filter=blob:none "$GDD_REPO" /opt/gdd \

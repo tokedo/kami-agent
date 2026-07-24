@@ -71,7 +71,7 @@ def write_manifest(path: Path) -> None:
         "budget_usd": 10.0,
         "harness": {
             # Absolute interpreter path: cron environments resolve nothing
-            # via PATH — this is the 001 launch-day defect class under test.
+            # via PATH — this is the defect class under test.
             "command": sys.executable,
             "args": [str(REPO_ROOT / "tests" / "unit" / "fake_mcp_server.py")],
             "cwd": str(REPO_ROOT),

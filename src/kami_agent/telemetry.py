@@ -8,7 +8,7 @@ disk synchronously
 complete (SPEC I6), so a crash at any point loses at most the event
 being written.
 
-Telemetry is not an agent-visible channel (D12): budget fields recorded
+Telemetry is not an agent-visible channel (I1): budget fields recorded
 here never reach the agent.
 """
 

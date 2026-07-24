@@ -74,7 +74,7 @@ def test_init_creates_run_layout_and_run_start(tmp_path, manifest_path, capsys):
     assert (run_dir / "workspace").is_dir()
     assert (run_dir / "transcripts").is_dir()
 
-    # No key path through init (SPEC P12, D27): no wallet in the config
+    # No key path through init (SPEC P12): no wallet in the config
     # copy, and init writes no .env — operator creation is a harness tool.
     assert "wallet_address" not in config
     assert not (run_dir / ".env").exists()

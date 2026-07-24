@@ -4,7 +4,7 @@ Provider quirks handled here and nowhere else:
 - system prompt is a top-level param, not a message;
 - all tool results for one assistant turn go back in a single user
   message (splitting them degrades the provider's parallel calling);
-- ``output_tokens`` already includes thinking tokens (D16) — no fold
+- ``output_tokens`` already includes thinking tokens (P7.1) — no fold
   needed; no separate reasoning-token count is reported;
 - the client is built with ``max_retries=0``: retries are the loop's job
   (SPEC P8 — every retry is logged), never the SDK's;
@@ -16,7 +16,7 @@ Provider quirks handled here and nowhere else:
   remain valid read points, so hits accrue as the session grows.
   ``cache_control`` is request metadata: the prompt bytes sent to the
   model are identical with or without it, and nothing about caching is
-  agent-visible (D12);
+  agent-visible (I1);
 - wire ``usage.input_tokens`` EXCLUDES cached tokens; the adapter folds
   ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` back in
   so canonical ``input_tokens`` is the total prompt count (P7.1).
@@ -130,8 +130,9 @@ def _to_wire_messages(messages: list[Message]) -> list[dict[str, Any]]:
         elif isinstance(message, AssistantMessage):
             state = message.provider_state
             if state is not None and state.provider == PROVIDER:
-                # D22 replay: the original response content blocks (signed
-                # thinking blocks included), passed back unchanged.
+                # Provider-state replay (I17): the original response
+                # content blocks (signed thinking blocks included),
+                # passed back unchanged.
                 wire.append({"role": "assistant", "content": list(state.payload)})
                 continue
             content: list[dict[str, Any]] = []
@@ -213,9 +214,9 @@ def _annotate_last_cacheable_block(message: dict[str, Any]) -> None:
     """Attach cache_control to the last cacheable block, non-destructively.
 
     Blocks are replaced by annotated copies (never mutated in place):
-    replayed D22 payloads are shared across calls, and a stale marker left
-    on a mid-conversation block would count against the 4-breakpoint
-    budget on every later call.
+    replayed provider-state payloads are shared across calls, and a stale
+    marker left on a mid-conversation block would count against the
+    4-breakpoint budget on every later call.
     """
     content = message.get("content")
     if not isinstance(content, list):
@@ -230,9 +231,9 @@ def _annotate_last_cacheable_block(message: dict[str, Any]) -> None:
 def _annotated_block(block: Any) -> dict[str, Any] | None:
     """A copy of ``block`` carrying cache_control, or None if uncacheable."""
     if not isinstance(block, dict):
-        # D22 replay payloads carry SDK response objects; serialize the one
-        # annotated block to its wire dict (content-identical) and leave
-        # every other block untouched.
+        # Replayed provider-state payloads carry SDK response objects;
+        # serialize the one annotated block to its wire dict
+        # (content-identical) and leave every other block untouched.
         dump = getattr(block, "model_dump", None)
         if not callable(dump):
             return None
@@ -249,8 +250,9 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
         for block in response.content
         if block.type == "tool_use"
     )
-    # D22: when the turn carries (signed/redacted) thinking blocks, keep the
-    # complete original content for verbatim same-session replay.
+    # Provider state (I17): when the turn carries (signed/redacted)
+    # thinking blocks, keep the complete original content for verbatim
+    # same-session replay.
     provider_state = None
     if any(block.type in ("thinking", "redacted_thinking") for block in response.content):
         provider_state = ProviderState(provider=PROVIDER, payload=tuple(response.content))
@@ -261,7 +263,7 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
     cache_write = getattr(response.usage, "cache_creation_input_tokens", None) or 0
     usage = Usage(
         input_tokens=response.usage.input_tokens + cache_read + cache_write,
-        # Anthropic's count already includes reasoning/thinking tokens (D16);
+        # Anthropic's count already includes reasoning/thinking tokens (P7.1);
         # no separate reasoning_tokens figure is reported.
         output_tokens=response.usage.output_tokens,
         cache_read_tokens=cache_read,

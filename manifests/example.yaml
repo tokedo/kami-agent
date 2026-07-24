@@ -5,7 +5,7 @@ run_id: dev-smoke-001
 provider: anthropic # anthropic | openai | google
 model: claude-haiku-4-5
 
-price_table: # pinned list prices, USD per million tokens (D16, cache-aware per SPEC P7.2)
+price_table: # pinned list prices, USD per million tokens (cache-aware, SPEC P7.2)
   input_usd_per_mtok: 1.0
   output_usd_per_mtok: 5.0
   cache_read_usd_per_mtok: 0.10 # anthropic 5m: 0.1 x input rate
@@ -16,14 +16,14 @@ params:
   temperature: null # sent only when set; some models reject it
   reasoning_effort: null # anthropic → output_config.effort; openai native; google not sent
 
-caps: # SPEC D3 (session_token_cap sized per model, D17)
+caps: # SPEC D3 (session_token_cap sized per model — no default)
   session_token_cap: 120000
   session_tool_cap: 50
   max_consecutive_errors: 5
   retry_max_attempts: 5
   tool_timeout_s: 120
   tool_result_max_bytes: 65536
-  repetition_identical_cap: 5 # repetition breaker: consecutive identical calls (same signature, D43)
+  repetition_identical_cap: 5 # repetition breaker: consecutive identical calls (same signature)
   repetition_window: 30 # repetition breaker: trailing-call window size
   repetition_min_distinct: 4 # repetition breaker: distinct-signature floor in a full window
   repetition_same_tool_error_cap: 8 # repetition breaker: consecutive same-tool error/revert run
@@ -49,4 +49,4 @@ harness: # spawned per session as a stdio child (SPEC D1)
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
   harness_sha: 1e7c9dad48efad567fa082617a6b48e2452b4ff0
-  gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # D30 cleanup; game content byte-identical to c2c5a1b
+  gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # repo cleanup only; game content byte-identical to c2c5a1b

@@ -79,7 +79,7 @@
         "output_tokens": {
           "type": "integer",
           "minimum": 0,
-          "description": "Includes reasoning/thinking tokens (D16)"
+          "description": "Includes reasoning/thinking tokens (SPEC P7.1)"
         },
         "reasoning_tokens": {
           "type": "integer",
@@ -148,7 +148,7 @@
         "original_bytes": { "type": "integer", "minimum": 0 },
         "skipped": {
           "type": "boolean",
-          "description": "True for intents skipped because end_session took effect earlier in the same batch (D18)"
+          "description": "True for intents skipped because end_session took effect earlier in the same batch (SPEC I12)"
         },
         "tx_hash": { "type": "string" }
       },
@@ -227,7 +227,7 @@
         "repetition_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "identical_call: length of the consecutive identical-call run (D43); same_tool_errors: length of the consecutive error/revert run"
+          "description": "identical_call: length of the consecutive identical-call run; same_tool_errors: length of the consecutive error/revert run"
         },
         "repetition_window": {
           "type": "integer",

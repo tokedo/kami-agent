@@ -37,7 +37,7 @@ class UserMessage:
 
 @dataclass(frozen=True, slots=True)
 class ProviderState:
-    """Opaque provider reasoning state on an assistant message (D22).
+    """Opaque provider reasoning state on an assistant message (SPEC P8, I17).
 
     Set by the emitting adapter (e.g. Anthropic signed thinking blocks,
     Gemini thought signatures) and replayed by that same adapter within
@@ -86,7 +86,7 @@ class ToolDef:
 class Usage:
     """Token usage for one model call.
 
-    ``output_tokens`` MUST include reasoning/thinking tokens (D16); adapters
+    ``output_tokens`` MUST include reasoning/thinking tokens (P7.1); adapters
     fold them in when the provider reports them outside the output count.
     ``reasoning_tokens`` is an informational subset, set when the provider
     reports it.
@@ -126,7 +126,7 @@ class AdapterResponse:
     """Normalized model response (SPEC P8).
 
     ``provider_meta`` is logged raw and never parsed by the loop.
-    ``provider_state`` (D22) is copied verbatim onto the assistant
+    ``provider_state`` (I17) is copied verbatim onto the assistant
     message for same-session replay by the emitting adapter.
     """
 

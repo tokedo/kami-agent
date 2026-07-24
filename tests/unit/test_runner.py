@@ -259,7 +259,7 @@ def test_normal_session_emits_no_carried_fields(run_dir):
     assert "repetition_rule" not in end
 
 
-# --- boundary checks (D13) --------------------------------------------------------
+# --- boundary checks (I2) --------------------------------------------------------
 
 
 def seed_spent_run(run_dir, *, cost=11.0):

@@ -7,7 +7,7 @@ Provider quirks handled here and nowhere else:
   and raises, like an unmappable stop reason);
 - tool results are one ``tool``-role message per result (no grouping,
   no native error flag — the error text itself is the content);
-- ``completion_tokens`` already includes reasoning tokens (D16);
+- ``completion_tokens`` already includes reasoning tokens (P7.1);
   ``completion_tokens_details.reasoning_tokens`` is the informational
   subset when reported;
 - the client is built with ``max_retries=0``: retries are the loop's
@@ -151,7 +151,7 @@ def _normalize(response: Any) -> AdapterResponse:
             # passes through; cached_tokens is the read component (0 when
             # absent) and automatic caching has no write premium.
             input_tokens=usage.prompt_tokens,
-            # completion_tokens already includes reasoning tokens (D16).
+            # completion_tokens already includes reasoning tokens (P7.1).
             output_tokens=usage.completion_tokens,
             reasoning_tokens=reasoning,
             cache_read_tokens=cached or 0,

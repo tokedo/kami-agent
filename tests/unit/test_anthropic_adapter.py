@@ -366,8 +366,8 @@ def test_breakpoints_never_exceed_provider_maximum():
 
 
 def test_replay_payload_annotation_is_non_destructive():
-    """D22 replay blocks are shared across calls: the annotated block is a
-    serialized copy; the original SDK objects never gain a marker."""
+    """Replayed provider-state blocks are shared across calls: the annotated
+    block is a serialized copy; the original SDK objects never gain a marker."""
     replayed = load_fixture("thinking_tool_use").content  # thinking, text, tool_use
     state = ProviderState(provider="anthropic", payload=tuple(replayed))
     adapter, client = make_adapter(load_fixture("text_end_turn"))
@@ -415,7 +415,7 @@ def test_thinking_blocks_are_never_annotated():
 def test_usage_passthrough_and_reasoning_tokens_absent():
     adapter, _ = make_adapter(load_fixture("parallel_tool_use"))
     response = adapter.complete("s", [UserMessage(text="hi")], TOOLS, PARAMS)
-    # Anthropic reports output_tokens inclusive of thinking tokens (D16):
+    # Anthropic reports output_tokens inclusive of thinking tokens (P7.1):
     # the adapter passes counts through unchanged and reports no
     # informational reasoning subset.
     assert response.usage.input_tokens == 2521

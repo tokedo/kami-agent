@@ -3,7 +3,7 @@
 One process: start → run one session → persist → exit. Accounting is
 always rebuilt by folding telemetry.jsonl (P3); state.json is written
 back as a cache. Forced endings and boundary stops are silent to the
-agent (D13).
+agent (I4, I2).
 
 Ordering note (SPEC X11): the harness child is spawned *before*
 session_start is emitted, because session_start carries ``tools_hash``,
@@ -123,7 +123,7 @@ def run_session(
             if state.run_status == RUN_COMPLETE:
                 return ALREADY_COMPLETE
 
-            # 3. Boundary checks (D13): only here, never mid-session.
+            # 3. Boundary checks (I2): only here, never mid-session.
             stop_reason = boundary_check(
                 cumulative_usd=state.cumulative_usd,
                 budget_usd=config.budget_usd,
@@ -352,7 +352,7 @@ def _message_dict(message: Message) -> dict[str, Any]:
             ],
         }
         if message.provider_state is not None:
-            # Transcripts record messages as sent (D22); telemetry never
+            # Transcripts record messages as sent (I17); telemetry never
             # carries provider state.
             entry["provider_state"] = {
                 "provider": message.provider_state.provider,

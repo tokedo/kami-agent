@@ -1,4 +1,4 @@
-"""D22 (SPEC P8, I17): opaque provider reasoning state, same-session round-trip."""
+"""Opaque provider reasoning state (SPEC P8, I17): same-session round-trip."""
 
 import json
 from pathlib import Path
@@ -87,7 +87,7 @@ def test_google_captures_thought_signatures():
     assert state is not None
     assert state.provider == "google"
     assert state.payload[1].thought_signature  # bytes, decoded from base64
-    # The D16 fold still applies alongside the state capture.
+    # The reasoning-token fold (P7.1) still applies alongside the state capture.
     assert response.usage.output_tokens == 270  # 90 candidates + 180 thoughts
     assert response.usage.reasoning_tokens == 180
 
@@ -256,7 +256,7 @@ def test_loop_copies_state_verbatim_without_inspecting(tmp_path):
     replayed = adapter.requests[1][1]
     assert isinstance(replayed, AssistantMessage)
     assert replayed.provider_state is state  # the same object, uninspected
-    # Telemetry never carries provider state (D22).
+    # Telemetry never carries provider state (I17).
     for event in read_events(tmp_path / "t.jsonl"):
         assert "provider_state" not in json.dumps(event)
 

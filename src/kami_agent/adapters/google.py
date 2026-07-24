@@ -3,7 +3,7 @@
 Provider quirks handled here and nowhere else:
 - system prompt is ``system_instruction`` in the request config;
 - Gemini reports thinking tokens OUTSIDE ``candidates_token_count`` —
-  the adapter folds them in (D16): ``output_tokens = candidates +
+  the adapter folds them in (P7.1): ``output_tokens = candidates +
   thoughts``, with ``reasoning_tokens`` as the informational subset;
 - function calls carry no wire IDs; the adapter mints deterministic
   per-response IDs and resolves ``tool_call_id`` back to the function
@@ -121,8 +121,9 @@ def _to_wire_contents(messages: list[Message]) -> list[genai_types.Content]:
                 call_names[call.id] = call.name
             state = message.provider_state
             if state is not None and state.provider == PROVIDER:
-                # D22 replay: the original response parts, thought
-                # signatures included, passed back unchanged.
+                # Provider-state replay (I17): the original response
+                # parts, thought signatures included, passed back
+                # unchanged.
                 contents.append(genai_types.Content(role="model", parts=list(state.payload)))
                 continue
             parts: list[genai_types.Part] = []
@@ -177,8 +178,8 @@ def _normalize(response: Any) -> AdapterResponse:
         minted = call.id or f"call_{len(tool_calls) + 1}"
         tool_calls.append(ToolCall(id=minted, name=call.name or "", args=dict(call.args or {})))
 
-    # D22: thought signatures ride on parts; keep the original parts for
-    # verbatim same-session replay when any are present.
+    # Provider state (I17): thought signatures ride on parts; keep the
+    # original parts for verbatim same-session replay when any are present.
     provider_state = None
     if any(getattr(part, "thought_signature", None) for part in parts):
         provider_state = ProviderState(provider=PROVIDER, payload=tuple(parts))
@@ -198,8 +199,8 @@ def _normalize(response: Any) -> AdapterResponse:
             # component (0 when absent) and implicit caching has no write
             # premium.
             input_tokens=(usage.prompt_token_count or 0) if usage else 0,
-            # The D16 fold: Gemini reports thoughts outside the candidate
-            # count; output_tokens must include them.
+            # The reasoning-token fold (P7.1): Gemini reports thoughts
+            # outside the candidate count; output_tokens must include them.
             output_tokens=candidates_tokens + (thoughts or 0),
             reasoning_tokens=thoughts,
             cache_read_tokens=cached or 0,
@@ -220,9 +221,9 @@ def _normalize_stop_reason(finish_reason: Any, has_tool_calls: bool) -> StopReas
         return StopReason.REFUSAL
     if name == "MALFORMED_FUNCTION_CALL":
         # A transient Gemini generation artifact: the turn carries no usable
-        # tool call. Normalized to end_turn so the loop's P2 continuation path applies —
-        # frozen continuation string, counts as one error — instead of
-        # killing the session over a provider quirk.
+        # tool call. Normalized to end_turn so the loop's P2 continuation
+        # path applies — frozen continuation string, counts as one error —
+        # instead of killing the session over a provider quirk.
         return StopReason.END_TURN
     raise AdapterError(f"unmappable google finish_reason: {name!r}", retryable=False)
 

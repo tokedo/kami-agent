@@ -1,4 +1,4 @@
-# Packaging and provisioning (SPEC P12, D14)
+# Packaging and provisioning (SPEC P12)
 
 One Docker image per study, identical across VMs. Per-run inputs are
 injected at provision time and never baked into the image:
@@ -9,8 +9,8 @@ injected at provision time and never baked into the image:
   `MAINNET_RPC_URL` (the harness refuses to start without it; the scaffold
   passes its environment through to the harness child). `kami-agent init`
   writes nothing here — there is no key path through init. Secrets live
-  only in this file (hard rule 6).
-- `/srv/run/reference/` — the pinned GDD snapshot (D14), read-only via
+  only in this file, and never in git.
+- `/srv/run/reference/` — the pinned GDD snapshot (SPEC D5), read-only via
   the path sandbox.
 
 ## Bring-up
@@ -30,9 +30,9 @@ python -c "from kami_agent.supervisor import install_cron; \
 ```
 
 `kami-agent status --run-dir /srv/run` prints the state.json cache
-(operator-facing; never an agent channel, D12).
+(operator-facing; never an agent channel — SPEC I1).
 
-## Egress allowlist (D14, enforced at the VM level)
+## Egress allowlist (SPEC I20/N6, enforced at the VM level)
 
 The agent loop gets no web, shell, or network channel of its own. The VM
 firewall allows outbound traffic ONLY to:
@@ -47,4 +47,4 @@ firewall allows outbound traffic ONLY to:
 
 Everything else — including the other two providers — is denied. DNS for
 the allowlisted hosts is permitted; nothing agent-visible discloses the
-allowlist (D12).
+allowlist (SPEC I1).

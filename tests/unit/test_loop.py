@@ -1,4 +1,4 @@
-"""Agent loop: serialization (D18), error semantics (P2), retries (P8), guard (D17)."""
+"""Agent loop: serialization (I12), error semantics (P2), retries (P8), guard (X7)."""
 
 import pytest
 
@@ -181,7 +181,7 @@ def test_game_tool_routing_and_tx_hash(run_dir):
     assert game_event["tx_hash"] == "0xabc"
 
 
-# --- D18: strict serialization + end_session batch semantics ------------------
+# --- I12: strict serialization + end_session batch semantics ------------------
 
 
 def test_batch_executes_in_order_and_skips_after_end_session(run_dir):
@@ -330,7 +330,7 @@ def test_tool_timeout_is_an_error_result(run_dir):
     assert "timed out after 0.05 seconds" in results[0].content
 
 
-# --- D17 context guard ---------------------------------------------------------
+# --- X7 context guard (post-call) ---------------------------------------------------------
 
 
 def test_context_guard_trips_post_call_and_is_silent(run_dir):
@@ -416,7 +416,7 @@ def test_non_retryable_error_ends_immediately(run_dir):
     assert sleeps == []
 
 
-# --- D19 result cap --------------------------------------------------------------
+# --- I16 result cap --------------------------------------------------------------
 
 
 def test_big_read_truncated_with_reread_hint(run_dir):
@@ -646,7 +646,7 @@ def test_errors_ending_never_carries_a_wake(run_dir):
 
 
 def test_end_session_skipped_wake_is_never_carried(run_dir):
-    # D18 semantics unchanged: intents skipped by end_session stay skipped.
+    # I12 semantics unchanged: intents skipped by end_session stay skipped.
     adapter = ScriptedAdapter(
         response(
             end_call(id_="e1"),

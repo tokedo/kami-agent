@@ -181,7 +181,7 @@ def test_parallel_intent_extraction_parses_json_arguments():
 
 
 def test_reasoning_tokens_subset_extracted():
-    # completion_tokens already includes reasoning tokens (D16): pass
+    # completion_tokens already includes reasoning tokens (P7.1): pass
     # through unchanged, expose the informational subset.
     adapter, _ = make_adapter(load_fixture("reasoning_usage"))
     response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)

@@ -172,8 +172,9 @@ def test_parallel_function_calls_extracted_with_minted_ids():
 
 
 def test_the_reasoning_token_fold():
-    # THE D16 invariant this adapter exists to enforce: Gemini reports
-    # thoughts outside candidatesTokenCount; output_tokens must fold them in.
+    # THE token-accounting invariant this adapter exists to enforce (P7.1):
+    # Gemini reports thoughts outside candidatesTokenCount; output_tokens
+    # must fold them in.
     adapter, _ = make_adapter(load_fixture("thinking_fold"))
     response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
     assert response.usage.output_tokens == 350  # 100 candidates + 250 thoughts

@@ -1,9 +1,9 @@
-"""Repetition breaker: the four 001 pathology fixtures, trip points, and the negative fixture.
+"""Repetition breaker: four observed pathology fixtures, trip points, and the negative fixture.
 
-Each pathology observed in the 001 telemetry is encoded as a synthetic
-call sequence through the real AgentLoop; the assertions pin which rule
-trips and at exactly which executed call. A productive session must
-never trip. Tripping is silent (D13): session_end exactly as tool_cap,
+Each pathology is one shape seen in real session telemetry, encoded as a
+synthetic call sequence through the real AgentLoop; the assertions pin
+which rule trips and at exactly which executed call. A productive session
+must never trip. Tripping is silent (I4): session_end exactly as tool_cap,
 no warning to the model.
 """
 
@@ -112,7 +112,7 @@ def tool_events(run_dir):
     return [e for e in read_events(run_dir / "telemetry.jsonl") if e["event"] == "tool_call"]
 
 
-# --- 001 pathology 1: identical reverted retries (45x in 001) -------------------
+# --- pathology 1: identical reverted retries (observed 45x in one session) -------------------
 
 
 def test_identical_reverted_retries_trip_identical_call_at_5(run_dir):
@@ -123,17 +123,18 @@ def test_identical_reverted_retries_trip_identical_call_at_5(run_dir):
     assert result.reason == "repetition"
     assert result.repetition.rule == "identical_call"
     # Trip point: the 5th consecutive identical execution, well before
-    # tool_cap (50). 001's storms were consecutive (D43).
+    # tool_cap (50). The observed storms were consecutive, which is what
+    # this rule counts.
     assert len(tool_events(run_dir)) == 5
     assert result.repetition.fields["repetition_count"] == 5
     expected_sig = signature("quest_accept", {"quest_index": 3})
     assert result.repetition.fields["repetition_signature"] == expected_sig
     # Reverts came back success-shaped (ok=true), so the P2 error cap
-    # (5 consecutive errors) never fired — exactly the 001 gap.
+    # (5 consecutive errors) never fired — exactly the gap this rule closes.
     assert all(e["ok"] for e in tool_events(run_dir))
 
 
-# --- 001 pathology 2: identical successful polls (48-49x get_status in 001) ------
+# --- pathology 2: identical successful polls (observed 48-49x get_status) ------
 
 
 def test_identical_successful_polls_trip_identical_call_at_5(run_dir):
@@ -146,7 +147,7 @@ def test_identical_successful_polls_trip_identical_call_at_5(run_dir):
     assert result.repetition.fields["repetition_count"] == 5
 
 
-# --- 001 pathology 3: rotating poll loop (small read-set cycle) ------------------
+# --- pathology 3: rotating poll loop (small read-set cycle) ------------------
 
 CYCLE = [
     ("get_status", {}),
@@ -163,7 +164,7 @@ def cycle_intents(n):
 
 
 def test_rotating_poll_loop_trips_window_diversity_at_defaults(run_dir):
-    # Consecutive identical counting (D43) never fires on a rotating cycle
+    # Consecutive identical counting never fires on a rotating cycle
     # (identical streak resets every call); the window rule is the designed
     # catch — full window (30) holding only 4 distinct signatures.
     game = ScriptedGame({"get_active_quests": SUCCESS, "get_account_kamis": SUCCESS})
@@ -182,7 +183,7 @@ def test_rotating_poll_loop_trips_window_diversity_at_defaults(run_dir):
 def test_interleaved_evasion_shape_trips_window_diversity(run_dir):
     # A,A,A,A,B repeating: each identical streak stops at 4 (under the
     # consecutive cap), but the 30-call window holds only 2 distinct
-    # signatures — a rotating read-set by another name (audit D43 note).
+    # signatures — a rotating read-set by another name.
     intents = []
     for block in range(8):
         for j in range(4):
@@ -196,7 +197,7 @@ def test_interleaved_evasion_shape_trips_window_diversity(run_dir):
     assert result.repetition.fields["repetition_distinct"] == 2
 
 
-# --- 001 pathology 4: parameter sweep, consecutive reverts (44-47x in 001) -------
+# --- pathology 4: parameter sweep, consecutive reverts (observed 44-47x) -------
 
 
 def test_parameter_sweep_of_reverts_trips_same_tool_errors_at_8(run_dir):
@@ -270,7 +271,7 @@ def test_trip_is_silent_and_ends_like_tool_cap(run_dir):
     adapter = ScriptedAdapter(*[response(intent) for intent in intents])
     result = run_loop(run_dir, adapter, game=None)
     assert result.reason == "repetition"
-    # Silent (D13): no continuation, no warning message; the transcript ends
+    # Silent (I4): no continuation, no warning message; the transcript ends
     # on the tripping call's tool result.
     assert result.messages[-1].role == "tool_result"
     # Exactly 5 llm_calls were made (one per executed call) — no final model
@@ -299,8 +300,9 @@ def test_is_error_or_revert_classification():
 
 
 def test_identical_call_streak_is_consecutive_not_cumulative():
-    # D43: 4 identical, a different call, 4 more identical — 8 total in the
-    # session, never 5 in a row — must NOT trip; 5 in a row must.
+    # Consecutive, not cumulative: 4 identical, a different call, 4 more
+    # identical — 8 total in the session, never 5 in a row — must NOT
+    # trip; 5 in a row must.
     tracker = RepetitionTracker(window=1000)
     for _ in range(2):
         for _ in range(4):

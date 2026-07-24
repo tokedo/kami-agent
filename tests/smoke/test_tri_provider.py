@@ -5,7 +5,7 @@ read status → list files → read a reference/ slice → call one read-only
 harness tool → write a workspace file → set next wake → end session.
 
 Asserts: all tool calls parsed natively, usage accounting non-zero,
-telemetry validates against the P9 schema, and the D12 leak check — no
+telemetry validates against the P9 schema, and the apparatus leak check (I1) — no
 apparatus vocabulary in any agent-visible string.
 
 Also reports the observed per-call fixed context floor (system prompt +
@@ -39,10 +39,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "harness_tools.json"
 # (used by the CI live-harness workflow, where no account keys exist).
 HARNESS_TOOL = os.environ.get("KAMI_SMOKE_HARNESS_TOOL", "get_nodes")
 
-# Apparatus vocabulary that must never reach the agent (D12). Deliberately
+# Apparatus vocabulary that must never reach the agent (I1). Deliberately
 # apparatus-specific: in-game economics legitimately mention costs, prices,
 # tokens, and spending (MUSU/skill points), so generic money words stay out.
-D12_FORBIDDEN = [
+APPARATUS_FORBIDDEN = [
     "budget",
     "_usd",  # cost_usd / cumulative_usd / …; bare "usd" false-positives on base62 ids
     "horizon",
@@ -315,7 +315,7 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     # The workspace write landed.
     assert (run_dir / "workspace" / "smoke.md").read_text(encoding="utf-8") == "smoke ok"
 
-    # D12 leak check over every agent-visible string: system prompt +
+    # Apparatus leak check (I1) over every agent-visible string: system prompt +
     # file index, kickoff/continuation, tool names/descriptions/schemas,
     # and the full transcript (assistant + tool results as sent).
     visible = [
@@ -332,8 +332,8 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     ]
     for text in visible:
         lowered = text.lower()
-        for word in D12_FORBIDDEN:
-            assert word not in lowered, f"{provider}: D12 leak: {word!r}"
+        for word in APPARATUS_FORBIDDEN:
+            assert word not in lowered, f"{provider}: apparatus leak: {word!r}"
 
     # Report (SPEC D1 cap arithmetic wants the observed floor;
     # the cache columns show how much of it was served from/written to

@@ -37,9 +37,9 @@ def test_frozen_strings_are_exactly_as_reviewed():
 
 @pytest.mark.parametrize("name", ["system.txt", "kickoff.txt", "continue.txt"])
 def test_no_apparatus_or_policy_leaks(name):
-    # D12/D13: no budget, cost, tokens, compute limits, run duration,
-    # session caps, forced truncation, or study existence. Hard rule 2:
-    # no strategy hints, no vendor idioms, no XML-tag formatting.
+    # I1: no budget, cost, tokens, compute limits, run duration, session
+    # caps, forced truncation, or study existence. I3: no strategy hints,
+    # no vendor idioms, no XML-tag formatting.
     # Gas is a world mechanic, not apparatus (SPEC P7.4: in-world resources
     # are outside budget_usd): the transaction-cost item's "cost gas" is
     # the one allowed use of "cost"; any other occurrence still fails.
