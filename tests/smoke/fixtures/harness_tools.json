@@ -1,10 +1,10 @@
 {
   "harness": {
     "name": "kamigotchi-executor",
-    "version": "1.3.1",
-    "sha": "1e7c9da"
+    "version": "1.5.1",
+    "sha": "27592ce"
   },
-  "tools_hash": "sha256:f88807866ba0c6621b94e758b0c9e1ea36ff1d810e80d5aeb4549105c1041dd0",
+  "tools_hash": "sha256:e7e29ee436c11a8ae7c226d0270dd1494539db252547ec24cef97c667c263f1d",
   "tools": [
     {
       "name": "list_accounts",
@@ -108,7 +108,7 @@
     },
     {
       "name": "withdraw_operator",
-      "description": "Send ETH from the operator wallet to the same account's owner wallet.\n\nPlain value transfer signed by the operator key. The recipient is\npinned to this account's owner address from the registry; an\narbitrary recipient is not expressible. Fails before sending if the\noperator balance does not cover the amount plus the gas provision\n(250k gas at the flat price; a plain transfer burns ~113k on\nYominet's Initia MiniEVM).\n\nArgs:\n    amount_eth: Decimal string in ETH (e.g. \"0.005\"), or \"all\"\n        (default) to send the full operator balance minus the gas\n        reserve.\n    account: Account label (must have an owner key in .env, so the\n        owner address is known).\n\nReturns:\n    Transaction result (tx_hash, status, block, gas_used) plus\n    direction, the amount_eth actually sent, and post-transaction\n    operator_eth and owner_eth balances.\n",
+      "description": "Send ETH from the operator wallet to the same account's owner wallet.\n\nPlain value transfer signed by the operator key. The recipient is\npinned to this account's owner address from the registry; an\narbitrary recipient is not expressible.\n\nThe gas reserve is estimate-based, not a constant: the transfer's\ngas is measured with eth_estimateGas and provisioned at 2x\n(MiniEVM transfer costs vary — ~21.1k gas to an EIP-7702\ndelegated EOA, ~113k for a plain transfer, ~174k when the send\nfirst touches the recipient — and full-balance sweeps observed on\nv1.3.1 needed roughly a 2x gas-fee reserve to clear). With\namount_eth=\"all\" the swept value is the balance minus that reserve,\nand the exact value is re-verified with a second eth_estimateGas\nbefore signing. A failed validation raises an error starting\n\"validation failed; no transaction sent:\" and broadcasts nothing.\n\nArgs:\n    amount_eth: Decimal string in ETH (e.g. \"0.005\"), or \"all\"\n        (default) to send the full operator balance minus the\n        estimate-based gas reserve.\n    account: Account label (must have an owner key in .env, so the\n        owner address is known).\n\nReturns:\n    Transaction result (tx_hash, status, block, gas_used) plus\n    direction, the amount_eth actually sent, the gas_limit\n    provisioned, and post-transaction operator_eth and owner_eth\n    balances.\n",
       "input_schema": {
         "properties": {
           "amount_eth": {
@@ -192,7 +192,7 @@
     },
     {
       "name": "get_inventory",
-      "description": "All items and balances in the account inventory.\n\nArgs:\n    account: Account label.\n",
+      "description": "All items and balances in the account inventory.\n\nObserved availability: in 2026-07 this\nendpoint returned HTTP 400 on every request across all accounts;\nre-probed 2026-07-18, the identical request returns HTTP 200 for\nevery registered account. The failure was upstream state, not the\nrequest shape. On-chain inventory balances are independently\nreadable per systems/state-reading.md (inventory.instance\nentities).\n\nArgs:\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "account": {
@@ -306,7 +306,7 @@
     },
     {
       "name": "get_guild_members",
-      "description": "List all guild and team member account names.\n\nRestricted to GUILD and TEAM tier accounts.\n\nArgs:\n    account: Account label.\n",
+      "description": "List all guild and team member account names.\n\nRestricted to GUILD and TEAM tier accounts: the endpoint returns\nHTTP 403 for an account whose tier (get_tier) is not GUILD or\nTEAM, and HTTP 200 with the member list otherwise (both observed\nlive; the 403s recorded in 2026-07 came from\nnon-guild-tier accounts).\n\nArgs:\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "account": {
@@ -415,7 +415,7 @@
     },
     {
       "name": "get_leaderboard",
-      "description": "Game leaderboards. Cached 20m.\n\nArgs:\n    leaderboard_type: One of 'harvest' or 'kill'.\n    account: Account label (any registered account works).\n",
+      "description": "Game leaderboards. Cached 20m.\n\nObserved availability: as of 2026-07-18 the upstream endpoint\nreturns the body {\"error\": \"Failed to get leaderboard\",\n\"message\": \"Internal server error\"} for both leaderboard types,\nunder HTTP status 500 on some requests and 200 on others. At\nstatus 500 this tool raises; at status 200 it returns that error\nobject as the result — a result containing an \"error\" key is the\nupstream failure, not leaderboard data.\n\nArgs:\n    leaderboard_type: One of 'harvest' or 'kill'.\n    account: Account label (any registered account works).\n",
       "input_schema": {
         "properties": {
           "leaderboard_type": {
@@ -552,7 +552,7 @@
     },
     {
       "name": "harvest_start",
-      "description": "Start harvesting for one or more kamis at a node. Costs gas.\n\nKamis must be in the same room as the node and not already harvesting.\nUses batch variant for multiple kamis (1 tx).\n\nArgs:\n    kami_ids: List of kami token indices.\n    node_index: Harvest node index (same as room index).\n    account: Account label.\n",
+      "description": "Start harvesting for one or more kamis at a node. Costs gas.\n\nKamis must be in the same room as the node and not already harvesting.\nUses batch variant for multiple kamis (1 tx).\n\nValidates before signing (no gas spent on failure): kami_ids\nnon-empty, account registered, each kami owned by the account and\nRESTING, then an eth_call dry-run (which also covers room/node\nmismatch and cooldown). A failed validation raises an error starting\n\"validation failed; no transaction sent:\"; status=\"reverted\" in a\nresult is an on-chain revert of a broadcast transaction.\n\nArgs:\n    kami_ids: List of kami token indices.\n    node_index: Harvest node index (same as room index).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_ids": {
@@ -582,7 +582,7 @@
     },
     {
       "name": "harvest_stop",
-      "description": "Stop active harvests and auto-collect rewards. Costs gas.\n\nUses batch variant for multiple kamis (1 tx). Rewards + scavenge\npoints are distributed on stop.\n\nArgs:\n    kami_ids: List of kami token indices whose harvests to stop.\n    account: Account label.\n",
+      "description": "Stop active harvests and auto-collect rewards. Costs gas.\n\nUses batch variant for multiple kamis (1 tx). Rewards + scavenge\npoints are distributed on stop.\n\nValidates before signing (no gas spent on failure): kami_ids\nnon-empty, account registered, each kami owned by the account with\nan ACTIVE harvest entity, then an eth_call dry-run. A failed\nvalidation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    kami_ids: List of kami token indices whose harvests to stop.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_ids": {
@@ -607,7 +607,7 @@
     },
     {
       "name": "harvest_collect",
-      "description": "Collect rewards from active harvests WITHOUT stopping them. Costs gas.\n\nPartial collection — kamis keep harvesting. Rewards + scavenge points\nare distributed.\n\nArgs:\n    kami_ids: List of kami token indices whose harvests to collect.\n    account: Account label.\n",
+      "description": "Collect rewards from active harvests WITHOUT stopping them. Costs gas.\n\nPartial collection — kamis keep harvesting. Rewards + scavenge points\nare distributed.\n\nValidates before signing (no gas spent on failure): kami_ids\nnon-empty, account registered, each kami owned by the account with\nan ACTIVE harvest entity, then an eth_call dry-run. A failed\nvalidation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    kami_ids: List of kami token indices whose harvests to collect.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_ids": {
@@ -632,7 +632,7 @@
     },
     {
       "name": "move_to_room",
-      "description": "Move the account to a different room. Costs stamina.\n\nIssues a single room-change transaction. travel_to_room performs\nmulti-hop pathfinding over the room graph and manages stamina.\n\nArgs:\n    room_index: Target room number (1-70). See catalogs/rooms.csv.\n    account: Account label.\n",
+      "description": "Move the account to a different room. Costs stamina.\n\nIssues a single room-change transaction. travel_to_room performs\nmulti-hop pathfinding over the room graph and manages stamina.\n\nValidates before signing (no gas spent on failure): account\nregistered, target differs from the current room, current stamina\n(regen-projected on-chain) at least 5, then an eth_call dry-run —\na non-adjacent target surfaces as a validation error naming the\ncurrent room. A failed validation raises an error starting\n\"validation failed; no transaction sent:\".\n\nArgs:\n    room_index: Target room number (1-70). See catalogs/rooms.csv.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "room_index": {
@@ -654,7 +654,7 @@
     },
     {
       "name": "travel_to_room",
-      "description": "Travel to a target room via the shortest path, consuming stamina\nand optionally using SP+ items to extend range.\n\nReplaces manual multi-hop pathfinding. BFS runs over the static room\ngraph (catalogs/rooms.csv) and plans item inserts when stamina would\notherwise run out. Each hop is its own on-chain tx (no multicall).\n\nArgs:\n    target_room: Destination room index. See catalogs/rooms.csv.\n    account: Account label.\n    use_items: If True, consume SP+ items from inventory when needed\n        to reach the target. If False, stops when stamina is\n        insufficient and returns a partial result.\n    dry_run: If True, return the plan without executing any tx.\n",
+      "description": "Travel to a target room via the shortest path, consuming stamina\nand optionally using SP+ items to extend range.\n\nReplaces manual multi-hop pathfinding. BFS runs over the static room\ngraph (catalogs/rooms.csv) and plans item inserts when stamina would\notherwise run out. Each hop is its own on-chain tx (no multicall).\n\nValidates before planning: the account must be registered (error\nstarting \"validation failed; no transaction sent:\"). Each executed\nhop additionally passes the per-transaction validation gates.\n\nArgs:\n    target_room: Destination room index. See catalogs/rooms.csv.\n    account: Account label.\n    use_items: If True, consume SP+ items from inventory when needed\n        to reach the target. If False, stops when stamina is\n        insufficient and returns a partial result.\n    dry_run: If True, return the plan without executing any tx.\n",
       "input_schema": {
         "properties": {
           "target_room": {
@@ -686,7 +686,7 @@
     },
     {
       "name": "listing_buy",
-      "description": "Buy items from an NPC merchant. Must be in the merchant's room.\n\nArgs:\n    merchant_index: NPC merchant index (1=Mina, 2=Vending Machine).\n    item_indices: List of item indices to buy (global item index, e.g. 11301).\n    amounts: List of amounts for each item (parallel to item_indices).\n    account: Account label.\n",
+      "description": "Buy items from an NPC merchant. Must be in the merchant's room.\n\nValidates before signing (no gas spent on failure): item_indices\nnon-empty and parallel to amounts, account registered, then an\neth_call dry-run (room, MUSU balance). A failed validation raises\nan error starting \"validation failed; no transaction sent:\".\n\nArgs:\n    merchant_index: NPC merchant index (1=Mina, 2=Vending Machine).\n    item_indices: List of item indices to buy (global item index, e.g. 11301).\n    amounts: List of amounts for each item (parallel to item_indices).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "merchant_index": {
@@ -751,7 +751,7 @@
     },
     {
       "name": "feed_kami",
-      "description": "Use a food item on a kami to restore HP. Works while harvesting.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    food_item_id: Item ID for the food. Common foods:\n        11301=gum(25hp), 11302=burger(50hp), 11303=candy(50hp),\n        11304=cookies(100hp), 11311=resin(35hp), 11312=honeydew(75hp),\n        11313=golden_apple(150hp), 11314=blue_pansy(25hp).\n    account: Account label.\n",
+      "description": "Use a food item on a kami to restore HP. Works while harvesting.\n\nValidates before signing (no gas spent on failure): account\nregistered, kami owned by the account, inventory holds the item,\nthen an eth_call dry-run. A failed validation raises an error\nstarting \"validation failed; no transaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    food_item_id: Item ID for the food. Common foods:\n        11301=gum(25hp), 11302=burger(50hp), 11303=candy(50hp),\n        11304=cookies(100hp), 11311=resin(35hp), 11312=honeydew(75hp),\n        11313=golden_apple(150hp), 11314=blue_pansy(25hp).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -778,12 +778,24 @@
     },
     {
       "name": "revive_kami",
-      "description": "Revive a dead kami. Costs 33 Onyx Shards. Restores 33 HP -> RESTING.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    account: Account label.\n",
+      "description": "Revive a DEAD kami to RESTING via one of the game's revive paths.\n\nPaths (each consumes from the account inventory):\n  onyx                — system.kami.onyx.revive; consumes 33 Onyx\n                        Shards (item 100); restores HP to 33.\n  red_ribbon_gummy    — system.kami.use.item with item 11001;\n                        consumes 1; restores 10 HP.\n  melkarth_spell_card — system.kami.use.item with item 11002\n                        (not tradable); consumes 1; restores 50 HP.\n  djed_pillar         — system.kami.use.item with item 11003;\n                        consumes 1; restores 5 HP.\n  pale_potion         — system.kami.use.item with item 11004;\n                        consumes 1; restores 75 HP.\n\nValidates before signing (no gas spent on failure): account\nregistered, kami owned by the account and DEAD, inventory holds the\nchosen path's cost (33 Onyx Shards, or 1 of the revive item), then\nan eth_call dry-run. A failed validation raises an error starting\n\"validation failed; no transaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    method: Revive path; one of the values listed above\n        (default \"onyx\").\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
             "title": "Kami Id",
             "type": "integer"
+          },
+          "method": {
+            "default": "onyx",
+            "enum": [
+              "onyx",
+              "red_ribbon_gummy",
+              "melkarth_spell_card",
+              "djed_pillar",
+              "pale_potion"
+            ],
+            "title": "Method",
+            "type": "string"
           },
           "account": {
             "default": "main",
@@ -800,7 +812,7 @@
     },
     {
       "name": "level_up_kami",
-      "description": "Level up a kami if it has enough XP. Grants 1 skill point.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    account: Account label.\n",
+      "description": "Level up a kami if it has enough XP. Grants 1 skill point.\n\nValidates before signing (no gas spent on failure): account\nregistered, kami owned by the account, then an eth_call dry-run —\ninsufficient XP surfaces as a validation error carrying the chain's\n\"PetLevel: need more experience\" reason. A failed validation raises\nan error starting \"validation failed; no transaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -822,7 +834,7 @@
     },
     {
       "name": "name_kami",
-      "description": "Name or rename a kami. Costs 1 Holy Dust. Kami must be in room 11.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    name: New name (1-16 characters, globally unique).\n    account: Account label.\n",
+      "description": "Name or rename a kami. Costs 1 Holy Dust. Kami must be in room 11.\n\nValidates before signing (no gas spent on failure): name length\n1-16 bytes, account registered, kami owned by the account,\ninventory holds 1 Holy Dust (item 11011), then an eth_call dry-run\n(which also covers the room-11 requirement and name uniqueness). A\nfailed validation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    name: New name (1-16 characters, globally unique).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -849,7 +861,7 @@
     },
     {
       "name": "upgrade_skill",
-      "description": "Upgrade a skill on a kami by 1 point. Costs 1 SP. Kami must be RESTING.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    skill_index: Skill index from catalogs/skills.csv (e.g. 311 for\n        Guardian Defensiveness, 212 for Enlightened Cardio).\n    account: Account label.\n",
+      "description": "Upgrade a skill on a kami by 1 point. Costs 1 SP. Kami must be RESTING.\n\nValidates before signing (no gas spent on failure): account\nregistered, kami owned by the account, then an eth_call dry-run\n(state, skill points, tier gates). A failed validation raises an\nerror starting \"validation failed; no transaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    skill_index: Skill index from catalogs/skills.csv (e.g. 311 for\n        Guardian Defensiveness, 212 for Enlightened Cardio).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -876,7 +888,7 @@
     },
     {
       "name": "allocate_skills",
-      "description": "Allocate multiple skill points in one call. Executes sequentially on-chain.\n\nArgs:\n    kami_id: Kami token index.\n    skill_plan: List of {\"skill_index\": int, \"points\": int} dicts.\n        Example: [{\"skill_index\": 311, \"points\": 5}, {\"skill_index\": 312, \"points\": 5}]\n        Must respect tier gate ordering — lower tiers first.\n    account: Account label.\n",
+      "description": "Allocate multiple skill points in one call. Executes sequentially on-chain.\n\nValidates before signing (no gas spent on failure): skill_plan\nnon-empty, account registered, kami owned by the account; each\nupgrade transaction additionally passes an eth_call dry-run. A\nfailed validation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    kami_id: Kami token index.\n    skill_plan: List of {\"skill_index\": int, \"points\": int} dicts.\n        Example: [{\"skill_index\": 311, \"points\": 5}, {\"skill_index\": 312, \"points\": 5}]\n        Must respect tier gate ordering — lower tiers first.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -907,7 +919,7 @@
     },
     {
       "name": "level_to",
-      "description": "Level up a kami repeatedly until it reaches target_level.\n\nQueries current level from the API, then executes the exact number of\nlevel-up transactions needed. Retries on transient RPC errors.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    target_level: Desired level (e.g. 32). Must have enough XP banked.\n    account: Account label.\n",
+      "description": "Level up a kami repeatedly until it reaches target_level.\n\nQueries current level from the API, then executes the exact number of\nlevel-up transactions needed. Retries on transient RPC errors.\n\nValidates before signing (no gas spent on failure): account\nregistered and kami owned by the account; each level transaction\nadditionally passes an eth_call dry-run. A failed validation raises\nan error starting \"validation failed; no transaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    target_level: Desired level (e.g. 32). Must have enough XP banked.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -934,7 +946,7 @@
     },
     {
       "name": "level_and_allocate_batch",
-      "description": "Batch level-up and skill allocation across many kamis in one call.\n\nFor each target, optionally levels the kami to `target_level`, then\noptionally spends the given `skill_plan`, in a single MCP round-trip\nthat returns one compact result blob.\n\nFailures are captured per-kami: one kami's error does not abort the\nrest of the batch. Nonce conflicts are handled by `_send_tx_retry`.\n\nArgs:\n    targets: List of per-kami plans. Each item is a dict:\n        {\n            \"kami_id\": int,\n            \"target_level\": int (optional),\n            \"skill_plan\": [{\"skill_index\": int, \"points\": int}, ...] (optional)\n        }\n        At least one of target_level / skill_plan must be present.\n    account: Account label.\n\nReturns:\n    {\n        \"count\": N,\n        \"ok\": count of fully-successful kamis,\n        \"results\": [\n            {\n                \"kami_id\": ...,\n                \"leveled\": {\"from\": int, \"to\": int, \"target\": int} (if requested),\n                \"allocated\": {\"done\": int, \"planned\": int} (if requested),\n                \"error\": str (if any phase failed),\n            },\n            ...\n        ],\n    }\n",
+      "description": "Batch level-up and skill allocation across many kamis in one call.\n\nFor each target, optionally levels the kami to `target_level`, then\noptionally spends the given `skill_plan`, in a single MCP round-trip\nthat returns one compact result blob.\n\nValidates before signing (no gas spent on failure): targets\nnon-empty and account registered; each transaction additionally\npasses an eth_call dry-run. A failed validation raises an error\nstarting \"validation failed; no transaction sent:\".\n\nFailures are captured per-kami: one kami's error does not abort the\nrest of the batch. Nonce conflicts are handled by `_send_tx_retry`.\n\nArgs:\n    targets: List of per-kami plans. Each item is a dict:\n        {\n            \"kami_id\": int,\n            \"target_level\": int (optional),\n            \"skill_plan\": [{\"skill_index\": int, \"points\": int}, ...] (optional)\n        }\n        At least one of target_level / skill_plan must be present.\n    account: Account label.\n\nReturns:\n    {\n        \"count\": N,\n        \"ok\": count of fully-successful kamis,\n        \"results\": [\n            {\n                \"kami_id\": ...,\n                \"leveled\": {\"from\": int, \"to\": int, \"target\": int} (if requested),\n                \"allocated\": {\"done\": int, \"planned\": int} (if requested),\n                \"error\": str (if any phase failed),\n            },\n            ...\n        ],\n    }\n",
       "input_schema": {
         "properties": {
           "targets": {
@@ -960,7 +972,7 @@
     },
     {
       "name": "feed_level_allocate_batch",
-      "description": "Per kami: FEED consumable items, then LEVEL to a target, then ALLOCATE skills.\n\nRuns the three phases as one server-side loop per kami, in FEED →\nLEVEL → ALLOCATE order (feeding lands XP before the level transactions\nconsume it). Every use/level/skill upgrade is its own transaction (no\non-chain batching), sent sequentially with nonce-retry. Kamis must be\nRESTING.\n\nEach target dict:\n    {\"kami_id\": int,\n     \"feed_item_id\": int   (optional; consumable to use on the kami),\n     \"feed_count\": int     (optional; how many feed_item_id to use),\n     \"target_level\": int   (optional),\n     \"skill_plan\": [{\"skill_index\": int, \"points\": int}, ...] (optional)}\n\nFailures are captured per kami: an error is recorded in that kami's\nresult row and its remaining phases are skipped (a failed feed does not\nlevel into missing XP); the loop continues with the next kami. The\nlevel phase re-reads the live level and stops early if a level\ntransaction reverts. The server-side loop keeps running even if the\nMCP client call times out; completed work is still applied on-chain.\n\nArgs:\n    targets: List of per-kami target dicts (see above).\n    account: Account label.\n\nReturns:\n    {count, ok, results: [{kami_id, fed?, leveled?, allocated?, error?}]}\n",
+      "description": "Per kami: FEED consumable items, then LEVEL to a target, then ALLOCATE skills.\n\nRuns the three phases as one server-side loop per kami, in FEED →\nLEVEL → ALLOCATE order (feeding lands XP before the level transactions\nconsume it). Every use/level/skill upgrade is its own transaction (no\non-chain batching), sent sequentially with nonce-retry. Kamis must be\nRESTING.\n\nEach target dict:\n    {\"kami_id\": int,\n     \"feed_item_id\": int   (optional; consumable to use on the kami),\n     \"feed_count\": int     (optional; how many feed_item_id to use),\n     \"target_level\": int   (optional),\n     \"skill_plan\": [{\"skill_index\": int, \"points\": int}, ...] (optional)}\n\nValidates before signing (no gas spent on failure): targets\nnon-empty and account registered; each transaction additionally\npasses an eth_call dry-run. A failed validation raises an error\nstarting \"validation failed; no transaction sent:\".\n\nFailures are captured per kami: an error is recorded in that kami's\nresult row and its remaining phases are skipped (a failed feed does not\nlevel into missing XP); the loop continues with the next kami. The\nlevel phase re-reads the live level and stops early if a level\ntransaction reverts. The server-side loop keeps running even if the\nMCP client call times out; completed work is still applied on-chain.\n\nArgs:\n    targets: List of per-kami target dicts (see above).\n    account: Account label.\n\nReturns:\n    {count, ok, results: [{kami_id, fed?, leveled?, allocated?, error?}]}\n",
       "input_schema": {
         "properties": {
           "targets": {
@@ -986,7 +998,7 @@
     },
     {
       "name": "use_item_batch",
-      "description": "Use the same item on a kami multiple times. Executes sequentially.\n\nWorks for any consumable: food (HP), XP potions, buff potions, etc.\nRetries on transient RPC errors.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    item_id: Item ID (e.g. 11411 for Fortified XP Potion, 11302 for Burger).\n    count: Number of times to use the item.\n    account: Account label.\n",
+      "description": "Use the same item on a kami multiple times. Executes sequentially.\n\nWorks for any consumable: food (HP), XP potions, buff potions, etc.\nRetries on transient RPC errors.\n\nValidates before signing (no gas spent on failure): count at least\n1, account registered, kami owned by the account, inventory holds\n`count` of the item, then a per-transaction eth_call dry-run. A\nfailed validation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    item_id: Item ID (e.g. 11411 for Fortified XP Potion, 11302 for Burger).\n    count: Number of times to use the item.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -1018,7 +1030,7 @@
     },
     {
       "name": "use_account_item",
-      "description": "Use a consumable on the account (operator), NOT on a kami.\n\nIntended for stamina restores (21201-21206 ice creams / paste),\nVIPP sacrifice, and other account-level items. System is\n`system.account.use.item` (Operator wallet). The account contract\nsyncs stamina before applying the effect.\n\nArgs:\n    item_id: Item index, e.g. 21201 (Ice Cream, +20 stamina).\n    account: Account label.\n    amount: Quantity to consume in this call (default 1).\n",
+      "description": "Use a consumable on the account (operator), NOT on a kami.\n\nIntended for stamina restores (21201-21206 ice creams / paste),\nVIPP sacrifice, and other account-level items. System is\n`system.account.use.item` (Operator wallet). The account contract\nsyncs stamina before applying the effect.\n\nValidates before signing (no gas spent on failure): amount at least\n1, account registered, inventory holds `amount` of the item, then\nan eth_call dry-run. A failed validation raises an error starting\n\"validation failed; no transaction sent:\".\n\nArgs:\n    item_id: Item index, e.g. 21201 (Ice Cream, +20 stamina).\n    account: Account label.\n    amount: Quantity to consume in this call (default 1).\n",
       "input_schema": {
         "properties": {
           "item_id": {
@@ -1045,7 +1057,7 @@
     },
     {
       "name": "equip_item",
-      "description": "Equip an inventory item to a kami. Kami must be RESTING.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    item_index: Item index from inventory (e.g. 1001 for Wooden Stick).\n    account: Account label.\n",
+      "description": "Equip an inventory item to a kami. Kami must be RESTING.\n\nValidates before signing (no gas spent on failure): account\nregistered, kami owned by the account, inventory holds the item,\nthen an eth_call dry-run (state, slot occupancy). A failed\nvalidation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    item_index: Item index from inventory (e.g. 1001 for Wooden Stick).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -1072,7 +1084,7 @@
     },
     {
       "name": "unequip_item",
-      "description": "Unequip an item from a kami slot. Kami must be RESTING.\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    slot_type: Equipment slot name (e.g. \"Kami_Pet_Slot\").\n    account: Account label.\n",
+      "description": "Unequip an item from a kami slot. Kami must be RESTING.\n\nValidates before signing (no gas spent on failure): account\nregistered, kami owned by the account, then an eth_call dry-run\n(state, slot occupancy). A failed validation raises an error\nstarting \"validation failed; no transaction sent:\".\n\nArgs:\n    kami_id: Kami token index (e.g. 45).\n    slot_type: Equipment slot name (e.g. \"Kami_Pet_Slot\").\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_id": {
@@ -1232,7 +1244,7 @@
     },
     {
       "name": "buy_kami",
-      "description": "Buy one or more listed kamis on KamiSwap with ETH. Owner wallet.\n\nResolves each kami's active listing via the Kamiden indexer, sums the\nlive listing prices, and sends a single batch purchase transaction\ncarrying exactly that total as its value. The batch is all-or-nothing:\nif any listing fails (expired, already sold), the whole transaction\nreverts. Bought kamis join this account's roster and enter a 1-hour\npurchase cooldown.\n\nArgs:\n    kami_ids: Kami token indices to buy (e.g. [1116, 428]). A single\n        kami is a 1-element list.\n    max_total_eth: Decimal ETH string (e.g. \"0.012\"). The call aborts\n        BEFORE sending if the live sum of listing prices exceeds this,\n        so a listing repriced between browsing and buying cannot raise\n        the amount spent.\n    account: Account label; pays with this account's owner wallet.\n\nReturns the tx result (tx_hash, status, gas_used) plus per-kami\npurchase details and the ETH total.\n",
+      "description": "Buy one or more listed kamis on KamiSwap with ETH. Owner wallet.\n\nResolves each kami's active listing via the Kamiden indexer, sums the\nlive listing prices, and sends a single batch purchase transaction\ncarrying exactly that total as its value. The batch is all-or-nothing:\nif any listing fails (expired, already sold), the whole transaction\nreverts. Bought kamis join this account's roster and enter a 1-hour\npurchase cooldown.\n\nValidates before signing (no gas spent on failure): an active\nlisting exists for every kami, the live total is within\nmax_total_eth, the owner wallet balance covers total + gas\nprovision, and an eth_call dry-run passes. A failed validation\nraises an error starting \"validation failed; no transaction sent:\".\n\nArgs:\n    kami_ids: Kami token indices to buy (e.g. [1116, 428]). A single\n        kami is a 1-element list.\n    max_total_eth: Decimal ETH string (e.g. \"0.012\"). The call aborts\n        BEFORE sending if the live sum of listing prices exceeds this,\n        so a listing repriced between browsing and buying cannot raise\n        the amount spent.\n    account: Account label; pays with this account's owner wallet.\n\nReturns the tx result (tx_hash, status, gas_used) plus per-kami\npurchase details and the ETH total.\n",
       "input_schema": {
         "properties": {
           "kami_ids": {
@@ -1545,7 +1557,7 @@
     },
     {
       "name": "stop_harvest_batch",
-      "description": "Stop harvests for multiple kamis in one transaction. Collects rewards automatically.\n\nUses executeBatchedAllowFailure — individual reverts skip silently\ninstead of reverting the entire batch. After the tx commits, this\nfunction reads each kami's harvest entity state on-chain to detect\nsilent skips.\nReturns `per_kami` map with the resulting harvest state and a\n`stopped` boolean. `stopped_count`/`failed_count` summarize.\n\nMax ~5 per batch (eth_estimateGas cap).\n\nArgs:\n    kami_ids: List of kami token indices (e.g. [45, 46, 47]).\n    account: Account label.\n",
+      "description": "Stop harvests for multiple kamis in one transaction. Collects rewards automatically.\n\nUses executeBatchedAllowFailure — individual reverts skip silently\ninstead of reverting the entire batch. After the tx commits, this\nfunction reads each kami's harvest entity state on-chain to detect\nsilent skips.\nReturns `per_kami` map with the resulting harvest state and a\n`stopped` boolean. `stopped_count`/`failed_count` summarize.\n\nMax ~5 per batch (eth_estimateGas cap).\n\nValidates before signing (no gas spent on failure): kami_ids\nnon-empty and account registered. Per-kami failures are silent\nskips by design (executeBatchedAllowFailure) and are reported via\nthe post-transaction per_kami harvest-state reads.\n\nArgs:\n    kami_ids: List of kami token indices (e.g. [45, 46, 47]).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "kami_ids": {
@@ -1607,7 +1619,7 @@
     },
     {
       "name": "accept_quest",
-      "description": "Accept a quest by index. Costs gas.\n\nRequirements are checked on-chain (previous quest completed, location, etc).\n\nArgs:\n    quest_index: Quest index to accept.\n    account: Account label.\n",
+      "description": "Accept a quest by index. Costs gas.\n\nRequirements are checked on-chain (previous quest completed, location, etc).\n\nValidates before signing (no gas spent on failure): account\nregistered, quest not already accepted or completed by the account,\nthen an eth_call dry-run (prerequisites, location). A failed\nvalidation raises an error starting \"validation failed; no\ntransaction sent:\".\n\nArgs:\n    quest_index: Quest index to accept.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "quest_index": {
@@ -1629,7 +1641,7 @@
     },
     {
       "name": "complete_quest",
-      "description": "Complete an active quest. Costs gas. All objectives must be met.\n\nComputes the quest entity ID from the index and account.\n\nArgs:\n    quest_index: Quest index of the active quest to complete.\n    account: Account label.\n",
+      "description": "Complete an active quest. Costs gas. All objectives must be met.\n\nComputes the quest entity ID from the index and account.\n\nValidates before signing (no gas spent on failure): account\nregistered, quest accepted and not already completed, then an\neth_call dry-run — unmet objectives surface as a validation error\ncarrying the chain's revert reason. A failed validation raises an\nerror starting \"validation failed; no transaction sent:\".\n\nArgs:\n    quest_index: Quest index of the active quest to complete.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "quest_index": {
@@ -1712,7 +1724,7 @@
     },
     {
       "name": "drop_quest",
-      "description": "Drop/abandon an active quest. Costs gas.\n\nArgs:\n    quest_index: Quest index of the active quest to drop.\n    account: Account label.\n",
+      "description": "Drop/abandon an active quest. Costs gas.\n\nValidates before signing (no gas spent on failure): account\nregistered, quest accepted and not already completed, then an\neth_call dry-run. A failed validation raises an error starting\n\"validation failed; no transaction sent:\".\n\nArgs:\n    quest_index: Quest index of the active quest to drop.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "quest_index": {
@@ -1734,7 +1746,7 @@
     },
     {
       "name": "burn_items",
-      "description": "Burn (destroy) items from inventory, reducing their balances.\n\nArgs:\n    item_indices: List of item indices to burn (e.g. [1005]).\n    amounts: List of amounts to burn, parallel to item_indices.\n    account: Account label.\n",
+      "description": "Burn (destroy) items from inventory, reducing their balances.\n\nValidates before signing (no gas spent on failure): item_indices\nnon-empty and parallel to amounts, account registered, inventory\nholds each amount, then an eth_call dry-run. A failed validation\nraises an error starting \"validation failed; no transaction sent:\".\n\nArgs:\n    item_indices: List of item indices to burn (e.g. [1005]).\n    amounts: List of amounts to burn, parallel to item_indices.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "item_indices": {
@@ -1767,7 +1779,7 @@
     },
     {
       "name": "craft_item",
-      "description": "Craft items from a recipe. Consumes inputs, produces outputs, costs stamina.\n\nSee catalogs/recipes.csv for recipe indices and requirements.\n\nArgs:\n    recipe_index: Recipe index (e.g. 6 for Extract Pine Pollen).\n    amount: Number of times to craft (multiplies inputs/outputs).\n    account: Account label.\n",
+      "description": "Craft items from a recipe. Consumes inputs, produces outputs, costs stamina.\n\nSee catalogs/recipes.csv for recipe indices and requirements.\n\nValidates before signing (no gas spent on failure): amount at least\n1, account registered, then an eth_call dry-run (recipe inputs,\nstamina). A failed validation raises an error starting \"validation\nfailed; no transaction sent:\".\n\nArgs:\n    recipe_index: Recipe index (e.g. 6 for Extract Pine Pollen).\n    amount: Number of times to craft (multiplies inputs/outputs).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "recipe_index": {
@@ -1794,7 +1806,7 @@
     },
     {
       "name": "speed_craft_batch",
-      "description": "Craft a stamina-gated recipe N times, restoring stamina between crafts.\n\nAccount stamina caps at 100 and regenerates ~1/min, so a recipe costing\nmore than 50 stamina cannot be crafted back-to-back naturally, and a\nsingle craft_item(amount=N) for N>1 needs N×cost ≤ 100 or it reverts.\nThis tool interleaves, per cycle:\n    1. use ONE stamina_item_id (account stamina restore) — its own tx\n    2. craft ONE unit of recipe_index                     — its own tx\nThere is no on-chain batching; transactions go out sequentially with\nnonce-retry. Consumes `count` stamina items plus `count`× the recipe\ninputs from the account inventory.\n\nStop-on-error: if a stamina-use or craft transaction errors or reverts,\nthe loop halts and returns partial progress. The server-side loop keeps\nrunning even if the MCP client call times out.\n\nArgs:\n    recipe_index: Recipe to craft (see catalogs/recipes.csv).\n    count: Number of crafts (one stamina item consumed per craft).\n    stamina_item_id: Account stamina-restore item index (default 21205,\n        +80 stamina; see catalogs/items.csv for alternatives).\n    account: Account label.\n    delay_seconds: Pause between cycles (default 0).\n\nReturns:\n    {account, recipe_index, stamina_item_id, requested, crafted,\n     stamina_used, last_error, success}\n",
+      "description": "Craft a stamina-gated recipe N times, restoring stamina between crafts.\n\nAccount stamina caps at 100 and regenerates ~1/min, so a recipe costing\nmore than 50 stamina cannot be crafted back-to-back naturally, and a\nsingle craft_item(amount=N) for N>1 needs N×cost ≤ 100 or it reverts.\nThis tool interleaves, per cycle:\n    1. use ONE stamina_item_id (account stamina restore) — its own tx\n    2. craft ONE unit of recipe_index                     — its own tx\nThere is no on-chain batching; transactions go out sequentially with\nnonce-retry. Consumes `count` stamina items plus `count`× the recipe\ninputs from the account inventory.\n\nStop-on-error: if a stamina-use or craft transaction errors or reverts,\nthe loop halts and returns partial progress. The server-side loop keeps\nrunning even if the MCP client call times out.\n\nValidates before signing (no gas spent on failure): count at least\n1 and account registered; each transaction additionally passes an\neth_call dry-run. A failed validation raises an error starting\n\"validation failed; no transaction sent:\".\n\nArgs:\n    recipe_index: Recipe to craft (see catalogs/recipes.csv).\n    count: Number of crafts (one stamina item consumed per craft).\n    stamina_item_id: Account stamina-restore item index (default 21205,\n        +80 stamina; see catalogs/items.csv for alternatives).\n    account: Account label.\n    delay_seconds: Pause between cycles (default 0).\n\nReturns:\n    {account, recipe_index, stamina_item_id, requested, crafted,\n     stamina_used, last_error, success}\n",
       "input_schema": {
         "properties": {
           "recipe_index": {
@@ -1875,7 +1887,7 @@
     },
     {
       "name": "scavenge_claim",
-      "description": "Claim scavenge rewards for a node. Costs gas.\n\nTriggers droptable commit(s) that must be revealed in a later block.\nReturns commit_ids for use with droptable_reveal.\n\nArgs:\n    node_index: Harvest node index.\n    account: Account label.\n",
+      "description": "Claim scavenge rewards for a node. Costs gas.\n\nTriggers droptable commit(s) that must be revealed in a later block\nthan the claim and within 256 blocks (~6 min) of it — the reveal\nseed is the claim block's blockhash, which stops being available\nafter 256 blocks; a commit past that window cannot be revealed by\nany player action. Returns commit_ids for droptable_reveal as\ndecimal strings (uint256 values exceed IEEE-754 float precision and\ndo not survive JSON as numbers).\n\nValidates before signing (no gas spent on failure): account\nregistered, accumulated scavenge points cover at least one tier at\nthe node, then an eth_call dry-run. A failed validation raises an\nerror starting \"validation failed; no transaction sent:\".\n\nArgs:\n    node_index: Harvest node index.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "node_index": {
@@ -1897,12 +1909,12 @@
     },
     {
       "name": "droptable_reveal",
-      "description": "Reveal droptable commits to receive items. Costs gas.\n\nMust be called in a later block than the claim that created the commits.\n\nArgs:\n    commit_ids: List of commit entity IDs from scavenge claims.\n    account: Account label.\n",
+      "description": "Reveal droptable commits to receive items. Costs gas.\n\nMust be called in a later block than the claim that created the\ncommits and within 256 blocks (~6 min) of it — the reveal seed is\nthe claim block's blockhash, which stops being available after 256\nblocks; a commit past that window cannot be revealed by any player\naction. Gas is estimated per call with a 1.5x buffer (reveal cost\nscales with the number of rolls in the commits).\n\nValidates before signing (no gas spent on failure): commit_ids\nnon-empty, account registered, an eth_estimateGas preflight of the\nexact calldata, then an eth_call dry-run. A failed validation\nraises an error starting \"validation failed; no transaction sent:\".\n\nArgs:\n    commit_ids: Commit entity IDs from scavenge claims, as decimal\n        or 0x-hex strings (uint256 values exceed IEEE-754 float\n        precision and do not survive JSON as numbers).\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "commit_ids": {
             "items": {
-              "type": "integer"
+              "type": "string"
             },
             "title": "Commit Ids",
             "type": "array"
@@ -1922,7 +1934,7 @@
     },
     {
       "name": "scavenge_claim_and_reveal",
-      "description": "Claim scavenge rewards AND reveal droptable items in one call.\n\nCombines scavenge_claim + droptable_reveal. Waits for the next block\nbetween claim and reveal (reveal must be in a later block than claim).\n\nArgs:\n    node_index: Harvest node index.\n    account: Account label.\n",
+      "description": "Claim scavenge rewards AND reveal droptable items in one call.\n\nCombines scavenge_claim + droptable_reveal: waits for the next\nblock after the claim (the reveal must land in a later block), then\nreveals with estimated gas (1.5x buffer; cost scales with the roll\ncount), retrying up to 3 times, 3 seconds apart. The commits expire\n256 blocks (~6 min) after the claim block — the reveal seed is the\nclaim block's blockhash, which stops being available after 256\nblocks; an expired commit cannot be revealed by any player action.\nIf the reveal does not succeed, the result reports the claim\nresult, the commit_ids (decimal strings), and the last failure as\nit occurred; the claim itself is already final on-chain.\n\nArgs:\n    node_index: Harvest node index.\n    account: Account label.\n",
       "input_schema": {
         "properties": {
           "node_index": {
@@ -1996,12 +2008,12 @@
     },
     {
       "name": "sacrifice_reveal",
-      "description": "Manually reveal sacrifice commit(s) — recovery path only.\n\nThe sacrifice reveal fires automatically on-chain after sacrifice_kami;\nthis tool exists to recover a commit whose auto-reveal failed to fire.\nTakes the commit_ids returned by sacrifice_kami. The reveal must run in\na later block than the commit. Operator wallet.\n\nArgs:\n    commit_ids: Commit entity IDs from sacrifice_kami.\n    account: Account label.\n\nReturns the batch tx result (tx_hash, status, gas_used) plus the\ncommit IDs revealed.\n",
+      "description": "Manually reveal sacrifice commit(s) — recovery path only.\n\nThe sacrifice reveal fires automatically on-chain after sacrifice_kami;\nthis tool exists to recover a commit whose auto-reveal failed to fire.\nTakes the commit_ids returned by sacrifice_kami. The reveal must run in\na later block than the commit. Operator wallet.\n\nArgs:\n    commit_ids: Commit entity IDs from sacrifice_kami, as decimal\n        or 0x-hex strings (uint256 values exceed IEEE-754 float\n        precision and do not survive JSON as numbers).\n    account: Account label.\n\nReturns the batch tx result (tx_hash, status, gas_used) plus the\ncommit IDs revealed (decimal strings).\n",
       "input_schema": {
         "properties": {
           "commit_ids": {
             "items": {
-              "type": "integer"
+              "type": "string"
             },
             "title": "Commit Ids",
             "type": "array"
