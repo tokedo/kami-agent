@@ -1,4 +1,4 @@
-"""Anthropic adapter: recorded-fixture normalization + retry classification (brief §3.3)."""
+"""Anthropic adapter: recorded-fixture normalization + retry classification (SPEC P8)."""
 
 import json
 from pathlib import Path
@@ -90,7 +90,7 @@ def test_request_shape_system_tools_params():
     (request,) = client.messages.calls
     assert request["model"] == "claude-haiku-4-5"
     assert request["max_tokens"] == 4096
-    # Breakpoint 1 (SPEC §5.2): the last system block carries cache_control;
+    # Breakpoint 1 (SPEC D2): the last system block carries cache_control;
     # the system text itself is byte-identical to the plain-string form.
     assert request["system"] == [
         {
@@ -275,7 +275,7 @@ def test_unmappable_stop_reason_raises(value):
     assert not excinfo.value.retryable
 
 
-# --- prompt caching breakpoints (SPEC §5.2) ---------------------------------
+# --- prompt caching breakpoints (SPEC D2) ---------------------------------
 
 
 def _cache_markers(request):
@@ -366,8 +366,8 @@ def test_breakpoints_never_exceed_provider_maximum():
 
 
 def test_replay_payload_annotation_is_non_destructive():
-    """D22 replay blocks are shared across calls: the annotated block is a
-    serialized copy; the original SDK objects never gain a marker."""
+    """Replayed provider-state blocks are shared across calls: the annotated
+    block is a serialized copy; the original SDK objects never gain a marker."""
     replayed = load_fixture("thinking_tool_use").content  # thinking, text, tool_use
     state = ProviderState(provider="anthropic", payload=tuple(replayed))
     adapter, client = make_adapter(load_fixture("text_end_turn"))
@@ -409,13 +409,13 @@ def test_thinking_blocks_are_never_annotated():
     assert request["messages"][1]["content"][0] is thinking
 
 
-# --- token accounting invariant (SPEC §5.2) --------------------------------
+# --- token accounting invariant (SPEC P7.1) --------------------------------
 
 
 def test_usage_passthrough_and_reasoning_tokens_absent():
     adapter, _ = make_adapter(load_fixture("parallel_tool_use"))
     response = adapter.complete("s", [UserMessage(text="hi")], TOOLS, PARAMS)
-    # Anthropic reports output_tokens inclusive of thinking tokens (D16):
+    # Anthropic reports output_tokens inclusive of thinking tokens (P7.1):
     # the adapter passes counts through unchanged and reports no
     # informational reasoning subset.
     assert response.usage.input_tokens == 2521
@@ -430,7 +430,7 @@ def test_usage_folds_cache_components_into_total_input():
     adapter, _ = make_adapter(load_fixture("cached_usage"))
     response = adapter.complete("s", [UserMessage(text="hi")], TOOLS, PARAMS)
     # Anthropic's wire input_tokens EXCLUDES cached tokens; the canonical
-    # figure is the TOTAL prompt count (§5.2 invariant).
+    # figure is the TOTAL prompt count (P7.1 invariant).
     assert response.usage.input_tokens == 314 + 22000 + 928
     assert response.usage.cache_read_tokens == 22000
     assert response.usage.cache_write_tokens == 928
@@ -449,7 +449,7 @@ def test_raw_usage_preserved_in_provider_meta():
     assert response.provider_meta["usage"]["input_tokens"] == 2314
 
 
-# --- retry classification (SPEC §5.5) ---------------------------------------
+# --- retry classification (SPEC P8) ---------------------------------------
 
 
 def _status_error(status: int) -> anthropic.APIStatusError:
@@ -500,7 +500,7 @@ def test_non_provider_exceptions_propagate_unwrapped():
 
 
 def test_default_client_disables_sdk_retries():
-    # Retries are the loop's job (SPEC §5.5, every retry logged); the SDK's
+    # Retries are the loop's job (SPEC P8, every retry logged); the SDK's
     # invisible internal retries would corrupt accounting.
     adapter = AnthropicAdapter("claude-haiku-4-5", api_key="test-key")
     assert adapter._client.max_retries == 0

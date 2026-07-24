@@ -1,7 +1,8 @@
-# Full SPEC §11.2 smoke against a REAL kami-harness checkout at the pinned
-# SHA (Option B, kami-lab D21). Never gates PRs: runs on manual dispatch and
-# a weekly cron. Run it manually before tagging v0, before the $10 smoke
-# handoff, and on any harness pin bump.
+# Full live-harness smoke (README, Verification tier 4) against a REAL
+# kami-harness checkout at the pinned SHA. Never gates PRs: runs on manual
+# dispatch and a weekly cron. Run it manually before tagging a release and
+# on any harness pin bump — chain-RPC flakiness must not block unrelated
+# PRs, and the pinned harness cannot drift under CI.
 #
 # Uses list_accounts as the read-only harness tool: the CI checkout has no
 # wallet or Kamibots API keys, so account-authenticated reads (get_nodes)

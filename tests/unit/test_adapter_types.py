@@ -1,4 +1,4 @@
-"""Canonical adapter types (SPEC §5.1–5.2)."""
+"""Canonical adapter types (SPEC P8, P7.1)."""
 
 import dataclasses
 
@@ -51,7 +51,7 @@ def test_usage_reasoning_tokens_optional():
 
 
 def test_usage_cache_components_default_to_zero():
-    # SPEC §5.2: input_tokens is the total; the cache components are
+    # SPEC P7.1: input_tokens is the total; the cache components are
     # subsets and default to 0 for providers/calls without caching.
     usage = Usage(input_tokens=10, output_tokens=20)
     assert usage.cache_read_tokens == 0

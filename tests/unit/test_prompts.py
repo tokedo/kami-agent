@@ -1,4 +1,4 @@
-"""The three frozen prompt strings (SPEC §6): exact content + leak discipline."""
+"""The three frozen prompt strings (SPEC P13): exact content + leak discipline."""
 
 from pathlib import Path
 
@@ -37,10 +37,10 @@ def test_frozen_strings_are_exactly_as_reviewed():
 
 @pytest.mark.parametrize("name", ["system.txt", "kickoff.txt", "continue.txt"])
 def test_no_apparatus_or_policy_leaks(name):
-    # D12/D13: no budget, cost, tokens, compute limits, run duration,
-    # session caps, forced truncation, or study existence. Hard rule 2:
-    # no strategy hints, no vendor idioms, no XML-tag formatting.
-    # Gas is a world mechanic, not apparatus (SPEC §9: in-game resources
+    # I1: no budget, cost, tokens, compute limits, run duration, session
+    # caps, forced truncation, or study existence. I3: no strategy hints,
+    # no vendor idioms, no XML-tag formatting.
+    # Gas is a world mechanic, not apparatus (SPEC P7.4: in-world resources
     # are outside budget_usd): the transaction-cost item's "cost gas" is
     # the one allowed use of "cost"; any other occurrence still fails.
     text = (PROMPTS / name).read_text(encoding="utf-8").lower().replace("cost gas", "")
@@ -81,7 +81,7 @@ def test_packaged_prompts_match_repo_prompts():
 
 
 def test_wake_bounds_in_frozen_prompt_match_code_defaults():
-    # The frozen prompt hardcodes the §9 default wake bounds. A manifest or
+    # The frozen prompt hardcodes the P6 default wake bounds. A manifest or
     # code change to wake_min/wake_max must consciously re-freeze the prompt
     # (and this test) in the same commit — they can never silently diverge.
     from kami_agent.runner import RunConfig
@@ -97,7 +97,7 @@ def test_wake_bounds_in_frozen_prompt_match_code_defaults():
 
 
 def test_kickoff_and_continue_carry_no_dynamic_content():
-    # Frozen constants: no numbers, no timestamps (SPEC §3 step 6).
+    # Frozen constants: no numbers, no timestamps (SPEC P1.11).
     for name in ("kickoff.txt", "continue.txt"):
         text = (PROMPTS / name).read_text(encoding="utf-8")
         assert not any(ch.isdigit() for ch in text), f"{name} contains digits"

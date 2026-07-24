@@ -1,4 +1,4 @@
-"""CLI entry points: kami-agent init | run-session | status (SPEC §10).
+"""CLI entry points: kami-agent init | run-session | status (SPEC P12).
 
 - ``init``: validate the manifest, write the run directory from it, run
   connectivity checks (chain RPC, mainnet RPC, provider API, MCP
@@ -9,7 +9,7 @@
 - ``run-session``: execute one session — what the supervisor's cron
   entry invokes.
 - ``status``: print the state.json summary. Operator-facing only; never
-  an agent channel (D12).
+  an agent channel (I1).
 
 The manifest is a YAML file copied verbatim into ``run/config.yaml``;
 see ``manifests/example.yaml``. Secrets (provider API key, owner wallet
@@ -220,7 +220,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     (run_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     # Frozen prompts + agent-owned workspace; reference/ is provisioned by
-    # the image (D14) — warn, don't fail, when absent in dev.
+    # the image (SPEC D5) — warn, don't fail, when absent in dev.
     prompts_dir = run_dir / "prompts"
     if not prompts_dir.exists():
         prompts_dir.mkdir()
@@ -232,7 +232,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     (run_dir / "workspace").mkdir(exist_ok=True)
     (run_dir / "transcripts").mkdir(exist_ok=True)
     if not (run_dir / "reference").exists():
-        print("warning: reference/ missing — provision the GDD snapshot (D14)", file=sys.stderr)
+        print("warning: reference/ missing — provision the GDD snapshot", file=sys.stderr)
 
     harness_tool_names: list[str] = []
     if args.skip_connectivity:
@@ -294,7 +294,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="kami-agent", description="KamiBench reference agent scaffold (SPEC §10)"
+        prog="kami-agent", description="KamiBench reference agent scaffold (SPEC P12)"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

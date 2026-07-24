@@ -1,4 +1,4 @@
-"""CLI: manifest → config builders, init layout + run_start, status (SPEC §10)."""
+"""CLI: manifest → config builders, init layout + run_start, status (SPEC P12)."""
 
 import json
 from pathlib import Path
@@ -66,7 +66,7 @@ def test_init_creates_run_layout_and_run_start(tmp_path, manifest_path, capsys):
     )
     assert rc == 0
 
-    # Layout (SPEC §7): config copy, prompts, workspace, transcripts.
+    # Layout (SPEC P12): config copy, prompts, workspace, transcripts.
     config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
     assert config["run_id"] == "dev-smoke-001"
     assert "_manifest_hash" not in config
@@ -74,7 +74,7 @@ def test_init_creates_run_layout_and_run_start(tmp_path, manifest_path, capsys):
     assert (run_dir / "workspace").is_dir()
     assert (run_dir / "transcripts").is_dir()
 
-    # No key path through init (SPEC §10, D27): no wallet in the config
+    # No key path through init (SPEC P12): no wallet in the config
     # copy, and init writes no .env — operator creation is a harness tool.
     assert "wallet_address" not in config
     assert not (run_dir / ".env").exists()

@@ -1,4 +1,4 @@
-"""Harness MCP client: stdio child, handshake, tool loading, failure path (brief §3.6)."""
+"""Harness MCP client: stdio child, handshake, tool loading, failure path (SPEC D1)."""
 
 import sys
 from pathlib import Path
@@ -57,7 +57,7 @@ def test_unknown_tool_raises_tool_error(client):
 
 def test_handshake_failure_aborts(tmp_path):
     # A child that dies before the MCP handshake → HarnessError, which the
-    # runner maps to session_end reason=errors with zero model calls (SPEC §2).
+    # runner maps to session_end reason=errors with zero model calls (SPEC D1).
     with pytest.raises(HarnessError):
         HarnessClient(sys.executable, ["-c", "import sys; sys.exit(3)"], handshake_timeout_s=10)
 

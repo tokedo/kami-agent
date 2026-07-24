@@ -1,15 +1,15 @@
-"""Session lifecycle: lock, recover, boundary checks, session, persist, schedule (SPEC §3).
+"""Session lifecycle: lock, recover, boundary checks, session, persist, schedule (SPEC P1).
 
 One process: start → run one session → persist → exit. Accounting is
-always rebuilt by folding telemetry.jsonl (§7.1); state.json is written
+always rebuilt by folding telemetry.jsonl (P3); state.json is written
 back as a cache. Forced endings and boundary stops are silent to the
-agent (D13).
+agent (I4, I2).
 
-Ordering note vs SPEC §3 step 4: the harness child is spawned *before*
+Ordering note (SPEC X11): the harness child is spawned *before*
 session_start is emitted, because session_start carries ``tools_hash``,
 which needs the loaded game tools. The hard constraint — the session
-counter is persisted before the first model call, so crashes never reuse
-a session number — is preserved.
+counter is persisted before the first model call (P1.7), so crashes never
+reuse a session number — is preserved.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ TRIGGER_MANUAL = "manual"
 
 @dataclass
 class RunConfig:
-    """The §9 parameters the runner needs, pinned per manifest."""
+    """The D3 parameters the runner needs, pinned per manifest."""
 
     run_dir: Path
     run_id: str
@@ -84,7 +84,7 @@ def run_session(
     sleep: Callable[[float], None] | None = None,
     disable_supervisor: Callable[[], None] | None = None,
 ) -> str:
-    """Execute the full SPEC §3 lifecycle once; returns an outcome constant."""
+    """Execute the full SPEC P1 lifecycle once; returns an outcome constant."""
     clock = clock or (lambda: datetime.now(UTC))
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -92,14 +92,14 @@ def run_session(
     state_path = run_dir / "state.json"
     lock_path = run_dir / LOCK_FILENAME
 
-    # 1. Acquire lock (staleness per §2). If held, exit.
+    # 1. Acquire lock (staleness per P4). If held, exit.
     if not acquire_lock(lock_path, stale_s=config.lock_stale_s, clock=clock):
         return LOCK_HELD
     try:
         events = list(read_events(telemetry_path)) if telemetry_path.exists() else []
         state = fold_telemetry(events)
 
-        # §2 wake gating: exit unless due (manual runs bypass).
+        # P1.3 wake gating: exit unless due (manual runs bypass).
         if (
             trigger != TRIGGER_MANUAL
             and state.next_wake_at is not None
@@ -108,7 +108,7 @@ def run_session(
             return NOT_DUE
 
         with TelemetryWriter(telemetry_path, run_id=config.run_id, clock=clock) as writer:
-            # 2. Recover: unmatched session_start → synthetic crash end (§3.2).
+            # 2. Recover: unmatched session_start → synthetic crash end (P3).
             crashed = crashed_session(events)
             if crashed is not None:
                 record = writer.emit(
@@ -123,7 +123,7 @@ def run_session(
             if state.run_status == RUN_COMPLETE:
                 return ALREADY_COMPLETE
 
-            # 3. Boundary checks (D13): only here, never mid-session.
+            # 3. Boundary checks (I2): only here, never mid-session.
             stop_reason = boundary_check(
                 cumulative_usd=state.cumulative_usd,
                 budget_usd=config.budget_usd,
@@ -211,7 +211,7 @@ def _run_one_session(
         )
 
     def emit_schedule(scaffold_tools: ScaffoldTools, carried_wake: str | None = None) -> None:
-        # 9. Emitted every session, including the wake_default case (§8).
+        # 9. Emitted every session, including the wake_default case (I15).
         if scaffold_tools.clamped_wake_min is not None:
             source = "agent"
             requested: float | None = scaffold_tools.requested_wake_min
@@ -244,7 +244,7 @@ def _run_one_session(
         if harness_factory is not None:
             game = harness_factory()
     except HarnessError:
-        # §2: handshake failure aborts the session — zero model calls,
+        # D1: handshake failure aborts the session — zero model calls,
         # next wake = wake_default.
         start_record = emit_session_start(tools_hash(list(SCAFFOLD_TOOL_DEFS)))
         if state.first_session_at is None:
@@ -268,7 +268,7 @@ def _run_one_session(
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
 
-        # 5. Build context: frozen system prompt + the file index (§3.5) —
+        # 5. Build context: frozen system prompt + the file index (P1.10) —
         # full workspace/ tree, reference/ collapsed to one entry.
         prompts = _load_prompts(run_dir)
         system = prompts["system"] + "\n\n" + scaffold.workspace_list()
@@ -294,7 +294,7 @@ def _run_one_session(
         result = loop.run()
 
         # 8. Persist: session_end, transcript, state cache. A repetition
-        # ending carries its rule and trigger stats (SPEC §8, additive).
+        # ending carries its rule and trigger stats (SPEC P9, additive).
         end_fields: dict[str, Any] = {
             "reason": result.reason,
             "llm_calls": result.llm_calls,
@@ -331,7 +331,7 @@ def _load_prompts(run_dir: Path) -> dict[str, str]:
 
 
 def _write_transcript(run_dir: Path, session: int, messages: list[Message]) -> None:
-    """Full message log, one file per session (§7); post-truncation (§8)."""
+    """Full message log, one file per session (P12); post-truncation (P9)."""
     transcripts = run_dir / "transcripts"
     transcripts.mkdir(parents=True, exist_ok=True)
     path = transcripts / f"session-{session:04d}.jsonl"
@@ -352,7 +352,7 @@ def _message_dict(message: Message) -> dict[str, Any]:
             ],
         }
         if message.provider_state is not None:
-            # Transcripts record messages as sent (D22); telemetry never
+            # Transcripts record messages as sent (I17); telemetry never
             # carries provider state.
             entry["provider_state"] = {
                 "provider": message.provider_state.provider,

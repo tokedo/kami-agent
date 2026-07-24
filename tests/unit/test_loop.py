@@ -1,4 +1,4 @@
-"""Agent loop: serialization (D18), error semantics (§5.4), retries (§5.5), guard (D17)."""
+"""Agent loop: serialization (I12), error semantics (P2), retries (P8), guard (X7)."""
 
 import pytest
 
@@ -181,7 +181,7 @@ def test_game_tool_routing_and_tx_hash(run_dir):
     assert game_event["tx_hash"] == "0xabc"
 
 
-# --- D18: strict serialization + end_session batch semantics ------------------
+# --- I12: strict serialization + end_session batch semantics ------------------
 
 
 def test_batch_executes_in_order_and_skips_after_end_session(run_dir):
@@ -222,7 +222,7 @@ def test_later_intents_see_earlier_effects(run_dir):
     assert results[1].content == "seen"
 
 
-# --- §5.4 error semantics -----------------------------------------------------
+# --- P2 error semantics -----------------------------------------------------
 
 
 def test_malformed_calls_return_error_results(run_dir):
@@ -330,7 +330,7 @@ def test_tool_timeout_is_an_error_result(run_dir):
     assert "timed out after 0.05 seconds" in results[0].content
 
 
-# --- D17 context guard ---------------------------------------------------------
+# --- X7 context guard (post-call) ---------------------------------------------------------
 
 
 def test_context_guard_trips_post_call_and_is_silent(run_dir):
@@ -376,7 +376,7 @@ def test_end_session_at_cap_is_still_agent(run_dir):
     assert loop.run().reason == "agent"
 
 
-# --- §5.5 retries ---------------------------------------------------------------
+# --- P8 retries ---------------------------------------------------------------
 
 
 def test_retryable_errors_backoff_and_recover(run_dir):
@@ -416,7 +416,7 @@ def test_non_retryable_error_ends_immediately(run_dir):
     assert sleeps == []
 
 
-# --- D19 result cap --------------------------------------------------------------
+# --- I16 result cap --------------------------------------------------------------
 
 
 def test_big_read_truncated_with_reread_hint(run_dir):
@@ -459,7 +459,7 @@ def test_cost_and_cumulative_accounting(run_dir):
 
 
 def test_cache_decomposition_reaches_telemetry_and_cost(run_dir):
-    # SPEC §5.2/§8: llm_call preserves the cache decomposition and cost_usd
+    # SPEC P7.1/P9: llm_call preserves the cache decomposition and cost_usd
     # prices the components; cumulative_tokens stays input+output (total).
     cached = AdapterResponse(
         text_blocks=(),
@@ -646,7 +646,7 @@ def test_errors_ending_never_carries_a_wake(run_dir):
 
 
 def test_end_session_skipped_wake_is_never_carried(run_dir):
-    # D18 semantics unchanged: intents skipped by end_session stay skipped.
+    # I12 semantics unchanged: intents skipped by end_session stay skipped.
     adapter = ScriptedAdapter(
         response(
             end_call(id_="e1"),
@@ -715,7 +715,7 @@ def test_empty_responses_exhaust_retries_and_end_session(run_dir):
 
 def test_empty_but_billed_response_keeps_continuation_handling(run_dir):
     # Nonzero usage means the provider really produced (and billed) an
-    # empty turn — the §5.4 continuation path applies, not the retry path.
+    # empty turn — the P2 continuation path applies, not the retry path.
     billed_empty = AdapterResponse(
         text_blocks=(),
         tool_calls=(),

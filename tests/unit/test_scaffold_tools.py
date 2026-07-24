@@ -1,4 +1,4 @@
-"""Scaffold tools (SPEC §4): file tools, quota, scheduling, status minimalism (D12)."""
+"""Scaffold tools (SPEC P10): file tools, quota, scheduling, status minimalism (I1)."""
 
 import json
 from datetime import UTC, datetime
@@ -205,7 +205,7 @@ def test_set_next_wake_rejects_non_finite(tools):
         tools.execute("set_next_wake", {"minutes_from_now": float("inf")})
 
 
-# --- get_status (D12 minimalism) ---------------------------------------------
+# --- get_status (I1 minimalism) ---------------------------------------------
 
 
 def test_get_status_exactly_four_fields(tools):
@@ -220,8 +220,9 @@ def test_get_status_exactly_four_fields(tools):
 
 
 def test_budget_visible_mechanism_pinned_off_by_default(run_dir):
-    # The flag exists as mechanism for a future arm (D12); when enabled the
-    # budget field is appended — for experiment 001 it never is.
+    # The flag exists as mechanism for a future budget-visible configuration
+    # (X10); when enabled the budget field is appended. It is pinned False,
+    # so on every real run it never is.
     visible = ScaffoldTools(
         run_dir, budget_visible=True, budget_remaining_usd=42.5, clock=lambda: FIXED_NOW
     )
@@ -263,13 +264,13 @@ def test_tool_defs_cover_spec_surface():
     }
     for tool in SCAFFOLD_TOOL_DEFS:
         assert tool.input_schema["type"] == "object"
-        # Schemas stay within the tri-provider subset (SPEC §5.1).
+        # Schemas stay within the tri-provider subset (SPEC I19).
         assert not {"oneOf", "anyOf", "allOf"} & tool.input_schema.keys()
 
 
 def test_no_apparatus_leaks_in_agent_visible_tool_strings():
-    # D12 / hard rule 2: nothing about budget, spend, horizon, caps, or the
-    # study in any string the model can see.
+    # I1 / I3: nothing about budget, spend, horizon, caps, or the study in
+    # any string the model can see.
     forbidden = [
         "budget",
         "spend",

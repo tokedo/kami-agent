@@ -1,4 +1,4 @@
-"""Session runner: full SPEC §3 lifecycle incl. crash/resume and boundary stops."""
+"""Session runner: full SPEC P1 lifecycle incl. crash/resume and boundary stops."""
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -176,7 +176,7 @@ def test_wake_gating_and_manual_bypass(run_dir):
     )
     clock.advance(minutes=10)
     assert run_session(config_for(run_dir), ScriptedAdapter(), clock=clock) == NOT_DUE
-    # Manual trigger bypasses the gate (§8 trigger: manual).
+    # Manual trigger bypasses the gate (P9 trigger: manual).
     adapter = ScriptedAdapter(response(end_call()))
     assert run_session(config_for(run_dir), adapter, trigger="manual", clock=clock) == SESSION_RAN
     starts = events_of(run_dir, "session_start")
@@ -259,7 +259,7 @@ def test_normal_session_emits_no_carried_fields(run_dir):
     assert "repetition_rule" not in end
 
 
-# --- boundary checks (D13) --------------------------------------------------------
+# --- boundary checks (I2) --------------------------------------------------------
 
 
 def seed_spent_run(run_dir, *, cost=11.0):
@@ -327,7 +327,7 @@ def test_t_max_boundary(run_dir):
     assert events_of(run_dir, "run_complete")[0]["reason"] == "t_max"
 
 
-# --- crash/resume (§3.2, brief step 7 definition of done) ---------------------------
+# --- crash/resume (P3) ---------------------------
 
 
 def crash_telemetry(run_dir):
@@ -406,7 +406,7 @@ def test_crash_recovery_is_idempotent(run_dir):
     assert len(crash_ends) == 1
 
 
-# --- harness handshake failure (§2) ---------------------------------------------------
+# --- harness handshake failure (D1) ---------------------------------------------------
 
 
 def failing_harness():

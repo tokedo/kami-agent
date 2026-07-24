@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
-  "title": "kami-agent telemetry event (SPEC §8)",
-  "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC §7.1); every event is flushed synchronously before the action it describes is considered complete.",
+  "title": "kami-agent telemetry event (SPEC P9)",
+  "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
   "version": "0.2.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
@@ -74,12 +74,12 @@
         "input_tokens": {
           "type": "integer",
           "minimum": 0,
-          "description": "TOTAL prompt tokens for the call (SPEC §5.2); cache_read_tokens and cache_write_tokens are component subsets"
+          "description": "TOTAL prompt tokens for the call (SPEC P7.1); cache_read_tokens and cache_write_tokens are component subsets"
         },
         "output_tokens": {
           "type": "integer",
           "minimum": 0,
-          "description": "Includes reasoning/thinking tokens (D16)"
+          "description": "Includes reasoning/thinking tokens (SPEC P7.1)"
         },
         "reasoning_tokens": {
           "type": "integer",
@@ -89,12 +89,12 @@
         "cache_read_tokens": {
           "type": "integer",
           "minimum": 0,
-          "description": "Component subset of input_tokens served from provider prompt cache (SPEC §5.2); input_tokens remains the TOTAL prompt count"
+          "description": "Component subset of input_tokens served from provider prompt cache (SPEC P7.1); input_tokens remains the TOTAL prompt count"
         },
         "cache_write_tokens": {
           "type": "integer",
           "minimum": 0,
-          "description": "Component subset of input_tokens written to provider prompt cache (SPEC §5.2); non-zero only where writes carry a premium (Anthropic)"
+          "description": "Component subset of input_tokens written to provider prompt cache (SPEC P7.1); non-zero only where writes carry a premium (Anthropic)"
         },
         "cost_usd": { "type": "number", "minimum": 0 },
         "cumulative_usd": { "type": "number", "minimum": 0 },
@@ -102,20 +102,20 @@
         "latency_ms": { "type": "number", "minimum": 0 },
         "stop_reason": {
           "enum": ["end_turn", "tool_use", "max_tokens", "refusal", "error"],
-          "description": "SPEC §5.1 normalized enum, plus \"error\" for failed-but-logged attempts on the retry path (SPEC §5.5) where no provider stop reason exists"
+          "description": "SPEC P8 normalized enum, plus \"error\" for failed-but-logged attempts on the retry path (SPEC X13) where no provider stop reason exists"
         },
         "retry_count": { "type": "integer", "minimum": 0 },
         "usage_unknown": {
           "type": "boolean",
-          "description": "True when a failed-but-billed attempt's usage was unknowable; logged at cost 0 (SPEC §5.5)"
+          "description": "True when a failed-but-billed attempt's usage was unknowable; logged at cost 0 (SPEC P7.4)"
         },
         "continuation": {
           "type": "boolean",
-          "description": "True when this call follows a continuation send (SPEC §5.4)"
+          "description": "True when this call follows a continuation send (SPEC P2)"
         },
         "empty_response": {
           "type": "boolean",
-          "description": "True for a provider response with no text, no tool calls, and zero usage — treated as a retryable provider error under the SPEC §5.5 backoff, logged at cost 0"
+          "description": "True for a provider response with no text, no tool calls, and zero usage — treated as a retryable provider error under the SPEC P8 backoff, logged at cost 0"
         }
       },
       "required": [
@@ -139,7 +139,7 @@
         "source": { "enum": ["harness", "scaffold"] },
         "path": {
           "type": "string",
-          "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC §8)"
+          "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC P9)"
         },
         "duration_ms": { "type": "number", "minimum": 0 },
         "ok": { "type": "boolean" },
@@ -148,7 +148,7 @@
         "original_bytes": { "type": "integer", "minimum": 0 },
         "skipped": {
           "type": "boolean",
-          "description": "True for intents skipped because end_session took effect earlier in the same batch (D18)"
+          "description": "True for intents skipped because end_session took effect earlier in the same batch (SPEC I12)"
         },
         "tx_hash": { "type": "string" }
       },
@@ -227,7 +227,7 @@
         "repetition_count": {
           "type": "integer",
           "minimum": 0,
-          "description": "identical_call: length of the consecutive identical-call run (D43); same_tool_errors: length of the consecutive error/revert run"
+          "description": "identical_call: length of the consecutive identical-call run; same_tool_errors: length of the consecutive error/revert run"
         },
         "repetition_window": {
           "type": "integer",

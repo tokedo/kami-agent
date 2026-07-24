@@ -1,4 +1,4 @@
-"""State cache + telemetry-fold recovery (SPEC §3.2, §7.1)."""
+"""State cache + telemetry-fold recovery (SPEC P1.4, P3)."""
 
 import json
 
@@ -67,7 +67,7 @@ def test_fold_marks_run_complete():
 
 
 def test_crashed_session_detected():
-    # Session 2 opened but never closed → crash (SPEC §3 step 2).
+    # Session 2 opened but never closed → crash (SPEC P1.4).
     assert crashed_session(EVENTS) == 2
 
 

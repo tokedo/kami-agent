@@ -1,11 +1,11 @@
-"""Agent loop: intents, strict serialization, error semantics (SPEC §5.3–5.5, D17, D18).
+"""Agent loop: intents, strict serialization, error semantics (SPEC P2, P8, X7, I12).
 
 One session's model-call / tool-execution alternation. The loop is
 provider-blind: it speaks only the canonical adapter types. Frozen
 strings (kickoff, continuation) are injected by the runner from
 ``prompts/`` — no prompt text lives in code.
 
-Forced endings (context guard, tool cap, errors) are silent (D13): no
+Forced endings (context guard, tool cap, errors) are silent (I4): no
 warning message, no final model call.
 """
 
@@ -46,7 +46,7 @@ from kami_agent.tools.errors import ToolError
 from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS, SCAFFOLD_TOOL_NAMES, ScaffoldTools
 from kami_agent.tools.truncation import cap_tool_result
 
-# session_end reasons produced by the loop (SPEC §8; "crash" is written by
+# session_end reasons produced by the loop (SPEC P5; "crash" is written by
 # recovery, never by a live loop).
 REASON_AGENT = "agent"
 REASON_TOKEN_CAP = "token_cap"
@@ -56,7 +56,7 @@ REASON_REPETITION = "repetition"
 
 # Carried-wake outcomes (SessionResult.carried_wake): _carry_wake runs only
 # on the token_cap / tool_cap / repetition paths — never "errors", never
-# intents skipped by end_session (D18).
+# intents skipped by end_session (I12).
 CARRIED_APPLIED = "applied"
 CARRIED_INVALID = "invalid"
 
@@ -86,10 +86,10 @@ class GameTools(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class LoopCaps:
-    """Per-session caps, pinned per manifest (SPEC §9).
+    """Per-session caps, pinned per manifest (SPEC D3).
 
     ``session_token_cap`` has no spec default — it is set per manifest from
-    the model list (D17) — so it is required here.
+    the model list — so it is required here.
     """
 
     session_token_cap: int
@@ -128,7 +128,7 @@ class SessionResult:
 
 
 class AgentLoop:
-    """Runs SPEC §3 step 7: alternate model calls and tool executions."""
+    """Runs SPEC P1 step 12: alternate model calls and tool executions (P2)."""
 
     def __init__(
         self,
@@ -169,7 +169,7 @@ class AgentLoop:
         collisions = {t.name for t in game_defs} & SCAFFOLD_TOOL_NAMES
         if collisions:
             raise ValueError(f"harness tools shadow scaffold tools: {sorted(collisions)}")
-        # Game tools first, scaffold tools second (SPEC §6 order); the order
+        # Game tools first, scaffold tools second (SPEC P10 order); the order
         # is deterministic so tools_hash is stable.
         self._tool_defs: list[ToolDef] = game_defs + list(SCAFFOLD_TOOL_DEFS)
         self._validators = {
@@ -205,19 +205,20 @@ class AgentLoop:
                 AssistantMessage(
                     text="\n\n".join(response.text_blocks) if response.text_blocks else None,
                     tool_calls=response.tool_calls,
-                    # D22: copied verbatim for same-session replay by the
-                    # emitting adapter; the loop never inspects it.
+                    # Provider reasoning state (I17): copied verbatim for
+                    # same-session replay by the emitting adapter; the
+                    # loop never inspects it.
                     provider_state=response.provider_state,
                 )
             )
-            # Context guard (D17): post-call, silent; the response's intents
+            # Context guard (X7): post-call, silent; the response's intents
             # are never executed (a final-turn set_next_wake is carried).
             usage = response.usage
             if usage.input_tokens + usage.output_tokens >= self._caps.session_token_cap:
                 self._carry_wake(response.tool_calls)
                 return self._result(REASON_TOKEN_CAP, messages)
             if not response.tool_calls:
-                # §5.4: the loop cannot advance on its own — send the frozen
+                # P2: the loop cannot advance on its own — send the frozen
                 # continuation string; counts as one error.
                 self._consecutive_errors += 1
                 if self._consecutive_errors >= self._caps.max_consecutive_errors:
@@ -229,7 +230,7 @@ class AgentLoop:
             if reason is not None:
                 return self._result(reason, messages)
 
-    # --- model calls (SPEC §5.5) ----------------------------------------------
+    # --- model calls (SPEC P8) ----------------------------------------------
 
     def _call_model(self, messages: list[Message], continuation: bool) -> AdapterResponse | None:
         attempt = 0
@@ -241,7 +242,7 @@ class AgentLoop:
                 )
             except AdapterError as exc:
                 latency_ms = (time.perf_counter() - start) * 1000
-                # Failed attempt: usage unknowable, logged at cost 0 (§5.5).
+                # Failed attempt: usage unknowable, logged at cost 0 (P7.4).
                 self._llm_calls += 1
                 self._emit_llm_call(
                     input_tokens=0,
@@ -270,9 +271,9 @@ class AgentLoop:
                 and usage.output_tokens == 0
             ):
                 # Empty response with zero usage: a provider fault, not an
-                # assistant turn — retried under the §5.5 backoff instead of
+                # assistant turn — retried under the P8 backoff instead of
                 # leaking into the continuation/error path. Empty-but-billed
-                # responses (nonzero usage) keep the §5.4 handling.
+                # responses (nonzero usage) keep the P2 handling.
                 self._llm_calls += 1
                 self._emit_llm_call(
                     input_tokens=0,
@@ -335,7 +336,7 @@ class AgentLoop:
             "model": self._model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            # Cache decomposition (SPEC §5.2): input_tokens is the total;
+            # Cache decomposition (SPEC P7.1): input_tokens is the total;
             # these are its components, preserved so per-component provider
             # CSV columns reconcile exactly.
             "cache_read_tokens": cache_read_tokens,
@@ -357,7 +358,7 @@ class AgentLoop:
             fields["empty_response"] = True
         self._telemetry.emit("llm_call", session=self._session, **fields)
 
-    # --- tool execution (SPEC §5.3–5.4, D18, D19) -------------------------------
+    # --- tool execution (SPEC P2, I12, I16) -------------------------------
 
     def _execute_batch(self, calls: tuple[ToolCall, ...], messages: list[Message]) -> str | None:
         """Execute intents strictly sequentially, in the order returned.
@@ -366,7 +367,7 @@ class AgentLoop:
         """
         for index, intent in enumerate(calls):
             if self._scaffold.session_ended:
-                # end_session took effect earlier in this batch (D18).
+                # end_session took effect earlier in this batch (I12).
                 self._emit_tool_call(
                     intent,
                     source=self._source_of(intent.name),
@@ -402,7 +403,7 @@ class AgentLoop:
                     return REASON_ERRORS
             if not self._scaffold.session_ended:
                 # Repetition breaker: evaluated after every executed call,
-                # ends the session exactly as tool_cap does (silent, D13).
+                # ends the session exactly as tool_cap does (silent, I4).
                 trip = self._repetition.record(
                     intent.name,
                     intent.args,
@@ -436,11 +437,11 @@ class AgentLoop:
 
         validator = self._validators.get(intent.name)
         if validator is None:
-            # Malformed tool call (§5.4): unknown tool.
+            # Malformed tool call (P2): unknown tool.
             return failure(f"unknown tool: {intent.name}")
         schema_errors = sorted(validator.iter_errors(intent.args), key=str)
         if schema_errors:
-            # Malformed tool call (§5.4): args failing schema validation.
+            # Malformed tool call (P2): args failing schema validation.
             return failure(f"invalid arguments for {intent.name}: {schema_errors[0].message}")
 
         try:
@@ -449,11 +450,11 @@ class AgentLoop:
             return failure(f"tool call timed out after {self._caps.tool_timeout_s:g} seconds")
         except ToolError as exc:
             return failure(str(exc))
-        except Exception as exc:  # harness/executor failure (§5.4)
+        except Exception as exc:  # harness/executor failure (P2)
             return failure(f"tool execution failed: {exc}")
 
         content, tx_hash = raw
-        # Slice-hint only where re-readable via workspace_read (D19).
+        # Slice-hint only where re-readable via workspace_read (I16).
         reread_path = intent.args.get("path") if intent.name == "workspace_read" else None
         capped = cap_tool_result(
             content,
@@ -474,7 +475,7 @@ class AgentLoop:
         }
 
     def _run_with_timeout(self, intent: ToolCall) -> tuple[str, str | None]:
-        """Run one intent in a watchdog thread (tool_timeout_s, §5.4)."""
+        """Run one intent in a watchdog thread (tool_timeout_s, P2)."""
 
         def dispatch() -> tuple[str, str | None]:
             if intent.name in SCAFFOLD_TOOL_NAMES:

@@ -1,4 +1,4 @@
-"""Tool-result cap with an explicit truncation marker (D19, SPEC §5.3).
+"""Tool-result cap with an explicit truncation marker (SPEC P2, I16).
 
 Applied uniformly to scaffold and harness results before they are
 inserted into context. The marker states the original size and — for
@@ -28,7 +28,7 @@ def cap_tool_result(
     """Cap ``content`` at ``max_bytes`` of UTF-8, appending a marker when cut.
 
     ``path`` is set for file-read results, where the marker can point at
-    byte-sliced re-reads via workspace_read (D19).
+    byte-sliced re-reads via workspace_read (P10).
     """
     raw = content.encode("utf-8")
     original = len(raw)

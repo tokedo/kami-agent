@@ -1,4 +1,4 @@
-"""Tool-result cap + truncation marker (D19, SPEC §5.3)."""
+"""Tool-result cap + truncation marker (SPEC P2, I16)."""
 
 from kami_agent.tools.truncation import DEFAULT_TOOL_RESULT_MAX_BYTES, cap_tool_result
 

@@ -1,17 +1,17 @@
 """Repetition breaker: silent session-ending rules evaluated after every tool call.
 
-A sibling of ``session_tool_cap`` (D13 semantics): the agent is never
+A sibling of ``session_tool_cap`` (I4 semantics): the agent is never
 told the rules exist, tripping is silent (no warning, no final model
 call), and the session ends exactly as ``tool_cap`` does. Three
-mechanical rules, each with a manifest-pinned knob (SPEC §9 caps):
+mechanical rules, each with a manifest-pinned knob (SPEC P5.1):
 
 - **identical_call** (``repetition_identical_cap``, default 5): the same
   signature — tool name + normalized-args hash — executed that many
   times CONSECUTIVELY, regardless of success/error. Consecutive, not
-  cumulative-per-session (D43): in 001 the maximum identical count in
-  productive sessions was 4 legitimate re-reads, so a cumulative cap
-  would clip productive behavior with a one-call margin, while the
-  observed identical-call storms were consecutive and still trip at 5.
+  cumulative-per-session: observed productive re-read behavior peaks at
+  4 identical calls, so 5 consecutive leaves one call of margin, while
+  a cumulative-per-session cap at the same number would clip that
+  productive behavior. The storms this rule targets are consecutive.
 - **window_diversity** (``repetition_window`` 30 /
   ``repetition_min_distinct`` 4): over the last ``window`` executed
   calls the number of distinct signatures is at or below the floor —

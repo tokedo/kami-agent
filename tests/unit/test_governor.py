@@ -1,4 +1,4 @@
-"""Governor: cost math (D16) and boundary checks (D13, SPEC §9)."""
+"""Governor: cost math (P7.2) and boundary checks (I2, SPEC P7)."""
 
 from datetime import UTC, datetime
 
@@ -20,14 +20,14 @@ def test_cost_is_list_price_times_reported_tokens():
 
 
 def test_reasoning_tokens_do_not_double_count():
-    # output_tokens already includes reasoning tokens (D16); the subset
+    # output_tokens already includes reasoning tokens (P7.1); the subset
     # field never enters the cost formula.
     with_subset = Usage(input_tokens=100, output_tokens=500, reasoning_tokens=300)
     without = Usage(input_tokens=100, output_tokens=500)
     assert cost_usd(with_subset, PRICES) == cost_usd(without, PRICES)
 
 
-# --- cache-aware cost (SPEC §5.2, D16 as amended) ----------------------------
+# --- cache-aware cost (SPEC P7.2) ----------------------------
 
 CACHED_PRICES = PriceTable(
     input_usd_per_mtok=1.0,

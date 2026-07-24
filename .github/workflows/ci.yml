@@ -26,8 +26,8 @@ jobs:
   # One full run-session under a cron-like environment: minimal PATH,
   # explicit HOME, non-interactive shell, no provider keys (stub adapter),
   # fake MCP harness fixture spawned by absolute interpreter path. Guards
-  # the two 001 launch-day defect classes: PATH-dependent binary resolution
-  # and missing-env assumptions. Success is judged by explicit markers and
+  # two defect classes observed in real deployments: PATH-dependent binary
+  # resolution and missing-env assumptions. Success is judged by explicit markers and
   # real exit codes — output goes to a file, grep runs on the file (never
   # through a pipe), and every command's status fails the step directly.
   cron-smoke:
@@ -55,7 +55,7 @@ jobs:
           grep -qx "session_ran" "$OUT"
           "$PWD/.venv/bin/python" "$PWD/tests/cron_smoke/check_telemetry.py" "$RUN_DIR"
 
-  # Tri-provider live tier (SPEC §11.2, amended per kami-lab D21): real
+  # Tri-provider live tier (README, Verification tier 3): real
   # provider APIs against the recorded harness tool surface with simulated
   # tool execution. The full live-harness variant is the separate
   # non-gating live-harness-smoke workflow.
@@ -75,8 +75,8 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       # Deliberate (not a quota stopgap; the key is billed now):
-      # 2.5-flash is a thinking model, so every CI run exercises the D16
-      # reasoning-token fold and the D22 thought-signature round-trip live,
+      # 2.5-flash is a thinking model, so every CI run exercises the
+      # reasoning-token fold and the thought-signature round-trip live,
       # which flash-lite would not.
       SMOKE_GEMINI_MODEL: gemini-2.5-flash
     steps:

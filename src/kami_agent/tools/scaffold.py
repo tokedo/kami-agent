@@ -1,8 +1,8 @@
-"""Scaffold tools (SPEC §4): workspace/reference file tools, scheduling, status, end_session.
+"""Scaffold tools (SPEC P10): workspace/reference file tools, scheduling, status, end_session.
 
 All strings the model can see — tool names, descriptions, results, error
 messages — are mechanism-only: no budget, spend, horizon, or cap
-information (D12), no strategy or memory-structure hints (hard rule 2).
+information (I1), no strategy or memory-structure hints (I3).
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ class ScaffoldTools:
     One instance per session. ``set_next_wake`` and ``end_session``
     accumulate their effect on the instance (``requested_wake_min`` /
     ``clamped_wake_min`` / ``session_ended`` / ``end_reason``) for the
-    runner to apply. ``emit`` receives the SPEC §8 ``workspace_write`` /
+    runner to apply. ``emit`` receives the SPEC P9 ``workspace_write`` /
     ``workspace_delete`` telemetry payloads.
     """
 
@@ -136,7 +136,8 @@ class ScaffoldTools:
         self.workspace_quota_bytes = workspace_quota_bytes
         self.wake_min_minutes = wake_min_minutes
         self.wake_max_minutes = wake_max_minutes
-        # Mechanism for a future budget-visible arm; pinned False for 001 (D12).
+        # Mechanism for a future budget-visible configuration; pinned False —
+        # enabling it is a deliberate code change, not a config flip (X10, I1).
         self.budget_visible = budget_visible
         self.budget_remaining_usd = budget_remaining_usd
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -251,7 +252,7 @@ class ScaffoldTools:
         return f"Next session in {clamped:g} minutes."
 
     def get_status(self) -> str:
-        # Exactly these fields and nothing else (D12): no budget, spend,
+        # Exactly these fields and nothing else (I1): no budget, spend,
         # token counts, elapsed-run figures, or T_max.
         status: dict[str, Any] = {
             "current_time_utc": self._clock().isoformat(),

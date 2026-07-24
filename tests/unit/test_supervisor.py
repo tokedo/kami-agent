@@ -1,4 +1,4 @@
-"""Supervisor: PID+age lockfile with staleness breaking, cron installer (SPEC §2)."""
+"""Supervisor: PID+age lockfile with staleness breaking, cron installer (SPEC P4, D4)."""
 
 import json
 from datetime import UTC, datetime, timedelta

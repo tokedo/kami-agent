@@ -1,6 +1,6 @@
 """Smoke-tier configuration: .env loading and harness-mode selection.
 
-The tri-provider live tier (SPEC §11.2) talks to real provider APIs.
+The tri-provider live tier (README, Verification tier 3) talks to real provider APIs.
 Keys come from the environment or from the repo-root ``.env`` (never
 committed). Tests skip per provider when the key is absent.
 

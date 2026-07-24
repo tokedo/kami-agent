@@ -1,6 +1,6 @@
-"""Harness MCP client: spawns pinned kami-harness as a stdio child, loads game tools (SPEC §2).
+"""Harness MCP client: spawns pinned kami-harness as a stdio child, loads game tools (SPEC D1).
 
-Lifecycle per session (SPEC §2): the kami-harness MCP server is spawned
+Lifecycle per session (SPEC D1): the kami-harness MCP server is spawned
 as a stdio child at the SHA pinned in the run manifest; a handshake
 failure aborts the session before any model call (the runner writes
 ``session_end reason=errors`` and schedules ``wake_default``).
@@ -116,7 +116,7 @@ class HarnessClient:
     # --- GameTools ------------------------------------------------------------
 
     def execute(self, name: str, args: dict[str, Any]) -> GameToolResult:
-        """Call one harness tool; MCP-level errors surface as ToolError (§5.4)."""
+        """Call one harness tool; MCP-level errors surface as ToolError (P2)."""
         session = self._session
         if session is None:
             raise ToolError("harness is not connected")

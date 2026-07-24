@@ -1,14 +1,14 @@
-"""Anthropic adapter: canonical types to/from the Messages API (SPEC §5.1–5.2, §5.5).
+"""Anthropic adapter: canonical types to/from the Messages API (SPEC P8, P7.1).
 
 Provider quirks handled here and nowhere else:
 - system prompt is a top-level param, not a message;
 - all tool results for one assistant turn go back in a single user
   message (splitting them degrades the provider's parallel calling);
-- ``output_tokens`` already includes thinking tokens (D16) — no fold
+- ``output_tokens`` already includes thinking tokens (P7.1) — no fold
   needed; no separate reasoning-token count is reported;
 - the client is built with ``max_retries=0``: retries are the loop's job
-  (SPEC §5.5 — every retry is logged), never the SDK's;
-- explicit prompt caching (SPEC §5.2): the adapter places
+  (SPEC P8 — every retry is logged), never the SDK's;
+- explicit prompt caching (SPEC D2): the adapter places
   ``cache_control`` breakpoints (5-minute ephemeral) — one on the last
   system block (render order is tools → system → messages, so it caches
   the whole fixed floor) and a rolling one on the last content block of
@@ -16,10 +16,10 @@ Provider quirks handled here and nowhere else:
   remain valid read points, so hits accrue as the session grows.
   ``cache_control`` is request metadata: the prompt bytes sent to the
   model are identical with or without it, and nothing about caching is
-  agent-visible (D12);
+  agent-visible (I1);
 - wire ``usage.input_tokens`` EXCLUDES cached tokens; the adapter folds
   ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` back in
-  so canonical ``input_tokens`` is the total prompt count (§5.2).
+  so canonical ``input_tokens`` is the total prompt count (P7.1).
 """
 
 from __future__ import annotations
@@ -43,14 +43,14 @@ from kami_agent.adapters.base import (
     UserMessage,
 )
 
-# Provider stop reasons → canonical enum (SPEC §5.1). "stop_sequence" cannot
+# Provider stop reasons → canonical enum (SPEC P8). "stop_sequence" cannot
 # occur (the scaffold sets no stop sequences) but maps safely to end_turn.
 # Anything absent — e.g. "pause_turn" (server tools, never requested) — is
 # unmappable and raises: a silently misclassified stop reason would corrupt
 # the loop's control flow.
 PROVIDER = "anthropic"
 
-# 5-minute ephemeral cache entries (SPEC §5.2). Request metadata only —
+# 5-minute ephemeral cache entries (SPEC D2). Request metadata only —
 # never part of the prompt bytes the model sees.
 _CACHE_CONTROL = {"type": "ephemeral"}
 
@@ -130,8 +130,9 @@ def _to_wire_messages(messages: list[Message]) -> list[dict[str, Any]]:
         elif isinstance(message, AssistantMessage):
             state = message.provider_state
             if state is not None and state.provider == PROVIDER:
-                # D22 replay: the original response content blocks (signed
-                # thinking blocks included), passed back unchanged.
+                # Provider-state replay (I17): the original response
+                # content blocks (signed thinking blocks included),
+                # passed back unchanged.
                 wire.append({"role": "assistant", "content": list(state.payload)})
                 continue
             content: list[dict[str, Any]] = []
@@ -178,7 +179,7 @@ def _to_wire_tool(tool: ToolDef) -> dict[str, Any]:
 
 
 def _place_message_breakpoints(wire: list[dict[str, Any]]) -> None:
-    """Rolling cache breakpoints over the message list (SPEC §5.2).
+    """Rolling cache breakpoints over the message list (SPEC D2).
 
     The rolling breakpoint sits on the last content block of the most
     recently appended message and moves forward each call (the wire list
@@ -213,9 +214,9 @@ def _annotate_last_cacheable_block(message: dict[str, Any]) -> None:
     """Attach cache_control to the last cacheable block, non-destructively.
 
     Blocks are replaced by annotated copies (never mutated in place):
-    replayed D22 payloads are shared across calls, and a stale marker left
-    on a mid-conversation block would count against the 4-breakpoint
-    budget on every later call.
+    replayed provider-state payloads are shared across calls, and a stale
+    marker left on a mid-conversation block would count against the
+    4-breakpoint budget on every later call.
     """
     content = message.get("content")
     if not isinstance(content, list):
@@ -230,9 +231,9 @@ def _annotate_last_cacheable_block(message: dict[str, Any]) -> None:
 def _annotated_block(block: Any) -> dict[str, Any] | None:
     """A copy of ``block`` carrying cache_control, or None if uncacheable."""
     if not isinstance(block, dict):
-        # D22 replay payloads carry SDK response objects; serialize the one
-        # annotated block to its wire dict (content-identical) and leave
-        # every other block untouched.
+        # Replayed provider-state payloads carry SDK response objects;
+        # serialize the one annotated block to its wire dict
+        # (content-identical) and leave every other block untouched.
         dump = getattr(block, "model_dump", None)
         if not callable(dump):
             return None
@@ -249,19 +250,20 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
         for block in response.content
         if block.type == "tool_use"
     )
-    # D22: when the turn carries (signed/redacted) thinking blocks, keep the
-    # complete original content for verbatim same-session replay.
+    # Provider state (I17): when the turn carries (signed/redacted)
+    # thinking blocks, keep the complete original content for verbatim
+    # same-session replay.
     provider_state = None
     if any(block.type in ("thinking", "redacted_thinking") for block in response.content):
         provider_state = ProviderState(provider=PROVIDER, payload=tuple(response.content))
     # Anthropic's wire input_tokens EXCLUDES cached tokens; canonical
-    # input_tokens is the TOTAL prompt count (§5.2 invariant), so the cache
+    # input_tokens is the TOTAL prompt count (P7.1 invariant), so the cache
     # components are folded back in. Absent/None fields mean no caching.
     cache_read = getattr(response.usage, "cache_read_input_tokens", None) or 0
     cache_write = getattr(response.usage, "cache_creation_input_tokens", None) or 0
     usage = Usage(
         input_tokens=response.usage.input_tokens + cache_read + cache_write,
-        # Anthropic's count already includes reasoning/thinking tokens (D16);
+        # Anthropic's count already includes reasoning/thinking tokens (P7.1);
         # no separate reasoning_tokens figure is reported.
         output_tokens=response.usage.output_tokens,
         cache_read_tokens=cache_read,

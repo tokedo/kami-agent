@@ -1,7 +1,7 @@
-"""State store: state.json cache and telemetry-fold recovery (SPEC §7.1).
+"""State store: state.json cache and telemetry-fold recovery (SPEC P3).
 
 state.json is a convenience CACHE. telemetry.jsonl is the source of
-truth for all accounting: on recovery (SPEC §3 step 2) the cache is
+truth for all accounting: on recovery (SPEC P1.4) the cache is
 rebuilt by folding the event stream, never trusted from disk.
 """
 
@@ -20,7 +20,7 @@ RUN_COMPLETE = "complete"
 
 @dataclass
 class RunState:
-    """The scaffold-owned cache fields (SPEC §7)."""
+    """The scaffold-owned cache fields (SPEC P12)."""
 
     session_counter: int = 0
     cumulative_usd: float = 0.0
@@ -52,14 +52,14 @@ def save_state(state: RunState, path: str | Path) -> None:
 
 
 def fold_telemetry(events: Iterable[dict[str, Any]]) -> RunState:
-    """Rebuild the cache from the event stream — the source of truth (§7.1).
+    """Rebuild the cache from the event stream — the source of truth (P3).
 
     - ``cumulative_usd`` / ``cumulative_tokens``: summed over every
       ``llm_call`` (failed-but-billed attempts appear as their own events;
-      unknowable usage was logged at cost 0, SPEC §5.5).
+      unknowable usage was logged at cost 0, SPEC P7.4).
     - ``session_counter``: highest session number seen (the counter is
       persisted before the first model call, so a crashed session still
-      claims its number, SPEC §3 step 4).
+      claims its number, SPEC P1.7).
     """
     state = RunState()
     for event in events:
@@ -93,10 +93,10 @@ def crashed_session(events: Iterable[dict[str, Any]]) -> int | None:
 
 
 def session_totals(events: Iterable[dict[str, Any]], session: int) -> dict[str, Any]:
-    """Fold one session's events into the ``session_end`` payload fields (§8).
+    """Fold one session's events into the ``session_end`` payload fields (P9).
 
     Used to write the synthetic ``session_end reason=crash`` during
-    recovery (SPEC §3 step 2).
+    recovery (SPEC P1.4).
     """
     llm_calls = 0
     tool_calls = 0

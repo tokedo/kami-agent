@@ -1,9 +1,9 @@
-"""Google adapter: canonical types to/from the Gemini API; reasoning-token fold (SPEC §5.2).
+"""Google adapter: canonical types to/from the Gemini API; reasoning-token fold (SPEC P7.1).
 
 Provider quirks handled here and nowhere else:
 - system prompt is ``system_instruction`` in the request config;
 - Gemini reports thinking tokens OUTSIDE ``candidates_token_count`` —
-  the adapter folds them in (D16): ``output_tokens = candidates +
+  the adapter folds them in (P7.1): ``output_tokens = candidates +
   thoughts``, with ``reasoning_tokens`` as the informational subset;
 - function calls carry no wire IDs; the adapter mints deterministic
   per-response IDs and resolves ``tool_call_id`` back to the function
@@ -12,13 +12,13 @@ Provider quirks handled here and nowhere else:
 - ``finish_reason`` STOP with function calls present is a tool_use turn;
   safety-class terminations map to ``refusal``;
 - ``reasoning_effort`` has no native equivalent and is not sent
-  (adapters tolerate provider-specific param subsets, §5.5);
-- implicit provider-side caching is measured, not managed (SPEC §5.2):
+  (adapters tolerate provider-specific param subsets, D2);
+- implicit provider-side caching is measured, not managed (SPEC D2):
   nothing is requested, but ``cachedContentTokenCount`` is normalized
   into ``cache_read_tokens``. ``promptTokenCount`` already INCLUDES
   cached tokens, so canonical ``input_tokens`` passes through unchanged;
   there is no write premium (``cache_write_tokens`` = 0);
-- retries are the loop's job (SPEC §5.5).
+- retries are the loop's job (SPEC P8).
 """
 
 from __future__ import annotations
@@ -121,8 +121,9 @@ def _to_wire_contents(messages: list[Message]) -> list[genai_types.Content]:
                 call_names[call.id] = call.name
             state = message.provider_state
             if state is not None and state.provider == PROVIDER:
-                # D22 replay: the original response parts, thought
-                # signatures included, passed back unchanged.
+                # Provider-state replay (I17): the original response
+                # parts, thought signatures included, passed back
+                # unchanged.
                 contents.append(genai_types.Content(role="model", parts=list(state.payload)))
                 continue
             parts: list[genai_types.Part] = []
@@ -177,8 +178,8 @@ def _normalize(response: Any) -> AdapterResponse:
         minted = call.id or f"call_{len(tool_calls) + 1}"
         tool_calls.append(ToolCall(id=minted, name=call.name or "", args=dict(call.args or {})))
 
-    # D22: thought signatures ride on parts; keep the original parts for
-    # verbatim same-session replay when any are present.
+    # Provider state (I17): thought signatures ride on parts; keep the
+    # original parts for verbatim same-session replay when any are present.
     provider_state = None
     if any(getattr(part, "thought_signature", None) for part in parts):
         provider_state = ProviderState(provider=PROVIDER, payload=tuple(parts))
@@ -193,13 +194,13 @@ def _normalize(response: Any) -> AdapterResponse:
         stop_reason=_normalize_stop_reason(candidate.finish_reason, bool(tool_calls)),
         provider_state=provider_state,
         usage=Usage(
-            # promptTokenCount already INCLUDES cached tokens (§5.2): the
+            # promptTokenCount already INCLUDES cached tokens (P7.1): the
             # total passes through; cachedContentTokenCount is the read
             # component (0 when absent) and implicit caching has no write
             # premium.
             input_tokens=(usage.prompt_token_count or 0) if usage else 0,
-            # The D16 fold: Gemini reports thoughts outside the candidate
-            # count; output_tokens must include them.
+            # The reasoning-token fold (P7.1): Gemini reports thoughts
+            # outside the candidate count; output_tokens must include them.
             output_tokens=candidates_tokens + (thoughts or 0),
             reasoning_tokens=thoughts,
             cache_read_tokens=cached or 0,
@@ -220,9 +221,9 @@ def _normalize_stop_reason(finish_reason: Any, has_tool_calls: bool) -> StopReas
         return StopReason.REFUSAL
     if name == "MALFORMED_FUNCTION_CALL":
         # A transient Gemini generation artifact: the turn carries no usable
-        # tool call. Normalized to end_turn so the loop's §5.4 path applies —
-        # frozen continuation string, counts as one error — instead of
-        # killing the session over a provider quirk.
+        # tool call. Normalized to end_turn so the loop's P2 continuation
+        # path applies — frozen continuation string, counts as one error —
+        # instead of killing the session over a provider quirk.
         return StopReason.END_TURN
     raise AdapterError(f"unmappable google finish_reason: {name!r}", retryable=False)
 

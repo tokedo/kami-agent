@@ -1,14 +1,14 @@
-"""Telemetry: append-only JSONL event stream, synchronous flush, schema validation (SPEC §8).
+"""Telemetry: append-only JSONL event stream, synchronous flush, schema validation (SPEC P9).
 
-telemetry.jsonl is the source of truth for all accounting (SPEC §7.1);
+telemetry.jsonl is the source of truth for all accounting (SPEC P3);
 state.json is a rebuildable cache. Every event is validated against
-the §8 schema (``kami_agent/schema/telemetry.json``) and flushed to
+the P9 schema (``kami_agent/schema/telemetry.json``) and flushed to
 disk synchronously
 (write → flush → fsync) before the action it describes is considered
-complete (SPEC §1.4), so a crash at any point loses at most the event
+complete (SPEC I6), so a crash at any point loses at most the event
 being written.
 
-Telemetry is not an agent-visible channel (D12): budget fields recorded
+Telemetry is not an agent-visible channel (I1): budget fields recorded
 here never reach the agent.
 """
 
@@ -47,7 +47,7 @@ class EventValidationError(TelemetryError):
 
 @cache
 def _event_validators(schema_path: Path) -> dict[str, jsonschema.Draft202012Validator]:
-    """One validator per §8 event type, resolved within the schema document."""
+    """One validator per P9 event type, resolved within the schema document."""
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator.check_schema(schema)
     defs = schema["$defs"]
@@ -64,7 +64,7 @@ def event_types(schema_path: Path = SCHEMA_PATH) -> frozenset[str]:
 
 
 def validate_event(event: dict[str, Any], schema_path: Path = SCHEMA_PATH) -> None:
-    """Validate one event dict against the §8 schema; raise on any mismatch."""
+    """Validate one event dict against the P9 schema; raise on any mismatch."""
     name = event.get("event")
     validators = _event_validators(schema_path)
     if name not in validators:
