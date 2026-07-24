@@ -1,4 +1,4 @@
-"""Supervisor: fixed-cadence cron installer and PID+age lockfile (SPEC §2).
+"""Supervisor: fixed-cadence cron installer and PID+age lockfile (SPEC D4, P4).
 
 The supervisor is a fixed-cadence poller: cron fires every
 ``poll_cadence`` (default 5 min); the runner exits immediately unless
@@ -122,7 +122,7 @@ def uninstall_cron(
     read_crontab: Callable[[], str] | None = None,
     write_crontab: Callable[[str], None] | None = None,
 ) -> str:
-    """Remove the supervisor entry (SPEC §3 step 3: disable on run_complete)."""
+    """Remove the supervisor entry (SPEC P7.3: disable on run_complete)."""
     read = read_crontab or _read_crontab
     write = write_crontab or _write_crontab
     kept = [line for line in read().splitlines() if CRON_TAG not in line]

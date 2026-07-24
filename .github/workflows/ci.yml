@@ -55,7 +55,7 @@ jobs:
           grep -qx "session_ran" "$OUT"
           "$PWD/.venv/bin/python" "$PWD/tests/cron_smoke/check_telemetry.py" "$RUN_DIR"
 
-  # Tri-provider live tier (SPEC §11.2, amended per kami-lab D21): real
+  # Tri-provider live tier (README, Verification tier 3): real
   # provider APIs against the recorded harness tool surface with simulated
   # tool execution. The full live-harness variant is the separate
   # non-gating live-harness-smoke workflow.

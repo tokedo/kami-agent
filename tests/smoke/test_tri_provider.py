@@ -1,16 +1,16 @@
-"""Tri-provider live smoke (SPEC §11.2): one canned session per adapter.
+"""Tri-provider live smoke (README, Verification tier 3): one canned session per adapter.
 
 Per provider, against its cheapest tier with tiny caps:
 read status → list files → read a reference/ slice → call one read-only
 harness tool → write a workspace file → set next wake → end session.
 
 Asserts: all tool calls parsed natively, usage accounting non-zero,
-telemetry validates against the §8 schema, and the D12 leak check — no
+telemetry validates against the P9 schema, and the D12 leak check — no
 apparatus vocabulary in any agent-visible string.
 
 Also reports the observed per-call fixed context floor (system prompt +
-file index + full tool schemas), which SPEC §9's fixed-floor arithmetic
-needs for the manifests.
+file index + full tool schemas), which SPEC D1's cap-arithmetic
+assumption needs for the manifests.
 """
 
 import json
@@ -283,11 +283,11 @@ def _dump_diagnostics(provider, run_dir, events):
 def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     assert outcome == SESSION_RAN
 
-    # §11.2: telemetry events validate against the §8 schema.
+    # Tier gate: telemetry events validate against the P9 schema.
     for event in events:
         validate_event(event)
 
-    # §11.2: all tool calls parsed natively → each canned step executed ok.
+    # Tier gate: all tool calls parsed natively → each canned step executed ok.
     tool_events = [e for e in events if e["event"] == "tool_call"]
     executed = [e["tool"] for e in tool_events if e["ok"]]
     for step in EXPECTED_SEQUENCE:
@@ -295,8 +295,8 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     harness_events = [e for e in tool_events if e["tool"] == HARNESS_TOOL]
     assert harness_events[0]["source"] == "harness"
 
-    # §11.2: usage accounting non-zero. Transient provider errors emit
-    # usage_unknown attempts at cost 0 (§5.5) before the retry succeeds —
+    # Tier gate: usage accounting non-zero. Transient provider errors emit
+    # usage_unknown attempts at cost 0 (P7.4) before the retry succeeds —
     # measure the first *successful* call.
     llm_events = [e for e in events if e["event"] == "llm_call"]
     ok_llm = [e for e in llm_events if not e.get("usage_unknown")]
@@ -335,9 +335,9 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
         for word in D12_FORBIDDEN:
             assert word not in lowered, f"{provider}: D12 leak: {word!r}"
 
-    # Report (SPEC §9 fixed-floor arithmetic wants the observed floor;
+    # Report (SPEC D1 cap arithmetic wants the observed floor;
     # the cache columns show how much of it was served from/written to
-    # provider cache, per §5.2).
+    # provider cache, per P7.1).
     session_cache_read = sum(e.get("cache_read_tokens", 0) for e in ok_llm)
     session_cache_write = sum(e.get("cache_write_tokens", 0) for e in ok_llm)
     print(

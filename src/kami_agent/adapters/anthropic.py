@@ -1,4 +1,4 @@
-"""Anthropic adapter: canonical types to/from the Messages API (SPEC §5.1–5.2, §5.5).
+"""Anthropic adapter: canonical types to/from the Messages API (SPEC P8, P7.1).
 
 Provider quirks handled here and nowhere else:
 - system prompt is a top-level param, not a message;
@@ -7,8 +7,8 @@ Provider quirks handled here and nowhere else:
 - ``output_tokens`` already includes thinking tokens (D16) — no fold
   needed; no separate reasoning-token count is reported;
 - the client is built with ``max_retries=0``: retries are the loop's job
-  (SPEC §5.5 — every retry is logged), never the SDK's;
-- explicit prompt caching (SPEC §5.2): the adapter places
+  (SPEC P8 — every retry is logged), never the SDK's;
+- explicit prompt caching (SPEC D2): the adapter places
   ``cache_control`` breakpoints (5-minute ephemeral) — one on the last
   system block (render order is tools → system → messages, so it caches
   the whole fixed floor) and a rolling one on the last content block of
@@ -19,7 +19,7 @@ Provider quirks handled here and nowhere else:
   agent-visible (D12);
 - wire ``usage.input_tokens`` EXCLUDES cached tokens; the adapter folds
   ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` back in
-  so canonical ``input_tokens`` is the total prompt count (§5.2).
+  so canonical ``input_tokens`` is the total prompt count (P7.1).
 """
 
 from __future__ import annotations
@@ -43,14 +43,14 @@ from kami_agent.adapters.base import (
     UserMessage,
 )
 
-# Provider stop reasons → canonical enum (SPEC §5.1). "stop_sequence" cannot
+# Provider stop reasons → canonical enum (SPEC P8). "stop_sequence" cannot
 # occur (the scaffold sets no stop sequences) but maps safely to end_turn.
 # Anything absent — e.g. "pause_turn" (server tools, never requested) — is
 # unmappable and raises: a silently misclassified stop reason would corrupt
 # the loop's control flow.
 PROVIDER = "anthropic"
 
-# 5-minute ephemeral cache entries (SPEC §5.2). Request metadata only —
+# 5-minute ephemeral cache entries (SPEC D2). Request metadata only —
 # never part of the prompt bytes the model sees.
 _CACHE_CONTROL = {"type": "ephemeral"}
 
@@ -178,7 +178,7 @@ def _to_wire_tool(tool: ToolDef) -> dict[str, Any]:
 
 
 def _place_message_breakpoints(wire: list[dict[str, Any]]) -> None:
-    """Rolling cache breakpoints over the message list (SPEC §5.2).
+    """Rolling cache breakpoints over the message list (SPEC D2).
 
     The rolling breakpoint sits on the last content block of the most
     recently appended message and moves forward each call (the wire list
@@ -255,7 +255,7 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
     if any(block.type in ("thinking", "redacted_thinking") for block in response.content):
         provider_state = ProviderState(provider=PROVIDER, payload=tuple(response.content))
     # Anthropic's wire input_tokens EXCLUDES cached tokens; canonical
-    # input_tokens is the TOTAL prompt count (§5.2 invariant), so the cache
+    # input_tokens is the TOTAL prompt count (P7.1 invariant), so the cache
     # components are folded back in. Absent/None fields mean no caching.
     cache_read = getattr(response.usage, "cache_read_input_tokens", None) or 0
     cache_write = getattr(response.usage, "cache_creation_input_tokens", None) or 0

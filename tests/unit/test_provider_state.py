@@ -1,4 +1,4 @@
-"""D22 (SPEC §5.1 v1.2): opaque provider reasoning state, same-session round-trip."""
+"""D22 (SPEC P8, I17): opaque provider reasoning state, same-session round-trip."""
 
 import json
 from pathlib import Path

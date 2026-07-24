@@ -1,4 +1,4 @@
-"""Agent loop: serialization (D18), error semantics (§5.4), retries (§5.5), guard (D17)."""
+"""Agent loop: serialization (D18), error semantics (P2), retries (P8), guard (D17)."""
 
 import pytest
 
@@ -222,7 +222,7 @@ def test_later_intents_see_earlier_effects(run_dir):
     assert results[1].content == "seen"
 
 
-# --- §5.4 error semantics -----------------------------------------------------
+# --- P2 error semantics -----------------------------------------------------
 
 
 def test_malformed_calls_return_error_results(run_dir):
@@ -376,7 +376,7 @@ def test_end_session_at_cap_is_still_agent(run_dir):
     assert loop.run().reason == "agent"
 
 
-# --- §5.5 retries ---------------------------------------------------------------
+# --- P8 retries ---------------------------------------------------------------
 
 
 def test_retryable_errors_backoff_and_recover(run_dir):
@@ -459,7 +459,7 @@ def test_cost_and_cumulative_accounting(run_dir):
 
 
 def test_cache_decomposition_reaches_telemetry_and_cost(run_dir):
-    # SPEC §5.2/§8: llm_call preserves the cache decomposition and cost_usd
+    # SPEC P7.1/P9: llm_call preserves the cache decomposition and cost_usd
     # prices the components; cumulative_tokens stays input+output (total).
     cached = AdapterResponse(
         text_blocks=(),
@@ -715,7 +715,7 @@ def test_empty_responses_exhaust_retries_and_end_session(run_dir):
 
 def test_empty_but_billed_response_keeps_continuation_handling(run_dir):
     # Nonzero usage means the provider really produced (and billed) an
-    # empty turn — the §5.4 continuation path applies, not the retry path.
+    # empty turn — the P2 continuation path applies, not the retry path.
     billed_empty = AdapterResponse(
         text_blocks=(),
         tool_calls=(),

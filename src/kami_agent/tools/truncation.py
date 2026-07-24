@@ -1,4 +1,4 @@
-"""Tool-result cap with an explicit truncation marker (D19, SPEC §5.3).
+"""Tool-result cap with an explicit truncation marker (D19, SPEC P2).
 
 Applied uniformly to scaffold and harness results before they are
 inserted into context. The marker states the original size and — for

@@ -1,4 +1,4 @@
-"""Google adapter: canonical types to/from the Gemini API; reasoning-token fold (SPEC §5.2).
+"""Google adapter: canonical types to/from the Gemini API; reasoning-token fold (SPEC P7.1).
 
 Provider quirks handled here and nowhere else:
 - system prompt is ``system_instruction`` in the request config;
@@ -12,13 +12,13 @@ Provider quirks handled here and nowhere else:
 - ``finish_reason`` STOP with function calls present is a tool_use turn;
   safety-class terminations map to ``refusal``;
 - ``reasoning_effort`` has no native equivalent and is not sent
-  (adapters tolerate provider-specific param subsets, §5.5);
-- implicit provider-side caching is measured, not managed (SPEC §5.2):
+  (adapters tolerate provider-specific param subsets, D2);
+- implicit provider-side caching is measured, not managed (SPEC D2):
   nothing is requested, but ``cachedContentTokenCount`` is normalized
   into ``cache_read_tokens``. ``promptTokenCount`` already INCLUDES
   cached tokens, so canonical ``input_tokens`` passes through unchanged;
   there is no write premium (``cache_write_tokens`` = 0);
-- retries are the loop's job (SPEC §5.5).
+- retries are the loop's job (SPEC P8).
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ def _normalize(response: Any) -> AdapterResponse:
         stop_reason=_normalize_stop_reason(candidate.finish_reason, bool(tool_calls)),
         provider_state=provider_state,
         usage=Usage(
-            # promptTokenCount already INCLUDES cached tokens (§5.2): the
+            # promptTokenCount already INCLUDES cached tokens (P7.1): the
             # total passes through; cachedContentTokenCount is the read
             # component (0 when absent) and implicit caching has no write
             # premium.
@@ -220,7 +220,7 @@ def _normalize_stop_reason(finish_reason: Any, has_tool_calls: bool) -> StopReas
         return StopReason.REFUSAL
     if name == "MALFORMED_FUNCTION_CALL":
         # A transient Gemini generation artifact: the turn carries no usable
-        # tool call. Normalized to end_turn so the loop's §5.4 path applies —
+        # tool call. Normalized to end_turn so the loop's P2 continuation path applies —
         # frozen continuation string, counts as one error — instead of
         # killing the session over a provider quirk.
         return StopReason.END_TURN

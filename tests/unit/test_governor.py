@@ -1,4 +1,4 @@
-"""Governor: cost math (D16) and boundary checks (D13, SPEC §9)."""
+"""Governor: cost math (D16) and boundary checks (D13, SPEC P7)."""
 
 from datetime import UTC, datetime
 
@@ -27,7 +27,7 @@ def test_reasoning_tokens_do_not_double_count():
     assert cost_usd(with_subset, PRICES) == cost_usd(without, PRICES)
 
 
-# --- cache-aware cost (SPEC §5.2, D16 as amended) ----------------------------
+# --- cache-aware cost (SPEC P7.2, D16 as amended) ----------------------------
 
 CACHED_PRICES = PriceTable(
     input_usd_per_mtok=1.0,

@@ -1,4 +1,4 @@
-"""Google adapter: fixtures incl. the reasoning-token fold (SPEC §5.2, brief §3.8)."""
+"""Google adapter: fixtures incl. the reasoning-token fold (SPEC P7.1)."""
 
 import json
 from pathlib import Path
@@ -91,7 +91,7 @@ def test_request_shape():
 
 
 def test_reasoning_effort_is_not_sent():
-    # No native equivalent on this provider; tolerated per §5.5.
+    # No native equivalent on this provider; tolerated per D2.
     adapter, client = make_adapter(load_fixture("text_stop"))
     params = SamplingParams(max_tokens=1024, temperature=0.5, reasoning_effort="high")
     adapter.complete("s", [UserMessage(text="hi")], [], params)
@@ -189,7 +189,7 @@ def test_absent_cache_fields_normalize_to_zero():
 
 
 def test_cached_content_tokens_are_a_component_not_an_addition():
-    # promptTokenCount already INCLUDES cached tokens (SPEC §5.2): the
+    # promptTokenCount already INCLUDES cached tokens (SPEC P7.1): the
     # total passes through unchanged; cachedContentTokenCount is the read
     # component and implicit caching has no write premium.
     adapter, _ = make_adapter(load_fixture("cached_usage"))
@@ -215,7 +215,7 @@ def test_max_tokens_and_safety_normalization():
 
 def test_malformed_function_call_maps_to_continuation_path():
     # Known transient Gemini artifact → end_turn with no tool calls, so the
-    # loop sends the frozen continuation string (§5.4) instead of dying.
+    # loop sends the frozen continuation string (P2) instead of dying.
     fixture = json.loads((FIXTURES / "text_stop.json").read_text())
     fixture["candidates"][0]["finishReason"] = "MALFORMED_FUNCTION_CALL"
     fixture["candidates"][0]["content"]["parts"] = []
@@ -241,7 +241,7 @@ def test_no_candidates_raises():
         adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
 
 
-# --- retry classification (SPEC §5.5) -----------------------------------------------
+# --- retry classification (SPEC P8) -----------------------------------------------
 
 
 def _api_error(status):

@@ -1,4 +1,4 @@
-"""Budget governor: pinned price table, cost math (D16), boundary checks (D13, SPEC §9).
+"""Budget governor: pinned price table, cost math (D16), boundary checks (D13, SPEC P7).
 
 Enforcement happens only at session start; an in-flight session is never
 terminated for budget or t_max. Budget state never reaches the agent
@@ -36,7 +36,7 @@ class PriceTable:
 
 
 def cost_usd(usage: Usage, prices: PriceTable) -> float:
-    """Cache-aware cost (D16 as amended, SPEC §5.2).
+    """Cache-aware cost (D16 as amended, SPEC P7.2).
 
     ``(input − cache_read − cache_write) × price_in + cache_read ×
     price_read + cache_write × price_write + output × price_out``.
@@ -72,8 +72,8 @@ def boundary_check(
 ) -> str | None:
     """Return the run_complete reason (``budget`` | ``t_max``) or None to proceed.
 
-    Called only at the SPEC §3 step-3 boundary, with accounting rebuilt
-    from telemetry (§7.1). Stop = min(budget, t_max).
+    Called only at the SPEC P1.6 boundary, with accounting rebuilt
+    from telemetry (P3). Stop = min(budget, t_max).
     """
     if cumulative_usd >= budget_usd:
         return REASON_BUDGET

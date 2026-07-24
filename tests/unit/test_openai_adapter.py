@@ -1,4 +1,4 @@
-"""OpenAI adapter: recorded-fixture normalization + retry classification (brief §3.8)."""
+"""OpenAI adapter: recorded-fixture normalization + retry classification (SPEC P8)."""
 
 import json
 from pathlib import Path
@@ -197,7 +197,7 @@ def test_absent_cache_fields_normalize_to_zero():
 
 
 def test_cached_prompt_tokens_are_a_component_not_an_addition():
-    # prompt_tokens already INCLUDES cached tokens (SPEC §5.2): the total
+    # prompt_tokens already INCLUDES cached tokens (SPEC P7.1): the total
     # passes through unchanged; cached_tokens is the read component and
     # automatic caching has no write premium.
     adapter, _ = make_adapter(load_fixture("cached_usage"))
@@ -242,7 +242,7 @@ def test_malformed_tool_arguments_raise():
     assert not excinfo.value.retryable
 
 
-# --- retry classification (SPEC §5.5) ---------------------------------------------
+# --- retry classification (SPEC P8) ---------------------------------------------
 
 
 def _status_error(status):

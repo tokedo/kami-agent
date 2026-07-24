@@ -1,4 +1,4 @@
-# Builds the SPEC §10 image and proves `kami-agent init` — run-dir layout
+# Builds the packaged image (docs/packaging.md) and proves `kami-agent init` — run-dir layout
 # from the example manifest and all four connectivity checks (chain RPC,
 # mainnet RPC, provider API, MCP handshake against the bundled pinned
 # harness) — passes inside the container. Manual dispatch; run before

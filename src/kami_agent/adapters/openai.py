@@ -1,4 +1,4 @@
-"""OpenAI adapter: canonical types to/from the Chat Completions API (SPEC §5.1–5.2, §5.5).
+"""OpenAI adapter: canonical types to/from the Chat Completions API (SPEC P8, P7.1).
 
 Provider quirks handled here and nowhere else:
 - system prompt is the leading ``system`` message;
@@ -11,8 +11,8 @@ Provider quirks handled here and nowhere else:
   ``completion_tokens_details.reasoning_tokens`` is the informational
   subset when reported;
 - the client is built with ``max_retries=0``: retries are the loop's
-  job (SPEC §5.5), never the SDK's;
-- provider-side automatic caching is measured, not managed (SPEC §5.2):
+  job (SPEC P8), never the SDK's;
+- provider-side automatic caching is measured, not managed (SPEC D2):
   nothing is requested, but ``prompt_tokens_details.cached_tokens`` is
   normalized into ``cache_read_tokens``. ``prompt_tokens`` already
   INCLUDES cached tokens, so canonical ``input_tokens`` passes through
@@ -147,7 +147,7 @@ def _normalize(response: Any) -> AdapterResponse:
         tool_calls=tool_calls,
         stop_reason=_normalize_stop_reason(choice.finish_reason),
         usage=Usage(
-            # prompt_tokens already INCLUDES cached tokens (§5.2): the total
+            # prompt_tokens already INCLUDES cached tokens (P7.1): the total
             # passes through; cached_tokens is the read component (0 when
             # absent) and automatic caching has no write premium.
             input_tokens=usage.prompt_tokens,

@@ -1,1 +1,1 @@
-"""Provider adapters: one canonical interface, provider quirks die here (SPEC §5)."""
+"""Provider adapters: one canonical interface, provider quirks die here (SPEC P8)."""

@@ -1,4 +1,4 @@
-"""Path sandbox: no traversal escape, ever (SPEC §4, brief §3.4)."""
+"""Path sandbox: no traversal escape, ever (SPEC P11, I11)."""
 
 import tempfile
 from pathlib import Path

@@ -1,4 +1,4 @@
-"""Canonical types: Message, ToolDef, AdapterResponse, ModelAdapter protocol (SPEC §5.1–5.2).
+"""Canonical types: Message, ToolDef, AdapterResponse, ModelAdapter protocol (SPEC P8, P7.1).
 
 The loop speaks only these types. Adapters map them to each provider's wire
 format; provider quirks never leave the adapter.
@@ -12,7 +12,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 
 class StopReason(StrEnum):
-    """Normalized stop reason (SPEC §5.1)."""
+    """Normalized stop reason (SPEC P8)."""
 
     END_TURN = "end_turn"
     TOOL_USE = "tool_use"
@@ -92,7 +92,7 @@ class Usage:
     reports it.
 
     ``input_tokens`` is the TOTAL prompt token count for the call (SPEC
-    §5.2 invariant — this is what reconciles against provider dashboards).
+    P7.1 invariant — this is what reconciles against provider dashboards).
     ``cache_read_tokens`` and ``cache_write_tokens`` are component subsets
     of ``input_tokens``; the uncached remainder is ``input_tokens −
     cache_read_tokens − cache_write_tokens``. Providers whose wire usage
@@ -110,7 +110,7 @@ class Usage:
 
 @dataclass(frozen=True, slots=True)
 class SamplingParams:
-    """Sampling parameters, pinned per run in the manifest (SPEC §5.5).
+    """Sampling parameters, pinned per run in the manifest (SPEC D3).
 
     Adapters send only the subset their provider accepts; the manifest
     records exactly what was sent.
@@ -123,7 +123,7 @@ class SamplingParams:
 
 @dataclass(frozen=True, slots=True)
 class AdapterResponse:
-    """Normalized model response (SPEC §5.1).
+    """Normalized model response (SPEC P8).
 
     ``provider_meta`` is logged raw and never parsed by the loop.
     ``provider_state`` (D22) is copied verbatim onto the assistant
@@ -141,7 +141,7 @@ class AdapterResponse:
 class AdapterError(Exception):
     """A provider call failed, normalized for the loop's retry policy.
 
-    ``retryable`` is True for the SPEC §5.5 backoff cases — rate limits
+    ``retryable`` is True for the SPEC P8 backoff cases — rate limits
     (429), server errors (5xx), and timeouts/connection failures — and
     False for everything else (auth, bad request, unmappable response).
     """

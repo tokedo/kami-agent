@@ -1,4 +1,4 @@
-"""Scaffold tools (SPEC §4): workspace/reference file tools, scheduling, status, end_session.
+"""Scaffold tools (SPEC P10): workspace/reference file tools, scheduling, status, end_session.
 
 All strings the model can see — tool names, descriptions, results, error
 messages — are mechanism-only: no budget, spend, horizon, or cap
@@ -114,7 +114,7 @@ class ScaffoldTools:
     One instance per session. ``set_next_wake`` and ``end_session``
     accumulate their effect on the instance (``requested_wake_min`` /
     ``clamped_wake_min`` / ``session_ended`` / ``end_reason``) for the
-    runner to apply. ``emit`` receives the SPEC §8 ``workspace_write`` /
+    runner to apply. ``emit`` receives the SPEC P9 ``workspace_write`` /
     ``workspace_delete`` telemetry payloads.
     """
 

@@ -3,7 +3,7 @@
 A sibling of ``session_tool_cap`` (D13 semantics): the agent is never
 told the rules exist, tripping is silent (no warning, no final model
 call), and the session ends exactly as ``tool_cap`` does. Three
-mechanical rules, each with a manifest-pinned knob (SPEC §9 caps):
+mechanical rules, each with a manifest-pinned knob (SPEC P5.1):
 
 - **identical_call** (``repetition_identical_cap``, default 5): the same
   signature — tool name + normalized-args hash — executed that many

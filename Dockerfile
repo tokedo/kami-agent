@@ -1,4 +1,4 @@
-# One image per study (SPEC §10): kami-agent + pinned kami-harness + the GDD
+# One image per study (docs/packaging.md): kami-agent + pinned kami-harness + the GDD
 # snapshot at reference/. Per-run config.yaml and .env are injected at
 # provision time; the closed-world egress allowlist (D14) is applied at the
 # VM level — see docs/packaging.md.

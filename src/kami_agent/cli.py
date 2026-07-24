@@ -1,4 +1,4 @@
-"""CLI entry points: kami-agent init | run-session | status (SPEC §10).
+"""CLI entry points: kami-agent init | run-session | status (SPEC P12).
 
 - ``init``: validate the manifest, write the run directory from it, run
   connectivity checks (chain RPC, mainnet RPC, provider API, MCP
@@ -294,7 +294,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="kami-agent", description="KamiBench reference agent scaffold (SPEC §10)"
+        prog="kami-agent", description="KamiBench reference agent scaffold (SPEC P12)"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

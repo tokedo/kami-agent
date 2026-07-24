@@ -68,7 +68,7 @@ uv run kami-agent run-session --run-dir /srv/run --manual
   invokes).
 - `kami-agent status` — operator-facing state summary.
 
-Contract: [SPEC.md](SPEC.md) §P12.
+Contract: [SPEC.md](SPEC.md) P12.
 
 ## Verification
 

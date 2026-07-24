@@ -128,7 +128,7 @@ def test_identical_reverted_retries_trip_identical_call_at_5(run_dir):
     assert result.repetition.fields["repetition_count"] == 5
     expected_sig = signature("quest_accept", {"quest_index": 3})
     assert result.repetition.fields["repetition_signature"] == expected_sig
-    # Reverts came back success-shaped (ok=true), so the §5.4 error cap
+    # Reverts came back success-shaped (ok=true), so the P2 error cap
     # (5 consecutive errors) never fired — exactly the 001 gap.
     assert all(e["ok"] for e in tool_events(run_dir))
 
@@ -211,12 +211,12 @@ def test_parameter_sweep_of_reverts_trips_same_tool_errors_at_8(run_dir):
     assert len(tool_events(run_dir)) == 8
     assert result.repetition.fields["repetition_tool"] == "quest_accept"
     assert result.repetition.fields["repetition_count"] == 8
-    # Success-shaped reverts (ok=true) never advanced the §5.4 error cap.
+    # Success-shaped reverts (ok=true) never advanced the P2 error cap.
     assert all(e["ok"] for e in tool_events(run_dir))
 
 
 def test_sweep_of_loop_level_errors_still_ends_via_error_cap_first(run_dir):
-    # When failures surface as loop-level errors (ok=false), the §5.4
+    # When failures surface as loop-level errors (ok=false), the P2
     # consecutive-error cap (5) fires before the same-tool rule (8) —
     # unchanged semantics; the breaker adds coverage, it takes none away.
     intents = [call("no_such_tool", {"i": i}, f"x{i}") for i in range(10)]

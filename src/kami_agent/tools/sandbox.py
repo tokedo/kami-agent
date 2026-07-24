@@ -1,4 +1,4 @@
-"""Path sandbox: every file path must resolve under workspace/ or reference/ (SPEC §4).
+"""Path sandbox: every file path must resolve under workspace/ or reference/ (SPEC P11).
 
 Paths are relative to the workspace root: a bare ``notes.md`` and a
 prefixed ``workspace/notes.md`` name the same file (one leading

@@ -1,4 +1,4 @@
-# Packaging and provisioning (SPEC §10, D14)
+# Packaging and provisioning (SPEC P12, D14)
 
 One Docker image per study, identical across VMs. Per-run inputs are
 injected at provision time and never baked into the image:
@@ -24,7 +24,7 @@ kami-agent init --manifest /srv/run/config.yaml --run-dir /srv/run
 # connectivity checks: chain RPC + mainnet RPC (eth_chainId == 1) +
 # provider API + MCP handshake; emits run_start
 
-# supervisor: fixed-cadence poller (SPEC §2)
+# supervisor: fixed-cadence poller (SPEC D4)
 python -c "from kami_agent.supervisor import install_cron; \
            install_cron('kami-agent run-session --run-dir /srv/run', 5)"
 ```

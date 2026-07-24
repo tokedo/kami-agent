@@ -1,4 +1,4 @@
-"""Scaffold tools (SPEC §4): file tools, quota, scheduling, status minimalism (D12)."""
+"""Scaffold tools (SPEC P10): file tools, quota, scheduling, status minimalism (D12)."""
 
 import json
 from datetime import UTC, datetime
@@ -263,7 +263,7 @@ def test_tool_defs_cover_spec_surface():
     }
     for tool in SCAFFOLD_TOOL_DEFS:
         assert tool.input_schema["type"] == "object"
-        # Schemas stay within the tri-provider subset (SPEC §5.1).
+        # Schemas stay within the tri-provider subset (SPEC I19).
         assert not {"oneOf", "anyOf", "allOf"} & tool.input_schema.keys()
 
 

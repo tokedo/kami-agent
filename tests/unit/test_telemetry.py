@@ -1,4 +1,4 @@
-"""Telemetry emitter + schema (SPEC §8): every event type, sync flush, validation."""
+"""Telemetry emitter + schema (SPEC P9): every event type, sync flush, validation."""
 
 import json
 import os
@@ -32,7 +32,7 @@ SPEC_EVENT_TYPES = {
     "run_complete",
 }
 
-# One representative payload per §8 event type, optional fields included.
+# One representative payload per P9 event type, optional fields included.
 EXAMPLE_PAYLOADS = {
     "run_start": {
         "manifest_hash": "sha256:0f",
@@ -165,7 +165,7 @@ def test_root_schema_oneof_accepts_every_event(event):
 def test_stop_reason_enum_matches_schema():
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     schema_enum = schema["$defs"]["llm_call"]["properties"]["stop_reason"]["enum"]
-    # "error" marks failed-but-logged retry attempts (SPEC §5.5), which have
+    # "error" marks failed-but-logged retry attempts (SPEC X13), which have
     # no provider stop reason; it never appears in an AdapterResponse.
     assert set(schema_enum) == {r.value for r in StopReason} | {"error"}
 
@@ -264,7 +264,7 @@ def test_appends_across_writer_instances(tmp_path):
 def test_emit_is_visible_on_disk_before_returning(writer):
     writer.emit("workspace_delete", session=1, **EXAMPLE_PAYLOADS["workspace_delete"])
     # Read through a separate handle while the writer is still open: the
-    # synchronous flush contract (SPEC §1.4) means the line is already there.
+    # synchronous flush contract (SPEC I6) means the line is already there.
     assert len(list(read_events(writer.path))) == 1
 
 
