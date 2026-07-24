@@ -1,198 +1,228 @@
-# kami-agent — Reference Scaffold Specification (v1.5)
+---
+module: kami-agent
+version: 1.6
+describes: v0.2.0 (18f75d04)
+---
 
-Status: **v1.5 — approved for implementation** (v1 superseded the v0
-draft; §13 open decisions resolved as D12–D15, engineering semantics
-fixed as D16–D19; v1.1 amended §11 per D21 — CI smoke split into a
-per-PR recorded-surface gate and a scheduled live-harness tier; v1.2
-amended §5.1 per D22 — opaque provider reasoning state on assistant
-messages; v1.3 amends §10 per D27 — init performs validation and
-connectivity checks only, operator-wallet creation is a harness tool
-the agent calls in-run; v1.4 amends §5.1–5.2, §8, §9, §12 per D39 —
-the caching-neutral clause of D16 is superseded: provider-side
-prompt-cache usage is measured on all three providers, Anthropic
-caching is explicitly requested via `cache_control` request metadata,
-and `cost_usd` is cache-aware; prompt bytes and every agent-visible
-channel are unchanged (D12 intact); v1.5 amends §3, §4, §5.5, §6, §8,
-§9 per D40, D41, D43 — the 001 behavioral iteration: a silent
-repetition breaker as a third forced-ending class (D40), carried
-execution of a cap-skipped final-turn `set_next_wake` (D41), and the
-D43 bundle — three system-prompt items, workspace-root-relative file
-paths, empty-response retry semantics, and consecutive (not
-cumulative) identical-call counting; D12/D13 silence is unchanged —
-see kami-lab `DECISIONS.md`)
-Scope: the model-agnostic reference agent scaffold for KamiBench controlled studies.
-Companion repos: `kami-harness` (environment interface, MCP), `kamigotchi-gdd` (world
-documentation), `kami-lab` (experiment orchestration — private).
+# kami-agent — Contract Registry
+
+kami-agent turns a stateless model API into a persistent actor in the
+Kamigotchi world: one loop, three provider adapters, sessions on disk.
+This file is the contract, not a tour — every entry is a claim that can
+be falsified against the code at the version named above. Narrative,
+rationale, and setup live in `README.md` and `docs/`.
+
+Sections: **Provides** (what other components may rely on), **Depends**
+(what this module relies on, and who owns it), **Invariants** (claim ×
+enforcement), **Deliberate deviations** (accepted behaviors that must
+not be silently "fixed"), **Non-goals**, **Changelog**.
+
+IDs are stable: cite `P4.2`, `I7`, `X3` from downstream code, analysis,
+and reviews.
 
 ---
 
-## 1. Purpose and design principles
+## Provides
 
-kami-agent turns a stateless model API into a persistent actor in the Kamigotchi
-world. It is deliberately minimal: its scientific value comes from being boring.
+### P1. Session lifecycle
 
-1. **Mechanism fixed, policy free (D6).** The scaffold fixes *how* the agent can
-   act, remember, and schedule itself. It never fixes *what* to do, *what* to
-   remember, or *when* to act (within bounds). All strategy, memory content,
-   memory structure, and pacing decisions belong to the model under test.
-2. **Model-agnostic by construction.** One loop, N provider adapters. Native tool
-   calling per provider. No vendor idioms in prompts or loop logic. A tri-provider
-   smoke test gates every change.
-3. **Session-based, not daemon-based.** Persistence = state on disk + a scheduler,
-   not a long-running process. Crash recovery reconstructs accounting from the
-   telemetry stream (§7.1), never from in-memory state.
-4. **Everything is logged.** If it isn't in the telemetry stream or on-chain, it
-   didn't happen. Post-hoc analysis (memory divergence, discovery coverage,
-   spend curves) depends on complete capture. Telemetry events are flushed to
-   disk synchronously, one line per event, before the action they describe is
-   considered complete.
-5. **No compaction in v0 (D8).** The session context guard (§9) sits below every
-   candidate model's context window. Cross-session memory exists only as
-   agent-written workspace files. This removes compaction quality as a
-   cross-model confound and makes "memory" fully inspectable.
-6. **The agent is blind to the experimental apparatus (D12, D13).** No budget,
-   spend, run-duration, or session-cap information reaches the agent through
-   any channel — not the system prompt, not `get_status`, not error messages.
-   Forced endings are silent (SIGKILL semantics). The only persistence hint the
-   agent ever receives is the system prompt's statement that `workspace/`
-   survives between sessions.
-7. **Closed world (D14).** The agent's total information channels are: the
-   harness MCP tools, the bundled read-only `reference/` tree, and its own
-   `workspace/`. No web access, no shell, no other network egress from the
-   agent loop. (Provisioning enforces this at the VM level: egress allowlist =
-   model provider API + chain RPC used by the harness.)
+`kami-agent run-session --run-dir DIR` executes at most one session and
+exits. It returns exactly one outcome (printed on stdout, `runner.py`):
+`lock_held` | `not_due` | `already_complete` | `run_complete` |
+`session_aborted` | `session_ran`.
 
-## 2. Architecture
+Ordered steps, as implemented:
 
-```
-supervisor (cron @ poll cadence + lockfile)
-  └─ session runner (one process: start → run one session → persist → exit)
-       ├─ model adapter        (anthropic | openai | google)
-       ├─ harness client       (MCP client → kami-harness stdio child, pinned SHA)
-       ├─ scaffold tools       (workspace, reference, scheduling, status)
-       ├─ budget governor      (boundary checks, pinned price table)
-       ├─ state store          (run/ directory on disk)
-       └─ telemetry            (JSONL event stream + transcripts)
-```
+1. **Acquire lock** (P4). Held by a live session → `lock_held`, nothing
+   written.
+2. **Fold telemetry** into run state (P3). No file is written yet.
+3. **Wake gate.** `now < next_wake_at` → `not_due`, nothing written.
+   `--manual` bypasses this gate and nothing else.
+4. **Recover** (P3): an unmatched `session_start` gets a synthetic
+   `session_end reason=crash`; the `state.json` cache is refreshed from
+   the fold.
+5. `run_status == complete` → `already_complete`.
+6. **Boundary check** (P7.3). Tripped → `run_complete` event, run
+   disabled, `run_complete`.
+7. **Claim the session number**: `session_counter += 1`, persisted
+   before any model call, so a crash never reuses a number.
+8. **Spawn the harness child** and handshake (D1). Failure → a
+   `session_start` / `session_end reason=errors` pair with zero model
+   calls, a default-source `schedule_next`, and `session_aborted`.
+9. **Emit `session_start`** carrying `tools_hash` of the loaded surface.
+10. **Build context**: frozen system prompt + `\n\n` + the file index
+    (full `workspace/` tree with byte sizes, `reference/` collapsed to
+    one `N files, N bytes, read-only` line).
+11. **Kickoff**: the first user message is the frozen constant
+    `prompts/kickoff.txt`. No dynamic content, no digits.
+12. **Agent loop** (P2) until a stop reason (P5).
+13. **Persist**: `session_end`, transcript file, state cache.
+14. **Schedule** (P6): exactly one `schedule_next`.
+15. **Release lock** → `session_ran`.
 
-- **Supervisor** is a fixed-cadence poller: cron fires every `poll_cadence`
-  (default 5 min); the runner exits immediately unless `now ≥ next_wake_at`
-  and no other session holds the lock. Consequence: effective wake resolution
-  is `poll_cadence`, so `wake_min ≥ poll_cadence`.
-- **Lockfile** contains PID + timestamp. A lock whose PID is dead or whose age
-  exceeds `lock_stale_s` (default 2 × session wall-clock ceiling) is stale and
-  is broken with a logged warning. A crashed session can never deadlock the run.
-- **Harness lifecycle**: the kami-harness MCP server is spawned per session as
-  a stdio child at the pinned SHA. Handshake failure aborts the session
-  (`session_end reason=errors`, zero model calls); next wake = `wake_default`.
+### P2. Agent loop
 
-## 3. Session lifecycle
+- Alternates model calls and tool executions. The loop speaks only the
+  canonical adapter types (P8) and never inspects provider payloads.
+- **Parallel intents execute strictly sequentially in the order
+  returned** — no reordering, no deduplication, no dependency analysis.
+  Later intents observe the world produced by earlier ones, failures
+  included. Serialization also removes same-wallet nonce contention at
+  the scaffold layer.
+- Each executed intent appends one `tool_result` message and emits one
+  `tool_call` event.
+- `end_session` takes effect immediately: every later intent in the same
+  batch is skipped, emitted as `tool_call` with `ok=false, skipped=true`,
+  and produces no tool-result message.
+- An assistant turn with no tool calls (including `stop_reason:
+  max_tokens` with no complete call) cannot advance the loop: the runner
+  sends the frozen continuation string `prompts/continue.txt` and counts
+  one error. The next `llm_call` carries `continuation: true`.
+- Every tool result inserted into context is capped at
+  `tool_result_max_bytes` (default 65536) with an explicit marker naming
+  the original size; `workspace_read` results additionally name the
+  byte-sliced re-read. Recorded as `truncated` / `original_bytes`.
+- Error counting: any successfully executed tool call resets the
+  consecutive-error counter; malformed calls (unknown tool, schema
+  violation), failed executions, timeouts, and tool-less turns each
+  count one. Reaching `max_consecutive_errors` (default 5) ends the
+  session.
+- Tool execution is bounded by `tool_timeout_s` (default 120) via a
+  watchdog thread; a timeout is an error result, not a crash.
+- Harness tool names that collide with scaffold tool names are rejected
+  at loop construction (`ValueError`), before any model call.
 
-1. **Acquire lock** (with staleness handling per §2). If held, exit.
-2. **Recover.** If the previous session crashed (telemetry shows a
-   `session_start` without matching `session_end`), write a synthetic
-   `session_end` with `reason: crash` for it, and recompute `cumulative_usd` /
-   `cumulative_tokens` by folding `telemetry.jsonl` — `state.json` is a cache,
-   telemetry is the source of truth for accounting.
-3. **Boundary checks (D13).** If `cumulative_usd ≥ budget_usd` or wall-clock
-   since the first `session_start` ≥ `t_max_days`: write `run_complete`
-   (reason `budget` | `t_max`), disable the supervisor, release lock, exit.
-   Budget and t_max are checked **only here** — an in-flight session is never
-   terminated for budget or t_max; overshoot is bounded by the session caps
-   and the exact $100 analysis line is drawn post-hoc from per-call
-   cumulative-spend telemetry.
-4. **Start session.** Increment and persist `session_counter` (before the
-   first model call, so crashes never reuse a session number). Emit
-   `session_start`. Spawn harness child, perform MCP handshake, load game
-   tools.
-5. **Build context.** Fixed plain-text system prompt (§6) + the file index:
-   full `workspace/` tree (paths, sizes) + `reference/` as a single top-level
-   entry (name, file count, total size, read-only marker). The agent reads
-   contents via tools.
-6. **Kickoff.** The first user message is a frozen constant string
-   (`prompts/kickoff.txt`, e.g. "Session start."). No numbers, no dynamic
-   content — time, session number, and world state are all discoverable via
-   tools, and whether the agent looks is measured behavior.
-7. **Agent loop.** Alternate model calls and tool executions (§5.3) until one
-   of:
-   - agent calls `end_session`
-   - context guard trips: last call's `input_tokens + output_tokens ≥
-     session_token_cap` (D17)
-   - `session_tool_cap` tool executions reached
-   - repetition breaker trips (D40) — three mechanical rules evaluated
-     after every executed tool call, knobs pinned per manifest (§9):
-     (a) **identical_call** — the same signature (tool name +
-     normalized-args hash) executed `repetition_identical_cap`
-     (default 5) times consecutively, regardless of success/error
-     (consecutive, not cumulative-per-session — D43; 001 productive
-     sessions legitimately re-read the same signature up to 4 times
-     spread across a session, while the observed identical-call storms
-     were consecutive); (b) **window_diversity** — the last
-     `repetition_window` (default 30) executed calls contain at most
-     `repetition_min_distinct` (default 4) distinct signatures
-     (evaluated only on a full window; the catch for rotating
-     poll cycles that consecutive identical counting misses);
-     (c) **same_tool_errors** — `repetition_same_tool_error_cap`
-     (default 8) consecutive calls of the same tool (args may differ)
-     all classified error-or-revert, where a success-shaped harness
-     result counts when its content carries the harness revert/error
-     markers (on-chain reverts return as successful tool results and
-     never advance `max_consecutive_errors` — this rule is what ends
-     parameter-sweep revert loops)
-   - `max_consecutive_errors` consecutive errors (§5.4)
-   - model call fails after all retries (§5.5)
-8. **Persist.** Emit `session_end` (reason per §8), flush transcript, update
-   `state.json`.
-9. **Schedule.** Apply the agent's last `set_next_wake` request clamped to
-   `[wake_min, wake_max]`; if the agent never called it, use `wake_default`.
-   **Carried wake (D41):** when the session ended by token_cap, tool_cap,
-   or repetition and the final assistant turn contained a `set_next_wake`
-   intent the cap prevented from executing, that ONE intent (the last
-   such, per normal last-call-wins) is executed at teardown — validated
-   and clamped exactly as a normal call — before scheduling; the
-   `schedule_next` event carries `carried: true`. Invalid args are
-   discarded with the discard recorded (`carried_invalid: true`; a
-   previously executed wake stands, else `wake_default`). No other
-   skipped intent is ever executed, and intents skipped by
-   `end_session` (D18) are never carried. Emit `schedule_next` **every
-   session** with `source: agent | default`.
-10. **Release lock, exit.**
+### P3. Crash resume and accounting recovery
 
-Forced endings (context guard, tool cap, repetition, errors) are silent
-(D13): no warning message, no final model call, no disclosure in the system
-prompt that caps or breaker rules exist. The agent discovers the truncation
-next session — or doesn't; how each model copes with unexplained
-interruption is measured behavior. The carried wake (D41) is equally
-invisible: no tool result is produced and no tool_call event is emitted
-for it.
+- `telemetry.jsonl` is the **source of truth** for all accounting.
+  `state.json` is a cache, rebuilt by folding the stream on every run
+  and never trusted from disk.
+- The fold yields: `session_counter` (max session seen),
+  `cumulative_usd` and `cumulative_tokens` (summed over every `llm_call`
+  event), `first_session_at` (first `session_start.ts`), `next_wake_at`
+  (last `schedule_next.next_wake_at`), `run_status` (`complete` once a
+  `run_complete` event exists).
+- A `session_start` with no matching `session_end` is a crashed session.
+  Recovery writes a synthetic `session_end reason=crash` whose totals
+  are folded from that session's events. Recovery is idempotent.
+- A crashed session keeps its session number (the counter is persisted
+  at P1.7, before the first model call).
 
-## 4. Scaffold tools (non-game; never part of the kami-harness MCP surface)
+### P4. Lockfile semantics
 
-| Tool | Signature | Notes |
+- One lock per run directory: `run/run.lock`, JSON `{pid, created}`.
+- Held by a live process, younger than `lock_stale_s` (default 7200) →
+  the invocation exits immediately with `lock_held`.
+- A lock is **stale**, and is broken with a logged warning, when its PID
+  is dead, its age exceeds `lock_stale_s`, or its content is unreadable.
+  A crashed session can never deadlock a run.
+- The lock is held for the whole invocation and released in a `finally`,
+  including on the `not_due` and `lock_held` paths.
+
+### P5. Session caps and stop reasons
+
+Every session ends with exactly one `session_end.reason`. The enum is
+closed and schema-enforced:
+
+| reason | trigger |
+|---|---|
+| `agent` | the agent called `end_session` |
+| `token_cap` | a call's `input_tokens + output_tokens ≥ session_token_cap`, checked **after** the call; that turn's intents are never executed |
+| `tool_cap` | `session_tool_cap` (default 50) intents **executed** |
+| `repetition` | a repetition-breaker rule tripped (P5.1) |
+| `errors` | `max_consecutive_errors` reached, a non-retryable model error, or retries exhausted |
+| `crash` | synthetic, written by recovery (P3) — never by a live loop |
+
+All non-`agent` endings are **silent**: no warning message, no final
+model call, no disclosure that caps or breaker rules exist. The agent
+observes only that the session stopped.
+
+#### P5.1 Repetition breaker
+
+Three mechanical rules, evaluated in this order after every executed
+tool call, on executed calls only (skipped intents never count). Knob
+names are manifest-pinned (`caps:` block):
+
+| rule | knob (default) | trip condition |
 |---|---|---|
-| `workspace_write` | (path, content) | Creates parent dirs. Overwrites whole file. Quota-enforced over `workspace/` only (`workspace_quota_bytes`, default 10 MB). Rejected under `reference/`. |
-| `workspace_read` | (path, offset?, length?) | Serves both `workspace/` and `reference/`. `offset`/`length` are byte-based slicing so truncated results (D19) are re-readable in pieces. |
-| `workspace_list` | (path?) → tree with sizes | Both roots. No path → both root listings (`reference/` collapsed to top level). |
-| `workspace_delete` | (path) | `workspace/` only; rejected under `reference/`. |
-| `set_next_wake` | (minutes_from_now) | Clamped to `[wake_min, wake_max]` (default 5 min – 24 h). Last call in a session wins. |
-| `get_status` | () → status | `current_time_utc`, `session_number`, `workspace_bytes_used`, `workspace_quota_bytes`. **Nothing else** (D12): no budget, no spend, no token counts, no elapsed-run figures, no T_max. (When a future arm sets `budget_visible: true`, budget fields are appended; the flag exists as mechanism, pinned false for 001.) |
-| `end_session` | (reason: free text) | Graceful termination; reason logged. Effective immediately: later intents in the same parallel batch are skipped and logged as skipped. |
+| `identical_call` | `repetition_identical_cap` (5) | the same signature executed that many times **consecutively**, success or error alike |
+| `window_diversity` | `repetition_window` (30) / `repetition_min_distinct` (4) | over a **full** trailing window of that size, the number of distinct signatures is `≤ min_distinct` |
+| `same_tool_errors` | `repetition_same_tool_error_cap` (8) | that many consecutive executed calls of the same tool (args may differ), all classified error-or-revert |
 
-All file paths are sandboxed: resolved paths must fall under `workspace/` or
-`reference/`; traversal outside either root is an error. **Paths are
-relative to the workspace root (D43):** a bare `notes.md` and a prefixed
-`workspace/notes.md` name the same file (exactly one leading `workspace/`
-segment is stripped); `reference/...` addresses the read-only tree. Tool
-descriptions state this fact. Bare paths therefore can never resolve to
-run-directory internals. `reference/` contains
-the bundled GDD snapshot at the pinned SHA (D14), read-only by construction.
+- A **signature** is `toolname:sha256(canonical_json(args))[:12]`;
+  argument key order never distinguishes two calls.
+- **error-or-revert** = a loop-level failure, or a success-shaped result
+  whose JSON content carries `status: "reverted"` or a non-empty
+  `error` field, at the top level or one `result` level down. On-chain
+  reverts return as successful tool results and so never advance the
+  consecutive-error counter — this rule is what ends parameter-sweep
+  revert loops.
+- The first rule to trip names the `session_end` telemetry fields (P9).
 
-Game perception and action come exclusively from the kami-harness MCP tools,
-loaded at session start from the pinned harness version.
+### P6. Wake scheduling and clamps
 
-## 5. Model adapter interface
+- `set_next_wake(minutes_from_now)` clamps to `[wake_min, wake_max]`
+  (defaults 5 min – 24 h) and rejects NaN/Inf. **Last call in a session
+  wins.**
+- Exactly one `schedule_next` event per session, on every path
+  (including harness-handshake abort) — wake-interval analysis has no
+  holes. `source: agent` when a `set_next_wake` executed, else
+  `default` at `wake_default` (60 min).
+- **Carried wake.** When a session ends by `token_cap`, `tool_cap`, or
+  `repetition` and the intents the cap prevented from executing contain
+  a `set_next_wake`, that ONE intent (the last of them, normal
+  last-call-wins) is executed at teardown — validated and clamped
+  exactly as a normal call — and `schedule_next` carries
+  `carried: true`.
+  - Invalid args are discarded and recorded as `carried_invalid: true`;
+    a previously executed wake stands, else `wake_default`.
+  - No other skipped intent is ever executed. Intents skipped by
+    `end_session` are never carried. `errors` endings never carry.
+  - The carry is invisible to the agent: no tool result, no `tool_call`
+    event.
+- Effective wake resolution equals the invoker's cadence (D4), so
+  `wake_min` must be ≥ that cadence.
 
-### 5.1 Canonical types
+### P7. Budget accounting
+
+**P7.1 Token invariant.** `input_tokens` is the **TOTAL** prompt token
+count for a call. `cache_read_tokens` and `cache_write_tokens` are
+component subsets of it; the uncached remainder is `input_tokens −
+cache_read_tokens − cache_write_tokens`. `output_tokens` **includes**
+reasoning/thinking tokens; `reasoning_tokens` is an informational subset
+logged when the provider reports it. Wire-format differences die inside
+adapters (D2).
+
+**P7.2 Cost formula** (`governor.cost_usd`), per call, from the
+manifest-pinned list-price table:
+
+```
+cost_usd = ((input_tokens − cache_read_tokens − cache_write_tokens) × price_in
+            + cache_read_tokens  × price_read
+            + cache_write_tokens × price_write
+            + output_tokens      × price_out) / 1e6
+```
+
+`price_read` / `price_write` fall back to `price_in` when the manifest
+omits the cache columns (conservative: accounted ≥ invoiced). With all
+cache fields zero the formula reduces exactly to input×in + output×out.
+Per-call component counts reconcile digit-for-digit against provider
+ledger columns; dollars are derived, never authoritative.
+
+**P7.3 Boundary check.** At P1.6 only: `cumulative_usd ≥ budget_usd` →
+`run_complete reason=budget`; else elapsed since `first_session_at ≥
+t_max_days` → `reason=t_max`. Budget is checked **before** t_max; stop =
+min(budget, t_max). An in-flight session is never terminated for budget
+or t_max; the overshoot is bounded by the session caps and recorded as
+`overspend_usd`. On stop the supervisor entry is removed.
+
+**P7.4 What is counted.** Every `llm_call` event contributes to
+`cumulative_usd` / `cumulative_tokens`, including failed attempts
+(logged at cost 0 with `usage_unknown: true`) and retried empty
+responses (cost 0, `empty_response: true`). In-world resources (MUSU,
+ONYX, gas) are outside `budget_usd` and are not tracked here.
+
+### P8. Model adapter interface
 
 ```python
 class ModelAdapter(Protocol):
@@ -200,333 +230,405 @@ class ModelAdapter(Protocol):
                  tools: list[ToolDef], params: SamplingParams) -> AdapterResponse: ...
 ```
 
-- `Message` is one of:
-  - `{role: "user", text}`
-  - `{role: "assistant", text?, tool_calls?: [{id, name, args}], provider_state?}`
-  - `{role: "tool_result", tool_call_id, content, is_error: bool}`
-  The adapter maps these to the provider's wire format (system prompt as a
-  separate param where native; tool-result pairing per provider convention).
-- **Provider reasoning state (D22):** `provider_state` is an opaque,
-  adapter-owned payload (e.g. Anthropic signed thinking blocks, Gemini
-  thought signatures) set by the emitting adapter on the assistant message
-  and replayed by that same adapter on subsequent calls **within the same
-  session**. The loop never inspects it; it never crosses sessions (D8)
-  and never reaches telemetry; transcripts record messages as sent.
-  Adapters for providers with no replayable state leave it unset. An
-  adapter must tolerate `provider_state` it did not produce by ignoring it
-  (defense in depth — a run never switches adapters mid-session).
-- `ToolDef = {name, description, input_schema}` — JSON Schema authored once,
-  translated per provider. Schemas restrict themselves to the feature subset
-  all three providers accept (objects, scalars, arrays, enums, required; no
-  oneOf/anyOf/allOf).
-- `AdapterResponse = {text_blocks: [str], tool_calls: [{id, name, args}],
-  stop_reason, usage: {input_tokens, output_tokens, reasoning_tokens?,
-  cache_read_tokens, cache_write_tokens}, provider_meta}` —
-  `provider_meta` is logged raw, never parsed by the loop.
-- `stop_reason` normalized enum: `end_turn | tool_use | max_tokens | refusal`.
+- `Message` is `{role: "user", text}` |
+  `{role: "assistant", text?, tool_calls?, provider_state?}` |
+  `{role: "tool_result", tool_call_id, content, is_error}`.
+- `ToolDef = {name, description, input_schema}` — JSON Schema authored
+  once, translated per provider, restricted to the subset all three
+  providers accept (objects, scalars, arrays, enums, required; no
+  `oneOf`/`anyOf`/`allOf`).
+- `AdapterResponse = {text_blocks, tool_calls, stop_reason, usage,
+  provider_state?, provider_meta}`; `provider_meta` is logged raw and
+  never parsed by the loop.
+- `stop_reason` is the closed enum `end_turn | tool_use | max_tokens |
+  refusal`. An unmappable provider stop reason raises rather than being
+  guessed.
+- **Provider reasoning state** (`provider_state`) is an opaque,
+  adapter-owned payload (signed thinking blocks, thought signatures) set
+  by the emitting adapter and replayed by that same adapter **within one
+  session**. The loop never inspects it; it never crosses sessions and
+  never reaches telemetry. An adapter ignores state it did not produce.
+- **Retries** (loop-owned, SDK retries disabled): exponential backoff
+  `min(60s, 1s × 2^attempt)` for rate limits, 5xx, timeouts and
+  connection failures, up to `retry_max_attempts` (default 5) retries
+  after the initial attempt. Every attempt is logged. Non-retryable
+  errors end the session immediately (`errors`).
+- **Empty responses**: no text, no tool calls, and zero usage is treated
+  as a provider fault — retried under the same backoff, logged at cost 0
+  with `empty_response: true`, never routed into the continuation/error
+  path. An empty-but-billed response (nonzero usage) keeps normal
+  handling.
 
-### 5.2 Token accounting invariant (D16, cache-aware per D39)
+### P9. Telemetry event schema — downstream contract
 
-Adapter-reported `output_tokens` **must include reasoning/thinking tokens**
-(e.g. Gemini reports thoughts outside `candidatesTokenCount` — the adapter
-folds them in; Anthropic and OpenAI already include them). `reasoning_tokens`
-is an informational subset, logged when the provider reports it.
+`run/telemetry.jsonl`, one JSON object per line, append-only. Machine
+contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
+`version: 0.2.0`, shipped inside the wheel as package data and kept
+byte-identical to the repo copy. Every event is validated **before** it
+is written; an invalid event raises and never lands. Unknown fields are
+rejected (`unevaluatedProperties: false`), so additive changes require a
+schema version bump.
 
-`input_tokens` is the **TOTAL** prompt token count for the call.
-`cache_read_tokens` and `cache_write_tokens` are component subsets of it;
-the uncached remainder is `input_tokens − cache_read_tokens −
-cache_write_tokens`. Provider wire semantics differ and die inside the
-adapters: Anthropic's `usage.input_tokens` EXCLUDES cached tokens (the
-adapter folds `cache_read_input_tokens` and `cache_creation_input_tokens`
-back in); OpenAI's `prompt_tokens` and Gemini's `promptTokenCount` already
-INCLUDE cached tokens (`prompt_tokens_details.cached_tokens` /
-`cachedContentTokenCount` map to `cache_read_tokens`, 0 when absent;
-neither bills a write premium, so `cache_write_tokens` is 0 there).
+Common required fields on every event: `ts` (ISO-8601 UTC, pattern
+enforced), `run_id`, `session`, `event`.
 
-The scaffold **requests provider caching where explicit opt-in is
-required** — Anthropic `cache_control` breakpoints (5-minute ephemeral),
-placed per the adapter's documentation — and **measures provider-side
-automatic caching everywhere else** (OpenAI, Gemini implicit caching).
-`cache_control` is request metadata: the prompt bytes sent to the model
-are byte-identical with or without it, the system prompt and tool schemas
-are untouched, and nothing about caching, budget, or spend reaches the
-agent through any channel (D12).
+| event | required | optional |
+|---|---|---|
+| `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
+| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | — |
+| `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response` |
+| `tool_call` | `tool`, `source` (`harness`\|`scaffold`), `duration_ms`, `ok` | `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash` |
+| `workspace_write` | `path`, `bytes`, `workspace_total_bytes` | — |
+| `workspace_delete` | `path`, `workspace_total_bytes` | — |
+| `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
+| `session_end` | `reason` (P5 enum), `llm_calls`, `tool_calls`, `session_cost_usd`, `session_tokens` | `repetition_rule`, `repetition_signature`, `repetition_tool`, `repetition_count`, `repetition_window`, `repetition_distinct`, `repetition_signatures[]` |
+| `run_complete` | `reason` (`budget`\|`t_max`\|`manual`), `totals{sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd}` | — |
 
-`cost_usd = (input_tokens − cache_read_tokens − cache_write_tokens) ×
-price_in + cache_read_tokens × price_read + cache_write_tokens ×
-price_write + output_tokens × price_out` from the pinned list-price table
-(cache-rate columns per §9). With all cache token fields zero this reduces
-exactly to the pre-v1.4 formula. Token reconciliation against provider
-dashboards remains component-exact: per-call uncached input, cache-write,
-and cache-read counts match the provider ledger columns digit-for-digit;
-dollar reconciliation stays derived, never authoritative.
+Reader notes (stable semantics):
 
-### 5.3 Tool execution semantics (D18)
+- `llm_call.stop_reason` accepts the P8 enum **plus `error`**, which
+  marks a failed-but-logged attempt with no provider stop reason.
+- `llm_calls` counts emitted `llm_call` events, retries and empty
+  responses included; filter on `usage_unknown` / `empty_response` for
+  billable calls.
+- `session_end.tool_calls` counts emitted `tool_call` events, **skipped
+  intents included**; `session_tool_cap` counts executed intents only.
+- `schedule_next` appears exactly once per session, `wake_default` case
+  included.
+- `session_end reason=crash` is synthetic (P3).
+- Telemetry is not an agent-visible channel: budget fields recorded here
+  never reach the agent.
+- Tool arguments and results live in transcripts, not telemetry — except
+  the `path` of file-tool calls, promoted so documentation- and
+  memory-access patterns are analyzable without transcript parsing.
+- Quest completions are not logged locally; they are read from chain
+  state and joined by timestamp / `tx_hash` in analysis.
+- `provider_state` never appears in telemetry.
 
-Parallel tool-call intents are accepted from all providers and executed
-**strictly sequentially in the order returned**, results returned in a single
-turn. No reordering, no deduplication, no dependency analysis: later intents
-in a batch see the world state produced by earlier ones, including failures.
-Each intent emits its own `tool_call` telemetry event. `end_session` takes
-effect immediately; subsequent intents in the batch are skipped (logged).
-Serialization also prevents same-wallet nonce contention at the scaffold layer.
+### P10. Scaffold tools (never part of the harness MCP surface)
 
-Every tool result inserted into context is capped at `tool_result_max_bytes`
-(default 64 KB, pinned per manifest, applied uniformly to scaffold and harness
-results) with an explicit truncation marker stating the original size and that
-the content can be re-read in slices via `workspace_read(offset, length)`
-where applicable (D19). Truncation is recorded on the `tool_call` event
-(`truncated: true, original_bytes`).
+| tool | signature | contract |
+|---|---|---|
+| `workspace_write` | (path, content) | creates parent dirs, replaces the whole file, `workspace/` only, quota-checked on the projected total |
+| `workspace_read` | (path, offset?, length?) | serves `workspace/` and `reference/`; byte-based slicing so truncated results are re-readable |
+| `workspace_list` | (path?) | tree with byte sizes; no path → full `workspace/` + one-line `reference/` summary |
+| `workspace_delete` | (path) | `workspace/` only |
+| `set_next_wake` | (minutes_from_now) | clamped, last call wins (P6) |
+| `get_status` | () | JSON with exactly `current_time_utc`, `session_number`, `workspace_bytes_used`, `workspace_quota_bytes` — nothing else |
+| `end_session` | (reason: free text) | immediate; reason logged (P2) |
 
-### 5.4 Error semantics
+Game perception and action come exclusively from the harness MCP tools
+(D1), loaded per session. Tool order presented to the model is game
+tools first, scaffold tools second, deterministic so `tools_hash` is
+stable.
 
-- **Malformed tool call** (unknown tool, args failing schema validation) →
-  error text returned to the model as the tool result (`is_error: true`);
-  counts as one error.
-- **Failed tool execution** (harness error, timeout after `tool_timeout_s`,
-  default 120 s) → error result to the model; counts as one error.
-- **`stop_reason: max_tokens` with no complete tool call**, or an assistant
-  turn with neither tool calls nor `end_session` → the loop cannot advance on
-  its own; the runner sends the frozen continuation string
-  (`prompts/continue.txt`, e.g. "Continue. To end this session, call
-  end_session."); counts as one error (prevents infinite monologue/truncation
-  loops). The `llm_call` event that follows a continuation send carries
-  `continuation: true`, so monologue-coping is countable per model and
-  `session_end reason=errors` is decomposable in analysis without transcript
-  parsing.
-- The consecutive-error counter resets on any successfully executed tool
-  call. At `max_consecutive_errors` (default 5), the session ends
-  (`reason: errors`).
+### P11. Workspace conventions
 
-### 5.5 Retries and provider params
+- **The agent may write only under `workspace/`**, subject to
+  `workspace_quota_bytes` (default 10 MB) measured over the whole tree.
+  A rejected write leaves no partial file.
+- `reference/` is read-only by construction: writes and deletes are
+  rejected, not silently ignored.
+- **Paths are relative to the workspace root.** A bare `notes.md` and a
+  prefixed `workspace/notes.md` name the same file (exactly one leading
+  `workspace/` segment is stripped). `reference/...` addresses the
+  read-only tree. Tool descriptions state this.
+- Absolute paths, `~`-paths, NUL bytes, `..` escapes, and symlinks
+  leaving a root are rejected. Bare paths can never reach run-directory
+  internals (`state.json`, `telemetry.jsonl`, `prompts/`,
+  `transcripts/`, `config.yaml`, `run.lock`).
+- The scaffold never writes into `workspace/` beyond creating the
+  directory; its content is entirely agent-authored and is the only
+  thing that survives between sessions.
 
-- Exponential backoff on 429/5xx/timeouts, `retry_max_attempts` (default 5),
-  every retry logged. Token usage of failed-but-billed attempts counts against
-  budget when the provider reports usage; failures with unknowable usage are
-  logged `usage_unknown: true` at cost 0 (the token-count reconciliation in
-  the smoke checklist bounds the resulting error).
-- **Empty responses (D43):** an adapter response with no text, no tool
-  calls, and zero usage is a provider fault, retried under the same
-  backoff and logged as an `llm_call` with `empty_response: true` at
-  cost 0 — it never enters the §5.4 continuation/error path. A genuine
-  empty-but-billed response (nonzero usage) keeps the §5.4 handling.
-- Retries exhausted → session ends (`reason: errors`).
-- Sampling params pinned per run in the manifest (temperature where the model
-  accepts it, max_tokens, reasoning effort where applicable). Adapters
-  tolerate provider-specific param subsets; the manifest records exactly what
-  was sent.
-
-## 6. System prompt (fixed, plain text)
-
-Contents, in order (final wording in `prompts/system.txt`, frozen per run):
-
-1. Situation: you are an autonomous agent in Kamigotchi, a persistent
-   on-chain world with other players. Sessions are periodic; the world
-   advances between them. You act only through tool calls; no human
-   reads or replies to anything you write, and text outside tool calls
-   has no effect on the world (D43).
-2. Objective: complete as many quests as possible.
-3. Persistence: `workspace/` survives between sessions; nothing else you
-   write or think does. Its use and structure are entirely up to you.
-4. Reference: `reference/` holds the game's design document, read-only.
-5. Tools: game tools (from the environment) and scaffold tools (files,
-   scheduling, status).
-6. Scheduling: you choose when to wake next via `set_next_wake`, within
-   [wake_min, wake_max]. You cannot wait or pause within a session; to
-   wait for something, choose the next wake and end the session (D43).
-7. Transaction cost (D43): on-chain actions cost gas even when they
-   fail — a reverted transaction consumes gas without changing the
-   world; diagnose why an action failed before submitting it again.
-   (Gas is a world mechanic, outside the D12 exclusions.)
-
-Explicitly excluded (D12, D13): any mention of budget, cost, tokens, compute
-limits, run duration, session caps, forced truncation, or the existence of a
-study. Also excluded: strategy hints, tool-usage advice, memory-structure
-suggestions, XML-tag formatting, and any vendor-idiomatic phrasing.
-
-The three frozen strings shipped per run: `prompts/system.txt`,
-`prompts/kickoff.txt`, `prompts/continue.txt`.
-
-## 7. State directory layout
+### P12. Run directory and CLI
 
 ```
 run/
-├── config.yaml          # full run manifest copy: model, adapter, pinned SHAs
-│                        # (kami-harness, kami-agent, gdd), price table, caps,
-│                        # all §9 parameters
-├── state.json           # scaffold-owned CACHE: session_counter, cumulative_usd,
-│                        # cumulative_tokens, next_wake_at, run_status,
-│                        # first_session_at
-├── workspace/           # agent-owned; scaffold never writes here
-├── reference/           # read-only bundled GDD snapshot (pinned SHA, D14)
-├── prompts/             # frozen strings: system.txt, kickoff.txt, continue.txt
-├── transcripts/         # full message logs, one file per session
-└── telemetry.jsonl      # append-only event stream (§8) — source of truth
+├── config.yaml       # verbatim manifest copy (D3); immutable per run
+├── state.json        # scaffold-owned CACHE (P3): session_counter, cumulative_usd,
+│                     # cumulative_tokens, next_wake_at, run_status, first_session_at
+├── run.lock          # PID + created (P4); absent between sessions
+├── workspace/        # agent-owned (P11)
+├── reference/        # read-only documentation snapshot (D5)
+├── prompts/          # frozen strings: system.txt, kickoff.txt, continue.txt
+├── transcripts/      # session-NNNN.jsonl, messages exactly as sent (post-truncation)
+└── telemetry.jsonl   # append-only event stream (P9) — source of truth
 ```
 
-### 7.1 Source-of-truth rule
+- `kami-agent init --manifest M --run-dir DIR` — validation and
+  scaffolding only: copies the manifest, materializes the frozen
+  prompts, creates `workspace/` and `transcripts/`, runs connectivity
+  checks (chain RPC, mainnet RPC with `eth_chainId == 1`, provider API,
+  MCP handshake), emits `run_start`. **There is no key path through
+  init**: it never generates, imports, or writes key material.
+  `--skip-connectivity` skips the four checks (and leaves
+  `run_start.harness_tools` empty).
+- `kami-agent run-session --run-dir DIR [--manual]` — one session (P1).
+- `kami-agent status --run-dir DIR` — prints the `state.json` summary.
+  Operator-facing; never an agent channel.
 
-`telemetry.jsonl` is authoritative for all accounting; `state.json` is a
-convenience cache rebuilt from it on recovery (§3 step 2). Events are flushed
-synchronously so a crash at any point loses at most the event being written.
+### P13. Frozen prompt strings
 
-## 8. Telemetry schema (JSONL, one event per line)
+Three strings ship per run and are byte-frozen: `prompts/system.txt`,
+`prompts/kickoff.txt`, `prompts/continue.txt`. The system prompt states,
+in order: the situation (autonomous agent, periodic sessions, tool calls
+are the only effect, no human reads the text); the objective (complete
+as many quests as possible); persistence (`workspace/` survives, its use
+and structure are the agent's own); `reference/` as read-only
+documentation; the two tool families; scheduling via `set_next_wake`
+within the bounds, and that there is no in-session waiting; and that
+on-chain actions cost gas even when they revert.
 
-Common fields: `ts` (ISO-8601 UTC), `run_id`, `session`, `event`.
+Excluded by construction: budget, cost, tokens, compute limits, run
+duration, session caps, forced truncation, the existence of measurement
+— and equally, strategy hints, tool-usage advice, memory-structure
+suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
 
-| event | fields |
-|---|---|
-| `run_start` | manifest_hash, model, harness_sha, agent_sha, gdd_sha, harness_tools (name list), price_table |
-| `session_start` | trigger (scheduled \| manual), budget_remaining_usd, wallclock_elapsed_s, tools_hash |
-| `llm_call` | model, input_tokens, output_tokens, reasoning_tokens?, cache_read_tokens, cache_write_tokens, cost_usd, cumulative_usd, cumulative_tokens, latency_ms, stop_reason, retry_count, usage_unknown?, continuation? (true when this call follows a continuation send, §5.4), empty_response? (retried empty response, §5.5, D43) |
-| `tool_call` | tool, source (harness \| scaffold), path? (file tools), duration_ms, ok, error?, truncated?, original_bytes?, skipped?, tx_hash? |
-| `workspace_write` | path, bytes, workspace_total_bytes |
-| `workspace_delete` | path, workspace_total_bytes |
-| `schedule_next` | source (agent \| default), requested_min?, clamped_min, next_wake_at, carried? (D41), carried_invalid? (D41) |
-| `session_end` | reason (agent \| token_cap \| tool_cap \| errors \| repetition \| crash), llm_calls, tool_calls, session_cost_usd, session_tokens, repetition_rule? (identical_call \| window_diversity \| same_tool_errors, D40), repetition_signature?, repetition_tool?, repetition_count?, repetition_window?, repetition_distinct?, repetition_signatures? |
-| `run_complete` | reason (budget \| t_max \| manual), totals (sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd) |
+---
 
-Notes:
-- `schedule_next` is emitted every session, including the `wake_default` case
-  — wake-interval analysis must have no holes.
-- `session_end reason=crash` is synthetic, written during recovery (§3.2).
-- Budget fields in telemetry are scaffold-side only and never reach the agent
-  (D12) — telemetry is not an agent-visible channel.
-- Quest completions are **not** logged locally — they are derived from chain
-  state (tamper-evident ground truth) and joined to telemetry by
-  timestamp/tx_hash in analysis. Tool-call *arguments and results* live in
-  transcripts, not telemetry, except the `path` of file-tool calls, which is
-  promoted into telemetry so documentation/memory access patterns (RQ2) are
-  analyzable without transcript parsing.
-- Transcripts record messages exactly as sent to the model (i.e.
-  post-truncation); oversized original results are not separately archived.
+## Depends
 
-## 9. Budget governor and run parameters
+### D1. Harness MCP surface
 
-- `budget_usd` — total inference budget (v1.0 study: 100.00; v0.1 smoke:
-  10.00). `cost_usd` per call is computed per §5.2 (list price × reported
-  tokens, cache-aware). The manifest `price_table` carries two cache-rate
-  columns alongside the input/output rates: `cache_read_usd_per_mtok` and
-  `cache_write_usd_per_mtok` (Anthropic 5m: write = 1.25 × input rate,
-  read = 0.1 × input rate; OpenAI/Gemini: read = the provider's published
-  cached-input rate, write = input rate — writes carry no premium there
-  and `cache_write_tokens` is 0 anyway). Absent columns price cached
-  tokens at the full input rate (the conservative pre-v1.4 behavior).
-  **Boundary-checked (D13):** enforcement happens
-  only at session start; no mid-session budget termination; the in-flight
-  session completes naturally under its session caps. Expected small
-  overshoot is logged (`overspend_usd`) and the exact $100 analysis line is
-  drawn post-hoc from per-call `cumulative_usd`.
-- `t_max_days` — wall-clock bound (default 30) from the first
-  `session_start`. Checked at the same boundary. Stop = min(budget, t_max).
-- `budget_visible` — **false for experiment 001 (D12)**; the flag remains as
-  mechanism for a future budget-visible arm.
-- In-game resources (starting MUSU/ONYX, seeded Kamis, gas allowance) are
-  provisioned identically per agent by kami-lab and are **outside**
-  budget_usd; tracked separately via chain.
-- Pinned per manifest (defaults): `session_token_cap` (per D17, ~60–70% of
-  the smallest study-model context window; set when the model list is final),
-  `session_tool_cap` (50), `max_consecutive_errors` (5),
-  `retry_max_attempts` (5), `tool_timeout_s` (120),
-  `tool_result_max_bytes` (65536), `repetition_identical_cap` (5,
-  consecutive — D43), `repetition_window` (30),
-  `repetition_min_distinct` (4), `repetition_same_tool_error_cap` (8)
-  (the D40 breaker knobs, §3 step 7), `workspace_quota_bytes` (10 MB),
-  `wake_min` (5 min), `wake_max` (24 h), `wake_default` (60 min),
-  `poll_cadence` (5 min), `lock_stale_s`.
-- **Fixed-floor arithmetic:** every call re-sends the system prompt, file
-  index, and ~70 tool schemas. The manifest must record the computed
-  fixed context floor (tokens) and the implied ceiling on total calls at
-  `budget_usd` for that model's pricing; the $10 smoke reports the observed
-  per-call floor next to the estimate. Session caps and `wake_default` are
-  chosen in light of this arithmetic, not guessed. With provider caching
-  engaged (§5.2) the floor is still re-sent on every call but is billed at
-  cache-read rates after the first call of a session (5-minute TTL; the
-  first call writes it at the cache-write rate); the manifest records the
-  uncached floor plus the implied per-call cached floor cost, and the
-  call-ceiling arithmetic may use both figures.
-- **Context-guard headroom:** because the guard (D17) is checked post-call,
-  a full turn lands in context before the next check. `session_token_cap`
-  headroom below the smallest context window must therefore also cover
-  worst-case single-turn growth:
-  (max expected parallel intents × `tool_result_max_bytes`/4) + `max_tokens`.
-  The $10 smoke reports max observed single-turn growth next to this
-  estimate. Failure mode prevented: a context-window overflow hard-errors
-  every retry and kills the session via `reason=errors` — a scaffold sizing
-  defect that analysis would misattribute as model failure.
+- Spawned per session as a **stdio child** from the manifest
+  (`harness.command`, `args`, `cwd`, `env`, `handshake_timeout_s`); the
+  scaffold's environment is passed through. The harness owns its own
+  required environment (e.g. a mainnet RPC URL) and refuses to start
+  without it.
+- Handshake failure aborts the session before any model call (P1.8).
+- The tool surface is read at session start via MCP `list_tools` and
+  used as given: names, descriptions, and input schemas are passed to
+  the provider unmodified.
+- **Identity is recorded, not negotiated.** There is no
+  `SCHEMA_VERSION`-style version handshake. Two artifacts stand in:
+  `pins.harness_sha` from the manifest, recorded on `run_start`
+  (operator-asserted, **not** verified against the running child), and
+  `tools_hash` — `sha256` over the sorted `(name, description,
+  input_schema)` of the full loaded surface — recorded on every
+  `session_start`. Drift is therefore **detected in analysis and in CI**
+  (a committed recorded-surface fixture whose hash is asserted), never
+  refused at runtime.
+- Failure surface consumed: an MCP `isError` result becomes a tool error
+  (P2); a success-shaped result carrying revert/error markers is
+  classified by P5.1 and by nothing else.
+- `tx_hash` is extracted best-effort from structured content or JSON
+  text, top level or one `result` level down, for telemetry only.
+- **Cap arithmetic assumption.** Every call re-sends the system prompt,
+  the file index, and the entire tool surface. That fixed floor must
+  leave room for a session to be more than one call: the worst-case
+  first-call floor is assumed **≤ 1/3 of `session_token_cap`**. This is
+  **not enforced anywhere in the scaffold** — it is an operator sizing
+  obligation on the manifest. The tri-provider smoke tier reports the
+  observed floor (`fixed_floor_input_tokens=…`) for that purpose. A
+  violated assumption degrades quietly into single-call sessions; a
+  grossly undersized `session_token_cap` relative to the model's context
+  window instead produces `reason=errors` sessions that analysis would
+  misread as model failure.
+- **Context-guard headroom** (same owner): because the guard is checked
+  post-call, one full turn lands in context before the next check.
+  Headroom below the model's context window must cover
+  `(max parallel intents × tool_result_max_bytes / 4) + max_tokens`.
 
-## 10. Packaging
+### D2. Provider APIs via adapters
 
-- One Docker image (or cloud-init) containing kami-agent + pinned
-  kami-harness + bundled GDD snapshot at `reference/`. The image is identical
-  across a study's VMs; per-run `config.yaml` (manifest copy) and `.env`
-  (provider API key, owner wallet key, `MAINNET_RPC_URL` — the harness
-  refuses to start without it) are injected at provision time. Closed-world
-  egress allowlist (D14) is applied at the VM level: provider API + the
-  chain RPC endpoints the harness uses (Yominet + Ethereum mainnet) only.
-- `kami-agent init` — performs validation and connectivity checks only:
-  validates the manifest, scaffolds the run directory, runs connectivity
-  checks (chain RPC, mainnet RPC — `eth_chainId` must answer 1, provider
-  API, MCP handshake) so misprovisioning fails at bring-up rather than
-  mid-run, and emits `run_start`. There is no key path through init: it
-  never generates, imports, or writes any key. Operator-wallet creation
-  is a harness tool (`create_operator_wallet`) the agent calls in-run;
-  the key is generated and persisted inside the harness server process.
-- `kami-agent run-session` — executes one session (what the supervisor
-  invokes).
-- `kami-agent status` — prints state.json summary (operator-facing; not an
-  agent channel).
+One adapter per provider; provider quirks never leave the adapter. All
+three disable SDK-level retries so the loop owns retry policy and
+logging (P8).
 
-## 11. Smoke test (CI gate)
-
-Three tiers (D21):
-
-1. **Adapter unit tier (no network):** recorded provider fixtures exercise
-   each adapter's normalization — message mapping, parallel-intent
-   extraction, stop-reason mapping, token-accounting invariant (§5.2,
-   including the Gemini reasoning-token fold), retry classification.
-2. **Tri-provider recorded-surface tier (per-PR gate):** one canned session
-   per adapter against each provider's cheapest tier — real provider APIs;
-   fake harness serving the *recorded* tool surface of the pinned
-   kami-harness (committed fixture plus a consistency test guarding pin
-   bumps); simulated tool execution; tiny caps: read status → list files →
-   read a `reference/` file (slice) → call one read-only harness tool →
-   write one workspace file → set next wake → end session. Asserts: all
-   tool calls parsed natively, usage accounting non-zero, telemetry events
-   validate against the §8 schema, no budget/horizon strings in any
-   agent-visible message (D12 leak check). Fork PRs skip cleanly (repo
-   secrets are not exposed to forks).
-3. **Live-harness tier (scheduled/manual, never gates PRs):** the same
-   canned session against a real kami-harness checkout at the pinned SHA
-   with live read-only RPC. Runs on manual dispatch, on a weekly schedule,
-   and on any harness pin bump; operator-run with an authenticated roster
-   before tagging v0 and before the $10 smoke handoff. Non-gating by
-   design: chain-RPC flakiness must not block unrelated PRs, and the
-   pinned harness cannot drift under CI.
-
-Tiers 1–2 run on every PR to kami-agent. The $10 smoke run (kami-lab
-experiment 001, DESIGN §6) remains the end-to-end acceptance test.
-
-## 12. Non-goals for v0
-
-- Multi-model roles (executor/optimizer splits)
-- Knowledge packs / calibrated strategy priors (future arm; staged in
-  kami-lab, excluded from v0 runs)
-- Mid-session compaction or context summarization
-- Self-funding / economic self-sustainability
-- 1h-TTL or cross-session prompt caching; explicit cache APIs on
-  OpenAI/Gemini — their automatic caching is measured, not managed (§5.2)
-- Web access or any non-harness network channel from the agent loop (D14)
-- Any UI
-
-## 13. Resolved decisions (were open in v0)
-
-| # | Decision | Resolution |
+| provider | caching mode | what accounting assumes |
 |---|---|---|
-| 1 | Budget visibility | `budget_visible: false` for 001 — the budget is the observation window, not a world mechanic (**D12**) |
-| 2 | Truncation semantics | Pure SIGKILL: no warning, no static disclosure; boundary-checked soft budget cap (**D13**) |
-| 3 | GDD delivery | Bundled pinned snapshot at read-only `reference/`, served by the workspace file tools; closed-world condition (**D14**) |
-| 4 | Agent interaction | No constraint; pre-registered interference protocol in DESIGN §9 (**D15**) |
+| Anthropic | **explicit** — the adapter places `cache_control` ephemeral (5-minute) breakpoints: one on the last system block (render order tools → system → messages, so one entry covers the whole fixed floor) and a rolling one on the last content block of the final message, plus at most one intermediate breakpoint when a turn exceeds the 20-block lookback. Never more than 3 of the provider's 4 breakpoints; never on thinking blocks; annotation is non-destructive | wire `usage.input_tokens` **excludes** cached tokens, so `cache_read_input_tokens` + `cache_creation_input_tokens` are folded back in; `output_tokens` already includes thinking; no reasoning-token figure is reported |
+| OpenAI | **automatic** — nothing is requested | `prompt_tokens` already **includes** cached tokens (passed through); `prompt_tokens_details.cached_tokens` → `cache_read_tokens`, 0 when absent; no write premium, so `cache_write_tokens` is always 0; `completion_tokens` already includes reasoning, `completion_tokens_details.reasoning_tokens` is the informational subset |
+| Google | **automatic (implicit)** — nothing is requested | `promptTokenCount` already **includes** cached tokens (passed through); `cachedContentTokenCount` → `cache_read_tokens`; `cache_write_tokens` always 0; thoughts are reported **outside** the candidate count and are folded into `output_tokens`, with `thoughts_token_count` as `reasoning_tokens`; `reasoning_effort` has no native equivalent and is not sent |
 
-Engineering semantics fixed alongside: cost basis (**D16**), context guard
-(**D17**), parallel-call serialization (**D18**), tool-result cap (**D19**).
+`cache_control` is request metadata: the prompt bytes sent to the model
+are byte-identical with or without it, and nothing about caching reaches
+the agent (I1). Prices are manifest-pinned list prices (D3); their
+correctness against provider invoices is operator-owned.
+
+### D3. Manifest fields consumed
+
+The manifest is **owned by the operator side**; the scaffold copies it
+verbatim into `run/config.yaml` and reads exactly these keys. There is
+no scaffold-side manifest schema — an unknown key under `caps:` raises
+at construction, everything else is silently ignored.
+
+| key | consumed by |
+|---|---|
+| `run_id` | every telemetry record |
+| `provider` (`anthropic`\|`openai`\|`google`), `model` | adapter selection, `llm_call.model` |
+| `price_table.{input,output}_usd_per_mtok` | P7.2 (required) |
+| `price_table.cache_{read,write}_usd_per_mtok` | P7.2 (optional; absent → input rate) |
+| `params.{max_tokens,temperature,reasoning_effort}` | sampling; each sent only where the provider accepts it |
+| `caps.session_token_cap` | P5 (**required**, no default — sized per model) |
+| `caps.{session_tool_cap,max_consecutive_errors,retry_max_attempts,tool_timeout_s,tool_result_max_bytes}` | P2, P5, P8 |
+| `caps.{repetition_identical_cap,repetition_window,repetition_min_distinct,repetition_same_tool_error_cap}` | P5.1 |
+| `budget_usd`, `t_max_days` | P7.3 |
+| `wake.{min_minutes,max_minutes,default_minutes}` | P6 |
+| `workspace_quota_bytes` | P11 |
+| `lock_stale_s` | P4 |
+| `chain_rpc_url` | `init` connectivity check only |
+| `harness.{command,args,cwd,env,handshake_timeout_s}` | D1 |
+| `pins.{agent_sha,harness_sha,gdd_sha}` | `run_start` provenance only — recorded, never verified |
+
+Not manifest-driven despite being run parameters: **`poll_cadence`**
+(an argument to the supervisor's cron installer, default 5 min) and
+**`budget_visible`** (X10).
+
+### D4. Periodic invoker
+
+The scaffold assumes only that `run-session` is invoked repeatedly; it
+holds no daemon state between invocations. `supervisor.install_cron` /
+`uninstall_cron` manage a tagged crontab line at `poll_cadence`, and
+`run_complete` removes it — any equivalent scheduler satisfies the
+contract. Wake resolution equals the invoker's cadence (P6). The runner
+must behave identically under a cron-like environment — minimal `PATH`,
+explicit `HOME`, non-interactive shell — which is what I9 asserts.
+
+### D5. Bundled documentation snapshot
+
+`run/reference/` is populated outside the scaffold — by packaging, at
+the pinned `gdd_sha` — and is read-only by construction (P11). `init`
+warns rather than fails when it is absent, so a dev run without it is
+possible; a run without it silently deprives the agent of its only
+documentation.
+
+### D6. Host filesystem
+
+Durability of telemetry (I6) assumes `flush` + `fsync` semantics and an
+atomic `os.replace` for the state cache. Keys are read from a run-dir
+`.env` (existing environment wins) and never enter the manifest, the
+config copy, transcripts, or telemetry.
+
+---
+
+## Invariants
+
+| # | claim | enforcement |
+|---|---|---|
+| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — system prompt, tool descriptions, tool results, error messages, or `get_status` | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all three frozen strings), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`; tri-provider smoke re-scans every agent-visible string of a real session |
+| I2 | Budget and t_max are checked **only** at session boundaries; no in-flight session is ever terminated for either | single `boundary_check` call site in `runner.run_session`; `tests/unit/test_governor.py` (budget, t_max, precedence, overspend), `tests/unit/test_runner.py::test_budget_boundary_completes_run`, `::test_t_max_boundary` |
+| I3 | Zero strategy content in the scaffold or the prompts — mechanics only | `tests/unit/test_prompts.py::test_frozen_strings_are_exactly_as_reviewed` (byte-exact; any reword must be re-frozen in the same commit) + the I1 scans + review discipline on every agent-visible string |
+| I4 | Forced endings are silent: no warning message, no final model call, no tool result, no `tool_call` event for the carried wake | `tests/unit/test_loop.py::test_context_guard_trips_post_call_and_is_silent`, `tests/unit/test_repetition.py::test_trip_is_silent_and_ends_like_tool_cap`, the carried-wake suite (`test_token_cap_carries_final_turn_wake_intent` … `test_cap_without_wake_intent_carries_nothing`) |
+| I5 | Frozen strings and code defaults cannot silently diverge (wake bounds), and the packaged copies match the repo copies byte-for-byte (prompts and telemetry schema) | `tests/unit/test_prompts.py::test_wake_bounds_in_frozen_prompt_match_code_defaults`, `::test_packaged_prompts_match_repo_prompts`, `tests/unit/test_telemetry.py::test_packaged_schema_matches_repo_schema`, `::test_schema_resolves_inside_the_installed_package` |
+| I6 | Telemetry is append-only and crash-consistent: one line per event, validated before write, `write → flush → fsync` before the action it describes is complete; a crash loses at most the event being written | `TelemetryWriter.emit`; `tests/unit/test_telemetry.py::test_append_only_ordering`, `::test_appends_across_writer_instances`, and the rejection suite (`unknown event`, `missing required`, `bad enum`, `wrong type`, `extra field`, `non-UTC ts`) proving invalid events never land |
+| I7 | Telemetry is the source of truth for accounting; `state.json` is a cache rebuilt by folding the stream, and a crashed session is closed exactly once | `tests/unit/test_state.py::test_fold_recomputes_accounting_from_the_stream`, `::test_crashed_session_detected`, `tests/unit/test_runner.py::test_crash_recovery_writes_synthetic_end_and_refolds_accounting`, `::test_crash_recovery_is_idempotent` |
+| I8 | Every stop reason is enumerated and telemetered — the `session_end.reason` enum is closed and each value has a producing path | schema enum + `tests/unit/test_telemetry.py::test_schema_covers_exactly_the_spec_events`, `::test_bad_enum_value_rejected`; producers covered by `test_loop.py` (agent, token_cap, tool_cap, errors), `test_repetition.py` (repetition), `test_runner.py` (crash, harness-abort errors) |
+| I9 | Cron-env parity: a session behaves identically under a cron-like environment and a manual start | the `cron-smoke` CI job — one full `init` + `run-session` under `env -i PATH=/usr/bin:/bin HOME=…`, absolute interpreter path, no provider keys, real exit codes, followed by `tests/cron_smoke/check_telemetry.py` (exactly one `session_start`/`session_end` pair, expected reason, exactly one agent-source `schedule_next`, every event re-validated) |
+| I10 | `input_tokens` is the total prompt count and the cache fields are components of it, never additions; `output_tokens` always includes reasoning tokens | per-adapter tests: `test_anthropic_adapter.py::test_usage_folds_cache_components_into_total_input`, `test_openai_adapter.py::test_cached_prompt_tokens_are_a_component_not_an_addition`, `test_google_adapter.py::test_cached_content_tokens_are_a_component_not_an_addition`, `::test_the_reasoning_token_fold`, `test_governor.py::test_cache_zero_reduces_exactly_to_v0_formula` |
+| I11 | No agent-supplied path escapes `workspace/` or `reference/`, and run-directory internals are unreachable | `tests/unit/test_sandbox.py` — escapes, one-segment stripping, run-dir internals, symlink escape, plus a Hypothesis property test over arbitrary segments |
+| I12 | Parallel intents execute strictly sequentially in the returned order; `end_session` is immediate and later intents are skipped and logged | `tests/unit/test_loop.py::test_batch_executes_in_order_and_skips_after_end_session`, `::test_later_intents_see_earlier_effects`, `::test_end_session_at_cap_is_still_agent` |
+| I13 | The session number is claimed before the first model call, so a crash never reuses one | ordering in `runner.run_session` (persist, then run) + `tests/unit/test_runner.py::test_crash_recovery_writes_synthetic_end_and_refolds_accounting` |
+| I14 | At most one session per run directory at a time; a crashed session never deadlocks the run | `tests/unit/test_supervisor.py` (live lock respected, dead PID / age-stale / corrupt lock broken), `tests/unit/test_runner.py::test_lock_held_exits_without_touching_anything`, `::test_stale_lock_is_broken_and_run_proceeds` |
+| I15 | Exactly one `schedule_next` per session, on every ending path | `emit_schedule` on all runner paths; `tests/unit/test_runner.py::test_default_schedule_when_agent_never_calls_set_next_wake`, `::test_harness_failure_aborts_with_zero_model_calls`, `::test_normal_session_emits_no_carried_fields`, cron-smoke assertion |
+| I16 | Every tool result entering context is capped with an explicit marker, and the cap is recorded | `tests/unit/test_truncation.py` (marker, multibyte boundary, default), `tests/unit/test_loop.py::test_big_read_truncated_with_reread_hint` |
+| I17 | Provider reasoning state is opaque, same-session, same-adapter, and never reaches telemetry | `tests/unit/test_provider_state.py` (capture, verbatim replay, foreign-state ignore per adapter, `test_loop_copies_state_verbatim_without_inspecting`, `test_transcript_records_state_as_sent`) |
+| I18 | The tool surface presented to the model is deterministic and collision-free | `tests/unit/test_loop.py::test_harness_scaffold_name_collision_rejected`, `tests/unit/test_harness_client.py::test_tools_hash_is_deterministic_and_sensitive` |
+| I19 | Tool schemas stay inside the subset all three providers accept | `tests/unit/test_scaffold_tools.py::test_tool_defs_cover_spec_surface` (no `oneOf`/`anyOf`/`allOf`) + the tri-provider tier parsing every call natively |
+| I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress | the scaffold tool list is exactly the seven of P10 (`test_tool_defs_cover_spec_surface`); network-level closure is operator-owned (see *Unowned*, README) |
+
+---
+
+## Deliberate deviations
+
+Accepted by design. Each is a behavior a future rework might mistake for
+a bug; changing one is a spec change, not a fix.
+
+- **X1 — The repetition breaker clips some legitimate single-call
+  loops.** Five consecutive identical signatures end the session even
+  when the repetition is productive (polling one value until it
+  changes). Accepted: consecutive-not-cumulative counting leaves
+  observed productive re-read behavior (max 4) one call of margin, the
+  agent loses nothing but the remainder of a session, and `workspace/`
+  survives.
+- **X2 — `window_diversity` can clip a legitimate low-diversity
+  stretch.** A long run of work that normalizes to ≤4 distinct
+  signatures over 30 executed calls trips the rule. Accepted for the
+  same reason; it is the only catch for rotating poll cycles that
+  consecutive counting misses.
+- **X3 — Carried wake is deliberately asymmetric.** Exactly one
+  cap-skipped `set_next_wake` is executed at teardown, while every other
+  skipped intent is discarded forever. Without it, every cap-truncated
+  session would fall back to `wake_default` and bias pacing
+  measurement. It executes invisibly (no tool result, no `tool_call`
+  event) to preserve I4.
+- **X4 — Carried wake does not apply to `errors` endings, nor to
+  intents skipped by `end_session`.** An erroring session has no
+  trustworthy final turn, and an `end_session` batch already expressed
+  the agent's intent to stop.
+- **X5 — An invalid carried wake is discarded silently.** A previously
+  executed wake stands, else `wake_default`; the discard is recorded as
+  `carried_invalid`. No error is surfaced anywhere the agent can see.
+- **X6 — The budget is a soft cap.** Overshoot up to one session's cost
+  is expected and recorded as `overspend_usd`; the exact spend line is
+  drawn post hoc from per-call `cumulative_usd`.
+- **X7 — The context guard is post-call.** A full turn can land beyond
+  `session_token_cap` before the check; the cap must be sized with
+  single-turn headroom (D1).
+- **X8 — Failed and empty model attempts are emitted as `llm_call`
+  events at cost 0** and counted in `session_end.llm_calls`. Analysis
+  must filter `usage_unknown` / `empty_response` to count billable
+  calls; the alternative (dropping them) would hide retry storms.
+- **X9 — Skipped intents emit `tool_call` events and count toward
+  `session_end.tool_calls`, but never toward `session_tool_cap` or the
+  repetition breaker.** Only executed calls consume caps.
+- **X10 — `budget_visible` exists as a constructor flag on the scaffold
+  tools, pinned false, and is deliberately not manifest-wired.** It is
+  mechanism kept alive for a future budget-visible configuration;
+  reaching it requires a code change, which is the intended friction.
+- **X11 — The harness child is spawned before `session_start` is
+  emitted**, inverting a naive reading of the lifecycle, because
+  `session_start` carries `tools_hash`. The hard ordering constraint
+  (P1.7 before any model call) is preserved.
+- **X12 — Recovery is deferred to the next *due* session.** The wake
+  gate runs before recovery, so a crashed session's synthetic
+  `session_end` is written when the run next comes due, not at the next
+  poll.
+- **X13 — `stop_reason: "error"` is telemetry-only.** It has no
+  `AdapterResponse` counterpart and marks failed attempts on the retry
+  path.
+- **X14 — One consecutive-error counter covers both tool failures and
+  tool-less turns**, and at the cap the session ends *without* sending
+  the continuation string.
+- **X15 — Unknown tool names are attributed `source: "scaffold"`** in
+  telemetry, because the scaffold layer is what rejects them.
+- **X16 — `init` warns rather than fails when `reference/` is absent**,
+  so dev runs work; a production bring-up without it is an operator
+  error the scaffold will not catch.
+
+---
+
+## Non-goals
+
+- **N1** Multi-model roles (executor/optimizer splits).
+- **N2** Knowledge packs or calibrated strategy priors of any kind.
+- **N3** Mid-session compaction or context summarization. Cross-session
+  memory exists only as agent-written `workspace/` files.
+- **N4** Self-funding or economic self-sustainability.
+- **N5** Long-TTL or cross-session prompt caching, and explicit cache
+  APIs on OpenAI/Gemini — their automatic caching is measured, not
+  managed.
+- **N6** Web access, shell access, or any non-harness network channel
+  from the agent loop.
+- **N7** Any UI.
+- **N8** Mid-session budget enforcement (X6), and any agent-visible
+  budget channel while `budget_visible` is pinned false.
+- **N9** Reordering, deduplicating, or dependency-analyzing parallel
+  tool intents; retrying reverted transactions on the agent's behalf.
+- **N10** Runtime refusal on harness surface drift (D1) — detection is
+  analytical and CI-side.
+
+---
+
+## Changelog
+
+| version | describes | change |
+|---|---|---|
+| 1.6 | v0.2.0 (18f75d04) | Converged to a contract registry: Provides / Depends / Invariants / Deliberate deviations / Non-goals / Changelog, every claim verified against the code and paired with its enforcement. Newly stated as contract: the `run.lock` and transcript layout, the closed run-session outcome set, executed-vs-emitted tool-call accounting, `stop_reason: "error"`, the telemetry schema version as a downstream contract, the recorded-not-negotiated harness identity, per-provider caching modes and what accounting assumes of each, the consumed manifest key list, and the sixteen accepted deviations. Narrative, packaging, and CI-tier prose moved to `README.md` / `docs/packaging.md`. |
+| 1.5 | — | Repetition breaker as a third forced-ending class; carried execution of a cap-skipped final-turn `set_next_wake`; three system-prompt additions (no human reads the text, no in-session waiting, gas is spent on reverts); workspace-root-relative file paths; empty-response retry semantics; consecutive (not cumulative) identical-call counting. |
+| 1.4 | — | Cache-aware token accounting: provider-side prompt-cache usage measured on all three providers, Anthropic caching explicitly requested via `cache_control` request metadata, `cost_usd` cache-aware, price table extended with cache-rate columns. Prompt bytes and agent-visible channels unchanged. |
+| 1.3 | — | `init` performs validation and connectivity checks only; no key path through it — operator-wallet creation became an in-run harness tool. |
+| 1.2 | — | Opaque provider reasoning state on assistant messages, adapter-owned and same-session. |
+| 1.1 | — | CI split into a per-PR recorded-surface gate and a scheduled live-harness tier. |
+| 1.0 | — | First implementable specification: budget invisible to the agent, silent forced endings with boundary-checked soft budget, bundled read-only documentation snapshot, no constraint on agent interaction, plus the engineering semantics for cost basis, context guard, parallel-call serialization, and the tool-result cap. |
