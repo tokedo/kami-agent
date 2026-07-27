@@ -84,7 +84,7 @@ def test_init_creates_run_layout_and_run_start(tmp_path, manifest_path, capsys):
     assert [e["event"] for e in events] == ["run_start"]
     validate_event(events[0])
     assert events[0]["manifest_hash"] == cli.load_manifest(manifest_path)["_manifest_hash"]
-    assert events[0]["harness_sha"].startswith("1e7c9da")
+    assert events[0]["harness_sha"].startswith("48bd154")
     out = capsys.readouterr().out
     assert "initialized" in out
 
@@ -144,6 +144,61 @@ def test_harness_factory_passes_environment_through(monkeypatch):
     assert captured["env"]["EXTRA"] == "1"
     cli.harness_factory({"harness": {"command": "python3"}})()
     assert captured["env"]["MAINNET_RPC_URL"] == "http://example.test"
+
+
+# --- presentation_mode: manifest → harness child → telemetry --------------------
+
+
+@pytest.fixture
+def recording_client(monkeypatch):
+    captured = {}
+
+    class RecordingClient:
+        def __init__(self, command, args, *, cwd=None, env=None, handshake_timeout_s=60.0):
+            captured["env"] = env
+
+    monkeypatch.setattr(cli, "HarnessClient", RecordingClient)
+    return captured
+
+
+def test_presentation_mode_reaches_the_harness_child(recording_client):
+    cli.harness_factory({"presentation_mode": "envelope", "harness": {"command": "python3"}})()
+    assert recording_client["env"]["PRESENTATION_MODE"] == "envelope"
+
+
+def test_unpinned_presentation_mode_sets_nothing(recording_client):
+    """No mode pinned → the harness applies its own default; we assert none."""
+    cli.harness_factory({"harness": {"command": "python3"}})()
+    assert "PRESENTATION_MODE" not in recording_client["env"]
+
+
+def test_presentation_mode_is_passed_through_unvalidated(recording_client):
+    """A mode the harness loud-fails on must REACH the harness to fail there.
+
+    Rejecting or normalizing it here would convert a misconfigured
+    manifest into a silently different run, which is the failure mode
+    this pass-through exists to prevent.
+    """
+    cli.harness_factory({"presentation_mode": "inline-tags", "harness": {"command": "python3"}})()
+    assert recording_client["env"]["PRESENTATION_MODE"] == "inline-tags"
+    cli.harness_factory({"presentation_mode": "nonsense", "harness": {"command": "python3"}})()
+    assert recording_client["env"]["PRESENTATION_MODE"] == "nonsense"
+
+
+def test_explicit_harness_env_still_wins(recording_client):
+    cli.harness_factory(
+        {
+            "presentation_mode": "envelope",
+            "harness": {"command": "python3", "env": {"PRESENTATION_MODE": "name-free"}},
+        }
+    )()
+    assert recording_client["env"]["PRESENTATION_MODE"] == "name-free"
+
+
+def test_example_manifest_pins_a_presentation_mode(tmp_path):
+    manifest = cli.load_manifest(EXAMPLE)
+    assert manifest["presentation_mode"] == "envelope"
+    assert cli.build_run_config(manifest, tmp_path).presentation_mode == "envelope"
 
 
 class ScriptedAdapter:

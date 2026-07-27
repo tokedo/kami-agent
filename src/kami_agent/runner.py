@@ -72,6 +72,14 @@ class RunConfig:
     wake_default_minutes: float = 60.0
     workspace_quota_bytes: int = 10 * 1024 * 1024
     lock_stale_s: float = 7200.0
+    # The harness presentation mode this run pins, recorded on every
+    # session_start so analysis can key on it without reading the config
+    # copy (SPEC D1). The scaffold passes the manifest value through and
+    # validates nothing: an unsupported mode must fail at the harness,
+    # loudly, not be normalized here. None = the manifest pinned no mode
+    # and the harness applied its own default, which is recorded as
+    # absence rather than guessed at.
+    presentation_mode: str | None = None
 
 
 def run_session(
@@ -201,14 +209,15 @@ def _run_one_session(
         elapsed = 0.0
         if state.first_session_at is not None:
             elapsed = (clock() - datetime.fromisoformat(state.first_session_at)).total_seconds()
-        return writer.emit(
-            "session_start",
-            session=session,
-            trigger=trigger,
-            budget_remaining_usd=config.budget_usd - state.cumulative_usd,
-            wallclock_elapsed_s=elapsed,
-            tools_hash=hash_value,
-        )
+        fields: dict[str, Any] = {
+            "trigger": trigger,
+            "budget_remaining_usd": config.budget_usd - state.cumulative_usd,
+            "wallclock_elapsed_s": elapsed,
+            "tools_hash": hash_value,
+        }
+        if config.presentation_mode is not None:
+            fields["presentation_mode"] = config.presentation_mode
+        return writer.emit("session_start", session=session, **fields)
 
     def emit_schedule(scaffold_tools: ScaffoldTools, carried_wake: str | None = None) -> None:
         # 9. Emitted every session, including the wake_default case (I15).

@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -61,7 +61,14 @@
         "trigger": { "enum": ["scheduled", "manual"] },
         "budget_remaining_usd": { "type": "number" },
         "wallclock_elapsed_s": { "type": "number", "minimum": 0 },
-        "tools_hash": { "type": "string" }
+        "tools_hash": {
+          "type": "string",
+          "description": "The SCAFFOLD's sha256:-prefixed fingerprint of the surface presented to the model (harness tools + scaffold tools). The harness publishes its own bare-hex hash of its own registry over a different serialization; the two values are different by construction and must never be equated (SPEC D1)"
+        },
+        "presentation_mode": {
+          "type": "string",
+          "description": "The harness presentation mode this run pinned in the manifest, passed to the harness child unvalidated (SPEC D1). Absent when the manifest pinned no mode, in which case the harness applied its own default — absence is recorded rather than guessed at. Not constrained to an enum here: the set of modes is the harness's to define, and an unsupported one fails at the harness rather than being normalized by the scaffold"
+        }
       },
       "required": ["trigger", "budget_remaining_usd", "wallclock_elapsed_s", "tools_hash"],
       "unevaluatedProperties": false
@@ -142,15 +149,31 @@
           "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC P9)"
         },
         "duration_ms": { "type": "number", "minimum": 0 },
-        "ok": { "type": "boolean" },
-        "error": { "type": "string" },
+        "ok": {
+          "type": "boolean",
+          "description": "Exception-keyed, agent-side: false when the call raised into the loop (unknown tool, schema violation, timeout, or a harness error result), true otherwise. Against a harness that RETURNS confirmed reverts in-band, ok=true does not imply the transaction succeeded; against one that RAISES them (SPEC D1), a reverted transaction is ok=false and ok=true regains its plain meaning for a submitted transaction. Which behavior applied is a property of the harness pinned for the run, so ok must be read together with tx_terminal_state and never alone"
+        },
+        "error": {
+          "type": "string",
+          "description": "The failure message exactly as produced by the tool, uncapped and unedited (the model receives the same text, subject only to the tool_result byte cap). Never parse it for outcome classification — use tx_terminal_state"
+        },
         "truncated": { "type": "boolean" },
         "original_bytes": { "type": "integer", "minimum": 0 },
         "skipped": {
           "type": "boolean",
           "description": "True for intents skipped because end_session took effect earlier in the same batch (SPEC I12)"
         },
-        "tx_hash": { "type": "string" }
+        "tx_hash": { "type": "string" },
+        "tx_terminal_state": {
+          "enum": [
+            "confirmed_success",
+            "reverted",
+            "unconfirmed",
+            "validation_rejected",
+            "batch_error"
+          ],
+          "description": "The transaction outcome the harness reported, classified once at ingestion so analysis never string-matches harness prose (SPEC D1). confirmed_success: receipt confirmed (ok=true). reverted: included on-chain and reverted — gas spent, final (ok=false). unconfirmed: broadcast, no receipt within the harness timeout — outcome UNKNOWN, may still land (ok=false). validation_rejected: a precondition failed before signing, nothing broadcast, no gas spent (ok=false). batch_error: a multi-transaction call with at least one failed item, whose message itemizes per-item outcomes that may mix the states above (ok=false). ABSENT whenever the call was not a single transaction outcome: every read, every scaffold tool, every non-transaction error, an allow_partial batch that returned mixed per-item results in band, and a pre-send dry-run skip. Absence therefore means 'not classifiable as one terminal state', never 'succeeded'"
+        }
       },
       "required": ["tool", "source", "duration_ms", "ok"],
       "unevaluatedProperties": false

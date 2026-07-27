@@ -40,6 +40,13 @@ wake: # must match the bounds frozen into prompts/system.txt
 
 chain_rpc_url: https://jsonrpc-yominet-1.anvil.asia-southeast.initia.xyz
 
+# Harness presentation mode, passed through to the child as
+# PRESENTATION_MODE and recorded on every session_start. Passed through
+# unvalidated on purpose: a mode the pinned harness does not implement
+# must abort the handshake at `init`, loudly, rather than be normalized
+# here into a silently different run.
+presentation_mode: envelope
+
 harness: # spawned per session as a stdio child (SPEC D1)
   command: python3
   args: [executor/server.py]
@@ -48,5 +55,5 @@ harness: # spawned per session as a stdio child (SPEC D1)
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: 1e7c9dad48efad567fa082617a6b48e2452b4ff0
+  harness_sha: 48bd154f1181b5d8157f06e4c3dec979944c937e
   gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # repo cleanup only; game content byte-identical to c2c5a1b

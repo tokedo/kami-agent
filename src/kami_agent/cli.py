@@ -103,6 +103,7 @@ def build_run_config(manifest: dict[str, Any], run_dir: Path) -> RunConfig:
         wake_default_minutes=wake.get("default_minutes", 60.0),
         workspace_quota_bytes=manifest.get("workspace_quota_bytes", 10 * 1024 * 1024),
         lock_stale_s=manifest.get("lock_stale_s", 7200.0),
+        presentation_mode=manifest.get("presentation_mode"),
     )
 
 
@@ -123,6 +124,18 @@ def harness_factory(manifest: dict[str, Any]):
     if not harness:
         return None
 
+    # The harness selects its presentation mode from PRESENTATION_MODE in
+    # its own environment, read once at server import. The manifest value
+    # is passed through UNVALIDATED and UNCAUGHT: a mode the harness does
+    # not implement must abort the handshake loudly at bring-up, which is
+    # what `init`'s connectivity check surfaces. Normalizing or defaulting
+    # it here would turn a misconfigured manifest into a silently
+    # different run. An explicit harness.env entry still wins.
+    child_env: dict[str, str] = {}
+    mode = manifest.get("presentation_mode")
+    if mode is not None:
+        child_env["PRESENTATION_MODE"] = str(mode)
+
     def factory() -> HarnessClient:
         # Always pass the scaffold's environment through: the MCP SDK's
         # default child env drops it, and the harness refuses to start
@@ -131,7 +144,7 @@ def harness_factory(manifest: dict[str, Any]):
             harness["command"],
             list(harness.get("args", [])),
             cwd=harness.get("cwd"),
-            env={**os.environ, **harness.get("env", {})},
+            env={**os.environ, **child_env, **harness.get("env", {})},
             handshake_timeout_s=harness.get("handshake_timeout_s", 60.0),
         )
 

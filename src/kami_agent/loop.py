@@ -43,6 +43,7 @@ from kami_agent.repetition import (
 )
 from kami_agent.telemetry import TelemetryWriter
 from kami_agent.tools.errors import ToolError
+from kami_agent.tools.receipts import classify_error
 from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS, SCAFFOLD_TOOL_NAMES, ScaffoldTools
 from kami_agent.tools.truncation import cap_tool_result
 
@@ -68,10 +69,16 @@ _BACKOFF_MAX_S = 60.0
 
 @dataclass(frozen=True, slots=True)
 class GameToolResult:
-    """Result of one harness tool execution."""
+    """Result of one harness tool execution.
+
+    ``terminal_state`` is the transaction outcome the harness reported,
+    when the result is one (SPEC D1); None for reads and for anything
+    that is not a single submitted transaction.
+    """
 
     content: str
     tx_hash: str | None = None
+    terminal_state: str | None = None
 
 
 @runtime_checkable
@@ -394,6 +401,7 @@ class AgentLoop:
                 truncated=outcome.get("truncated", False),
                 original_bytes=outcome.get("original_bytes"),
                 tx_hash=outcome.get("tx_hash"),
+                terminal_state=outcome.get("terminal_state"),
             )
             if outcome["ok"]:
                 self._consecutive_errors = 0
@@ -422,7 +430,11 @@ class AgentLoop:
         source = self._source_of(intent.name)
         start = time.perf_counter()
 
-        def failure(message: str) -> dict[str, Any]:
+        def failure(message: str, *, from_harness: bool = False) -> dict[str, Any]:
+            # The message reaches the model exactly as produced (P2): the
+            # only transformation is the byte cap every result gets. The
+            # harness's transaction-outcome classification is recorded
+            # alongside it for telemetry, never folded into the content.
             capped = cap_tool_result(message, self._caps.tool_result_max_bytes)
             return {
                 "content": capped.content,
@@ -432,6 +444,7 @@ class AgentLoop:
                 "duration_ms": (time.perf_counter() - start) * 1000,
                 "truncated": capped.truncated,
                 "original_bytes": capped.original_bytes if capped.truncated else None,
+                "terminal_state": classify_error(message) if from_harness else None,
                 "error_or_revert": True,
             }
 
@@ -449,11 +462,13 @@ class AgentLoop:
         except _ToolTimeout:
             return failure(f"tool call timed out after {self._caps.tool_timeout_s:g} seconds")
         except ToolError as exc:
-            return failure(str(exc))
+            # A harness ToolError may be a raised transaction outcome
+            # (SPEC D1); a scaffold one never is.
+            return failure(str(exc), from_harness=source == "harness")
         except Exception as exc:  # harness/executor failure (P2)
             return failure(f"tool execution failed: {exc}")
 
-        content, tx_hash = raw
+        content, tx_hash, terminal_state = raw
         # Slice-hint only where re-readable via workspace_read (I16).
         reread_path = intent.args.get("path") if intent.name == "workspace_read" else None
         capped = cap_tool_result(
@@ -469,20 +484,21 @@ class AgentLoop:
             "truncated": capped.truncated,
             "original_bytes": capped.original_bytes if capped.truncated else None,
             "tx_hash": tx_hash,
+            "terminal_state": terminal_state,
             # Classified on the raw (pre-truncation) content: success-shaped
             # harness results can still carry an on-chain revert.
             "error_or_revert": is_error_or_revert(True, content),
         }
 
-    def _run_with_timeout(self, intent: ToolCall) -> tuple[str, str | None]:
+    def _run_with_timeout(self, intent: ToolCall) -> tuple[str, str | None, str | None]:
         """Run one intent in a watchdog thread (tool_timeout_s, P2)."""
 
-        def dispatch() -> tuple[str, str | None]:
+        def dispatch() -> tuple[str, str | None, str | None]:
             if intent.name in SCAFFOLD_TOOL_NAMES:
-                return self._scaffold.execute(intent.name, intent.args), None
+                return self._scaffold.execute(intent.name, intent.args), None, None
             assert self._game is not None  # _source_of guarantees this
             result = self._game.execute(intent.name, intent.args)
-            return result.content, result.tx_hash
+            return result.content, result.tx_hash, result.terminal_state
 
         box: list[tuple[str, Any]] = []
 
@@ -521,6 +537,7 @@ class AgentLoop:
         truncated: bool = False,
         original_bytes: int | None = None,
         tx_hash: str | None = None,
+        terminal_state: str | None = None,
     ) -> None:
         fields: dict[str, Any] = {
             "tool": intent.name,
@@ -541,6 +558,8 @@ class AgentLoop:
             fields["original_bytes"] = original_bytes
         if tx_hash is not None:
             fields["tx_hash"] = tx_hash
+        if terminal_state is not None:
+            fields["tx_terminal_state"] = terminal_state
         self._tool_events += 1
         self._telemetry.emit("tool_call", session=self._session, **fields)
 
