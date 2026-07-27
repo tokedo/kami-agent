@@ -346,9 +346,18 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     # provider cache, per P7.1).
     session_cache_read = sum(e.get("cache_read_tokens", 0) for e in ok_llm)
     session_cache_write = sum(e.get("cache_write_tokens", 0) for e in ok_llm)
+    # The floor is only interpretable alongside what produced it: the exact
+    # surface the model was shown and the exact size of the fixed prefix.
+    # Quoting a floor without them is how two tiers end up disagreeing with
+    # no way to tell whether the surface or the prompt moved.
+    system_chars = len(
+        (run_dir / "prompts" / "system.txt").read_text(encoding="utf-8").rstrip("\n")
+    ) + len(_file_index(run_dir))
     print(
         f"\nSMOKE[{provider}] model={model} "
         f"fixed_floor_input_tokens={ok_llm[0]['input_tokens']} "
+        f"surface_hash={tools_hash(list(harness.tool_defs))} "
+        f"system_chars={system_chars} kickoff_chars={len(KICKOFF)} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
         f"session_tokens={session_end['session_tokens']} "
         f"session_cache_read={session_cache_read} "
@@ -357,6 +366,13 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
         f"tools={len(list(harness.tool_defs))} "
         f"executed={executed}"
     )
+
+
+def _file_index(run_dir):
+    """The file-index half of the system prompt, as the runner builds it."""
+    from kami_agent.tools.scaffold import ScaffoldTools
+
+    return ScaffoldTools(run_dir, session_number=1).workspace_list()
 
 
 def test_recorded_surface_matches_hash():
@@ -369,3 +385,48 @@ def test_recorded_surface_matches_hash():
         for t in surface["tools"]
     ]
     assert tools_hash(defs) == surface["tools_hash"]
+
+
+def test_recorded_surface_matches_the_live_harness():
+    """The fixture must be what a live harness at the pinned SHA actually serves.
+
+    Internal consistency (above) only proves the fixture was not edited by
+    hand. This proves it is not stale: the recorded-surface tier reports
+    the context floor every manifest is sized against, and a fixture that
+    has drifted from the live surface makes that floor quietly wrong.
+    Only meaningful against a real child, so it skips elsewhere.
+    """
+    if os.environ.get("KAMI_SMOKE_HARNESS") != "real":
+        pytest.skip("live-harness tier only (KAMI_SMOKE_HARNESS=real)")
+    if not FIXTURE.exists():
+        pytest.skip("recorded harness tool surface fixture missing")
+    recorded = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    # The surface is sensitive to the harness's Python minor version:
+    # descriptions come from docstrings, and CPython 3.13 strips their
+    # leading indentation at compile time where 3.12 keeps it. Comparing
+    # across versions would report drift that is really a mismatched
+    # interpreter, so the fixture records what it was captured under.
+    assert recorded["harness"]["recorded_under_python"] == "3.13", (
+        "fixture recorded under an unexpected Python; the packaged image is "
+        "python:3.13-slim and the surface must be captured to match it"
+    )
+    harness = make_harness()
+    try:
+        live = list(harness.tool_defs)
+    finally:
+        harness.close()
+    live_names = [t.name for t in live]
+    recorded_names = [t["name"] for t in recorded["tools"]]
+    assert live_names == recorded_names, (
+        f"added={sorted(set(live_names) - set(recorded_names))} "
+        f"removed={sorted(set(recorded_names) - set(live_names))}"
+    )
+    by_name = {t["name"]: t for t in recorded["tools"]}
+    drifted = [
+        t.name
+        for t in live
+        if t.description != by_name[t.name]["description"]
+        or t.input_schema != by_name[t.name]["input_schema"]
+    ]
+    assert not drifted, f"description/schema drift in: {drifted}"
+    assert tools_hash(live) == recorded["tools_hash"]

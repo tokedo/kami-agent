@@ -37,7 +37,17 @@ jobs:
       - run: uv sync --locked
       - name: Install harness dependencies
         run: |
-          uv venv kami-harness/.venv-smoke
+          # --python 3.13 is load-bearing, not tidiness. The harness's
+          # agent-visible tool descriptions come from docstrings, and
+          # CPython 3.13 strips their common leading indentation at
+          # compile time while 3.12 retains it. Running the harness on
+          # 3.12 therefore serves the SAME tools with ~3.2k more
+          # description characters, a different tools_hash, and a context
+          # floor ~420 tokens higher on Anthropic — a surface production
+          # never serves, since the image is python:3.13-slim. The runner
+          # default (/usr/bin/python3, currently 3.12) silently measured
+          # that surface until the fixture-fidelity assertion caught it.
+          uv venv --python 3.13 kami-harness/.venv-smoke
           uv pip install -r kami-harness/executor/requirements.txt \
             -p kami-harness/.venv-smoke/bin/python
       - name: Minimal harness config (roster template; no keys)
