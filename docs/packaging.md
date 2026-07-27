@@ -48,3 +48,13 @@ firewall allows outbound traffic ONLY to:
 Everything else — including the other two providers — is denied. DNS for
 the allowlisted hosts is permitted; nothing agent-visible discloses the
 allowlist (SPEC I1).
+
+Not egress but the same class of bring-up obligation: the harness's
+world-state reads are served by a **local kami-lens daemon over a unix
+socket**, and every session now opens with one of them — the
+session-start brief (SPEC P1.12). A deployment where that daemon is not
+running still works, by design: the brief degrades to the daemon's own
+unavailability error, injected as-is, and the session proceeds (X21). It
+is visible rather than silent — `tool_call` with `initiator: "scaffold"`
+and `ok: false` on the first event of every session — so check that
+field before concluding a run is healthy.

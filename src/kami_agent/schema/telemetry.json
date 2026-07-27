@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -144,6 +144,10 @@
         "event": { "const": "tool_call" },
         "tool": { "type": "string" },
         "source": { "enum": ["harness", "scaffold"] },
+        "initiator": {
+          "enum": ["model", "scaffold"],
+          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — currently only the once-per-session status brief (SPEC P1.12), issued before the first model call and injected as a normal tool result. Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
+        },
         "path": {
           "type": "string",
           "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC P9)"

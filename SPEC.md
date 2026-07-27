@@ -1,7 +1,7 @@
 ---
 module: kami-agent
-version: 1.7
-describes: v0.3.0
+version: 1.8
+describes: v0.3.2
 ---
 
 # kami-agent — Contract Registry
@@ -57,10 +57,50 @@ Ordered steps, as implemented:
     one `N files, N bytes, read-only` line).
 11. **Kickoff**: the first user message is the frozen constant
     `prompts/kickoff.txt`. No dynamic content, no digits.
-12. **Agent loop** (P2) until a stop reason (P5).
-13. **Persist**: `session_end`, transcript file, state cache.
-14. **Schedule** (P6): exactly one `schedule_next`.
-15. **Release lock** → `session_ran`.
+12. **Session-start brief** (P1.12, below): one harness party-report call
+    for the account's own operator, injected as a normal tool result.
+13. **Agent loop** (P2) until a stop reason (P5).
+14. **Persist**: `session_end`, transcript file, state cache.
+15. **Schedule** (P6): exactly one `schedule_next`.
+16. **Release lock** → `session_ran`.
+
+#### P1.12 Session-start status brief
+
+Before the first model call — the same point at which the file index is
+built into the system prompt (P1.10) — the scaffold calls the pinned
+harness's **general any-operator party-report tool** once, for the
+account's own operator, and injects the result into the session context.
+
+- **The tool is `lens_party`** on the pinned surface (D1). Chosen because
+  one call covers the whole contract in one result: every kami the
+  account owns, each with its on-chain `state` and its calculated vitals
+  — `hp` (current/total/percent), `hpRatePerHr` (from which projected HP
+  follows), `cooldownSec`, and accrual. It is the general tool, not a
+  brief-specific entry point: `account_index` selects any account, and
+  the brief passes the tool's own sentinel for "the operator this harness
+  runs as" (`-1`) explicitly rather than relying on its default.
+- **No special path.** The same tool stays available for the agent to
+  call itself, for any account, unchanged. Both invocations execute
+  through one code path and are telemetered identically; only
+  `tool_call.initiator` separates them (P9).
+- **Injected as a normal tool result**: an assistant turn carrying the
+  call, then its result — the shape the model would have seen had it made
+  the call itself. The result is passed through **verbatim**: envelope
+  untouched, nothing summarized, reordered, filtered, or annotated. The
+  P2 byte cap is the only transformation, as it is for every tool result.
+- **Degrade visibly, never block** (X21). Exactly one attempt. A failure
+  is injected as the error result it is and the session continues; there
+  is no retry, no fallback content, and no abort. The failure is data.
+- The brief consumes no `session_tool_cap`, never advances the
+  consecutive-error counter, and never feeds the repetition breaker
+  (X20). It emits a `tool_call` event and so counts in
+  `session_end.tool_calls`.
+- It is **skipped entirely** when the loaded surface does not carry the
+  tool, leaving no telemetry — an absent tool is already visible in
+  `run_start.harness_tools` and in `tools_hash`.
+- The brief sits in call-1 context, so it is part of the fixed floor D1's
+  cap arithmetic is sized against, and its size is linear in the
+  account's roster size. The smoke tier reports both numbers together.
 
 ### P2. Agent loop
 
@@ -73,6 +113,10 @@ Ordered steps, as implemented:
   the scaffold layer.
 - Each executed intent appends one `tool_result` message and emits one
   `tool_call` event.
+- The session opens on the kickoff message followed by the session-start
+  brief's call/result pair (P1.12); from there the alternation is the
+  agent's. Error counting, the tool cap, and the repetition breaker all
+  count agent-executed intents only.
 - `end_session` takes effect immediately: every later intent in the same
   batch is skipped, emitted as `tool_call` with `ok=false, skipped=true`,
   and produces no tool-result message.
@@ -273,7 +317,7 @@ class ModelAdapter(Protocol):
 
 `run/telemetry.jsonl`, one JSON object per line, append-only. Machine
 contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
-`version: 0.3.0`, shipped inside the wheel as package data and kept
+`version: 0.3.1`, shipped inside the wheel as package data and kept
 byte-identical to the repo copy. Every event is validated **before** it
 is written; an invalid event raises and never lands. Unknown fields are
 rejected (`unevaluatedProperties: false`), so additive changes require a
@@ -287,7 +331,7 @@ enforced), `run_id`, `session`, `event`.
 | `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
 | `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `presentation_mode` |
 | `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response` |
-| `tool_call` | `tool`, `source` (`harness`\|`scaffold`), `duration_ms`, `ok` | `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state` |
+| `tool_call` | `tool`, `source` (`harness`\|`scaffold`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state` |
 | `workspace_write` | `path`, `bytes`, `workspace_total_bytes` | — |
 | `workspace_delete` | `path`, `workspace_total_bytes` | — |
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
@@ -311,6 +355,17 @@ Reader notes (stable semantics):
   for a submitted transaction. Since which holds is a property of the
   pinned harness, `ok` must be read together with `tx_terminal_state`
   and never alone.
+- `tool_call.initiator` names **who asked for the call**, which `source`
+  does not: `source` names the layer that owns the tool, `initiator`
+  names the layer that wanted it run. `model` is every intent the agent
+  returned; `scaffold` is only the session-start brief (P1.12) — a
+  `harness`-source call with a `scaffold` initiator. **Any measure of
+  agent behavior must exclude scaffold-initiated calls**: they are reads
+  the agent did not choose, and they consume none of the caps that bound
+  what it does. The field is optional in the schema so streams written
+  under 0.3.0 and earlier still validate; from 0.3.1 on it is emitted on
+  every `tool_call`, so its absence in a 0.3.1+ stream is a defect, not a
+  default.
 - `tool_call.tx_terminal_state` names the transaction outcome the
   harness reported — `confirmed_success` | `reverted` | `unconfirmed` |
   `validation_rejected` | `batch_error` — classified once at ingestion
@@ -351,6 +406,11 @@ Game perception and action come exclusively from the harness MCP tools
 (D1), loaded per session. Tool order presented to the model is game
 tools first, scaffold tools second, deterministic so `tools_hash` is
 stable.
+
+The list above is the whole scaffold surface. The session-start brief
+(P1.12) added no entry to it: the brief is a call to a harness tool, so
+the tool surface the model is shown — and with it `tools_hash` — is
+unchanged by its existence.
 
 ### P11. Workspace conventions
 
@@ -472,10 +532,23 @@ suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
   unrecognized message is recorded as no state rather than guessed at.
 - `tx_hash` is extracted best-effort from structured content or JSON
   text, top level or one `result` level down, for telemetry only.
+- **One tool is depended on by name.** The session-start brief (P1.12)
+  calls `lens_party`, the surface's general any-operator party report,
+  for the account's own operator. This is the scaffold's only
+  name-coupling to the harness surface, and it is a soft one: a pin whose
+  surface does not carry the tool simply produces no brief (X20), and one
+  that carries it under changed semantics produces a brief whose content
+  is whatever the harness now returns — recorded, not validated, exactly
+  as every other harness result is.
 - **Cap arithmetic assumption.** Every call re-sends the system prompt,
-  the file index, and the entire tool surface. That fixed floor must
-  leave room for a session to be more than one call: the worst-case
-  first-call floor is assumed **≤ 1/3 of `session_token_cap`**. This is
+  the file index, the entire tool surface, and the session-start brief.
+  That fixed floor must leave room for a session to be more than one
+  call: the worst-case first-call floor is assumed **≤ 1/3 of
+  `session_token_cap`**. The brief makes the floor a function of the
+  account's roster size — it grows linearly in the number of kamis the
+  account owns, and that number grows over a run — so the assumption is
+  no longer a one-off measurement but one that has to be re-checked as
+  the roster grows. This is
   **not enforced anywhere in the scaffold** — it is an operator sizing
   obligation on the manifest. The tri-provider smoke tier reports the
   observed floor (`fixed_floor_input_tokens=…`) for that purpose. A
@@ -589,6 +662,7 @@ config copy, transcripts, or telemetry.
 | I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
 | I22 | The three post-broadcast terminal states plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing), `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
 | I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
+| I24 | The session-start brief is one call to the general party-report tool, executed before the first model call, injected verbatim as a normal tool result, attempted exactly once, and separable in telemetry from what the agent chose — and it bounds nothing the agent does | `tests/unit/test_brief.py` — ordering (`test_brief_is_executed_before_the_first_model_call`), whole-message verbatimness (`::test_brief_result_is_injected_verbatim`), no special path (`::test_brief_is_the_general_tool_and_stays_available_to_the_agent`), provenance (`::test_brief_is_telemetered_like_any_tool_call_and_marked_scaffold_initiated`), cap/counter/breaker exclusion (`::test_brief_consumes_no_session_tool_cap`, `::test_a_failed_brief_does_not_advance_the_consecutive_error_counter`, `::test_brief_never_feeds_the_repetition_breaker`), degradation (`::test_a_failing_brief_is_injected_as_its_error_and_the_session_proceeds`, `::test_a_failing_brief_is_attempted_exactly_once`, `::test_no_brief_when_the_loaded_surface_does_not_carry_the_tool`); end to end through the real CLI in the `cron-smoke` job and natively per provider in the tri-provider tier |
 
 ---
 
@@ -678,6 +752,25 @@ a bug; changing one is a spec change, not a fix.
   producing a wrong label. The recorded-surface CI fixture and the
   copied message text in the fake MCP server are what surface the
   drift.
+- **X20 — the session-start brief consumes no cap and is skipped, not
+  reported, when the tool is absent.** It executes a real harness call
+  yet counts toward neither `session_tool_cap` nor the consecutive-error
+  counter nor the repetition breaker, and a pin whose surface lacks
+  `lens_party` produces no brief and no telemetry at all. Both halves
+  follow from the same reading: those counters exist to bound what the
+  *agent* does, and a read the agent did not choose must not shrink its
+  session or end it. The asymmetry is deliberate — the brief still emits
+  a `tool_call` event and still counts in `session_end.tool_calls`, so
+  nothing is hidden, it is only excluded from the caps.
+- **X21 — a failed brief is injected as its error and the session
+  proceeds.** One attempt, no retry, no fallback content, no abort: the
+  error text the harness produced becomes the first tool result the model
+  sees. The alternatives are worse. Retrying would make the scaffold do
+  for itself what D1 forbids it to do for the agent; substituting
+  placeholder content would put scaffold-authored prose in an
+  agent-visible channel; aborting would let an unavailable read-side
+  daemon end sessions that could still act. A session that opens on a
+  visible failure is a session whose telemetry says so.
 
 ---
 
@@ -707,6 +800,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 1.8 | v0.3.2 | Session-start status brief (P1.12): before the first model call the scaffold calls the pinned surface's general any-operator party report, `lens_party`, for the account's own operator, and injects the result verbatim as a normal tool result — one call covering every owned kami's on-chain state, HP current/total/rate, and cooldown, so orientation is not re-derived from scratch each session. Explicitly not a special path: the same tool stays available to the agent for any account, both invocations share one execution path, and only the new `tool_call.initiator` (`model` \| `scaffold`) separates them (P9). The brief is attempted exactly once and degrades visibly — a failure is injected as the error it is and the session continues (X21) — and it bounds nothing the agent does: no `session_tool_cap`, no error counter, no repetition breaker (X20). No new scaffold tool, so `tools_hash` is unchanged (P10). Telemetry schema 0.3.0 → 0.3.1 (one additive optional field). D1's cap arithmetic restated: the fixed floor now grows linearly with the account's roster size, so it is a standing measurement, not a one-off. |
 | 1.7 | v0.3.0 | Consumption of a harness that **raises** confirmed reverts and unconfirmed transactions instead of returning them: harness error messages are contractually verbatim to the model and dispatched once (I21); the transaction outcome is classified once at ingestion into `tool_call.tx_terminal_state`, a closed five-value enum, so analysis splits validation-rejects / reverts / unconfirmed on a field rather than on prose (I22, X18, X19); `tool_call.ok` restated as exception-keyed and harness-dependent, to be read with the new field and never alone; P5.1's error-or-revert note restated as harness-dependent, with knobs unchanged. Harness `presentation_mode` pinned in the manifest, passed to the child unvalidated, and recorded on every `session_start` (I23, X17). `tools_hash` restated as the scaffold's own fingerprint, different by construction from any hash a harness publishes of its own registry. Telemetry schema 0.2.0 → 0.3.0 (two additive optional fields). |
 | 1.6 | v0.2.0 (18f75d04) | Converged to a contract registry: Provides / Depends / Invariants / Deliberate deviations / Non-goals / Changelog, every claim verified against the code and paired with its enforcement. Newly stated as contract: the `run.lock` and transcript layout, the closed run-session outcome set, executed-vs-emitted tool-call accounting, `stop_reason: "error"`, the telemetry schema version as a downstream contract, the recorded-not-negotiated harness identity, per-provider caching modes and what accounting assumes of each, the consumed manifest key list, and the sixteen accepted deviations. Narrative, packaging, and CI-tier prose moved to `README.md` / `docs/packaging.md`. |
 | 1.5 | — | Repetition breaker as a third forced-ending class; carried execution of a cap-skipped final-turn `set_next_wake`; three system-prompt additions (no human reads the text, no in-session waiting, gas is spent on reverts); workspace-root-relative file paths; empty-response retry semantics; consecutive (not cumulative) identical-call counting. |

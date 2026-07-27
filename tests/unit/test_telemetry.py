@@ -308,7 +308,7 @@ def test_optional_fields_can_be_omitted(writer):
 
 def test_schema_version_is_pinned():
     """Additive changes require a version bump (unevaluatedProperties: false)."""
-    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.3.0"
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.3.1"
 
 
 @pytest.mark.parametrize(
@@ -347,6 +347,44 @@ def test_terminal_state_is_optional(writer):
         "tool_call", session=1, tool="lens_kami", source="harness", duration_ms=1.0, ok=True
     )
     assert "tx_terminal_state" not in record
+
+
+# --- schema 0.3.1 addition: tool_call.initiator (SPEC P9) --------------------
+
+
+@pytest.mark.parametrize("initiator", ["model", "scaffold"])
+def test_both_initiators_are_accepted(writer, initiator):
+    record = writer.emit(
+        "tool_call",
+        session=1,
+        tool="lens_party",
+        source="harness",
+        initiator=initiator,
+        duration_ms=12.0,
+        ok=True,
+    )
+    assert record["initiator"] == initiator
+
+
+def test_invented_initiator_rejected(writer):
+    """The enum is closed: a third initiator must be a schema change."""
+    with pytest.raises(EventValidationError):
+        writer.emit(
+            "tool_call",
+            session=1,
+            tool="lens_party",
+            source="harness",
+            initiator="operator",
+            duration_ms=1.0,
+            ok=True,
+        )
+
+
+def test_initiator_is_optional_so_pre_0_3_1_streams_still_validate(writer):
+    record = writer.emit(
+        "tool_call", session=1, tool="lens_kami", source="harness", duration_ms=1.0, ok=True
+    )
+    assert "initiator" not in record
 
 
 def test_session_start_carries_presentation_mode(writer):
