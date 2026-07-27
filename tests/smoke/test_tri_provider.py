@@ -125,7 +125,17 @@ _STEP_4 = (
     else f'Call {HARNESS_TOOL} with account "{SMOKE_ACCOUNT}".'
 )
 
+# Test-only kickoff (the frozen production one is "Session start."). The
+# first line is load-bearing: the session-start brief puts a completed
+# tool call and its result in context ahead of the model's first turn, and
+# without being told otherwise the cheapest tiers read that as the script
+# having already begun — observed as skipped steps on gpt-4o-mini and as a
+# jump straight to end_session on gemini-2.5-flash. It states a fact about
+# the transcript, not a strategy.
 KICKOFF = f"""\
+A tool call and its result may already appear above. It is not one of the
+steps below; none of the steps below have been done yet.
+
 Complete the following steps in order, one tool call each, then stop.
 1. Call get_status.
 2. Call workspace_list.
