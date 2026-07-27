@@ -401,6 +401,15 @@ def test_recorded_surface_matches_the_live_harness():
     if not FIXTURE.exists():
         pytest.skip("recorded harness tool surface fixture missing")
     recorded = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    # The surface is sensitive to the harness's Python minor version:
+    # descriptions come from docstrings, and CPython 3.13 strips their
+    # leading indentation at compile time where 3.12 keeps it. Comparing
+    # across versions would report drift that is really a mismatched
+    # interpreter, so the fixture records what it was captured under.
+    assert recorded["harness"]["recorded_under_python"] == "3.13", (
+        "fixture recorded under an unexpected Python; the packaged image is "
+        "python:3.13-slim and the surface must be captured to match it"
+    )
     harness = make_harness()
     try:
         live = list(harness.tool_defs)

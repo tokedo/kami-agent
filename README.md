@@ -91,6 +91,16 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    share that convention — when the named tool has to change because the
    pinned surface no longer serves it, the convention delta is measured
    on one surface rather than assumed away.
+
+   The floor also depends on the **Python minor version the harness runs
+   under**, which is why the recorded fixture names its own. Harness tool
+   descriptions are docstrings, and CPython 3.13 strips their common
+   leading indentation at compile time where 3.12 retains it: the same
+   harness commit therefore serves the same 99 tools with materially
+   different description bytes, a different hash, and a different floor.
+   The packaged image (`Dockerfile`) is `python:3.13-slim`, so 3.13 is
+   the reference — every tier that spawns a harness must match it, and
+   the live tier asserts the surface it gets equals the recorded one.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must
