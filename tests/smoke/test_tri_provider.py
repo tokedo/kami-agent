@@ -126,15 +126,19 @@ _STEP_4 = (
 )
 
 # Test-only kickoff (the frozen production one is "Session start."). The
-# first line is load-bearing: the session-start brief puts a completed
-# tool call and its result in context ahead of the model's first turn, and
-# without being told otherwise the cheapest tiers read that as the script
-# having already begun — observed as skipped steps on gpt-4o-mini and as a
-# jump straight to end_session on gemini-2.5-flash. It states a fact about
-# the transcript, not a strategy.
+# opening paragraph is load-bearing. The session-start brief puts a
+# completed BRIEF_TOOL call and its result in context ahead of the model's
+# first turn, and a synthesized assistant turn is indistinguishable from
+# the model's own — so the cheapest tiers read the script as already
+# underway and absorb its first step. Observed: gpt-4o-mini skipping
+# get_status (having counted the brief as step 1) and gemini-2.5-flash
+# jumping straight to end_session. Naming the tool is what makes it
+# stick; the softer "a tool call may appear above" did not. It states
+# facts about the transcript, not a strategy.
 KICKOFF = f"""\
-A tool call and its result may already appear above. It is not one of the
-steps below; none of the steps below have been done yet.
+A {BRIEF_TOOL} call and its result already appear above. You did not make
+that call, it counts as none of the steps below, and no step below has
+been done yet. Start at step 1 and do every step.
 
 Complete the following steps in order, one tool call each, then stop.
 1. Call get_status.
