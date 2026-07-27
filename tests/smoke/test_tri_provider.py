@@ -341,19 +341,18 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     for event in events:
         validate_event(event)
 
-    # Tier gate: all tool calls parsed natively → each canned step executed ok.
     tool_events = [e for e in events if e["event"] == "tool_call"]
     model_events = [e for e in tool_events if e["initiator"] == "model"]
-    executed = [e["tool"] for e in model_events if e["ok"]]
-    for step in EXPECTED_SEQUENCE:
-        assert step in executed, f"{provider}: step {step!r} missing from {executed}"
-    harness_events = [e for e in model_events if e["tool"] == HARNESS_TOOL]
-    assert harness_events[0]["source"] == "harness"
 
     # Tier gate: the session-start brief (SPEC P1.12) ran exactly once, as a
     # harness call, before the first model call — and every provider carried
     # the synthesized call/result pair natively, which is the part that can
     # only be proven against real APIs.
+    #
+    # Asserted BEFORE the canned sequence deliberately: the sequence depends
+    # on the model following seven ordered instructions, which the cheapest
+    # tiers occasionally do not, and a flake there must not decide whether
+    # the brief gate ran.
     briefs = [e for e in tool_events if e["initiator"] == "scaffold"]
     assert len(briefs) == 1, f"{provider}: expected one scaffold-initiated call, got {len(briefs)}"
     assert briefs[0]["tool"] == BRIEF_TOOL
@@ -376,6 +375,13 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     brief_content = transcript[2]["content"]
     if isinstance(harness, RecordedFakeHarness):
         assert brief_content == json.dumps(harness.brief["envelope"])
+
+    # Tier gate: all tool calls parsed natively → each canned step executed ok.
+    executed = [e["tool"] for e in model_events if e["ok"]]
+    for step in EXPECTED_SEQUENCE:
+        assert step in executed, f"{provider}: step {step!r} missing from {executed}"
+    harness_events = [e for e in model_events if e["tool"] == HARNESS_TOOL]
+    assert harness_events[0]["source"] == "harness"
 
     # Tier gate: usage accounting non-zero. Transient provider errors emit
     # usage_unknown attempts at cost 0 (P7.4) before the retry succeeds —
