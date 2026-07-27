@@ -10,6 +10,10 @@ error path — which wraps a raised exception as
 ``Error executing tool <name>: <message>`` before it reaches the client.
 Copied text, not imported: the point is to fail when the harness's
 wording drifts away from what the classifier matches.
+
+``lens_party`` carries the pinned harness's signature and its envelope
+shape so the session-start brief (SPEC P1.12) runs end to end here and in
+the cron-environment smoke. The roster is fixture data, not a recording.
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -21,6 +25,47 @@ mcp = FastMCP("fake-kami-harness")
 def echo(text: str) -> str:
     """Echo the text back."""
     return f"echo: {text}"
+
+
+@mcp.tool()
+def lens_party(account_index: int = -1) -> dict:
+    """Party report for an account: every kami with full vitals.
+
+    Args:
+        account_index: Account index (-1: daemon default operator).
+    """
+    return {
+        "data": {
+            "account": {"index": 7, "name": "fixture"},
+            "kamis": [
+                {
+                    "id": "0x01",
+                    "index": 1,
+                    "name": "one",
+                    "state": "HARVESTING",
+                    "level": 12,
+                    "hp": {"current": 41, "total": 90, "percent": 45.6},
+                    "hpRatePerHr": "-3.10",
+                    "musu": {"accrued": 812, "spotRatePerHr": "44.0", "avgRatePerHr": "41.2"},
+                    "cooldownSec": 0,
+                    "node": {"index": 53, "name": "fixture node"},
+                },
+                {
+                    "id": "0x02",
+                    "index": 2,
+                    "name": "two",
+                    "state": "RESTING",
+                    "level": 9,
+                    "hp": {"current": 70, "total": 70, "percent": 100.0},
+                    "hpRatePerHr": "0.00",
+                    "musu": {"accrued": 0, "spotRatePerHr": "0.0", "avgRatePerHr": "0.0"},
+                    "cooldownSec": 118,
+                },
+            ],
+        },
+        "untrusted": ["account.name", "kamis[].name", "kamis[].node.name"],
+        "meta": {"stale": 3, "block": 41},
+    }
 
 
 @mcp.tool()

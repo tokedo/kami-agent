@@ -24,6 +24,7 @@ def test_handshake_loads_tools(client):
     names = [t.name for t in client.tool_defs]
     assert names == [
         "echo",
+        "lens_party",
         "do_tx",
         "boom",
         "confirmed_tx",

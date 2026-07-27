@@ -5,7 +5,7 @@ The model-agnostic reference agent scaffold for
 frontier models into Kamigotchi, a live on-chain world, and measures what
 they do under controlled conditions.
 
-**Status: v0.2.1.** [SPEC.md](SPEC.md) is the contract registry — what the
+**Status: v0.3.2.** [SPEC.md](SPEC.md) is the contract registry — what the
 scaffold provides, what it depends on, the invariants and how each one is
 enforced, and the behaviors that are accepted by design.
 
@@ -37,6 +37,15 @@ Design principles behind the contract:
    silent.
 7. **Closed world.** The agent's only channels are the harness tools, the
    bundled read-only `reference/` tree, and its own `workspace/`.
+
+Every session opens with a status brief (SPEC P1.12): before the first
+model call the scaffold makes one harness call — the general party report
+for the account's own operator — and injects the result verbatim as a
+normal tool result, so a session starts already knowing what the account
+owns and what state it is in. It is state, not advice, and it is not a
+special channel: the same tool stays available for the agent to call
+itself, for any account, and telemetry separates the two on
+`tool_call.initiator`.
 
 ## The four-layer stack
 
@@ -101,10 +110,27 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    The packaged image (`Dockerfile`) is `python:3.13-slim`, so 3.13 is
    the reference — every tier that spawns a harness must match it, and
    the live tier asserts the surface it gets equals the recorded one.
+
+   Since the session-start brief (SPEC P1.12) lands in call-1 context, it
+   is part of the floor, and its size is linear in how many kamis the
+   account owns — the one term in the floor that **moves during a run**.
+   Against the recorded surface the brief is served from a committed
+   fixture (`tests/smoke/fixtures/party_brief.json`: synthetic roster,
+   real envelope shape), so the floor is reproducible; the report quotes
+   the roster size next to the floor, because one is not interpretable
+   without the other. `KAMI_SMOKE_BRIEF_KAMIS=N` re-measures the floor at
+   any roster size, which is how the sizing headroom in a manifest's
+   `session_token_cap` is checked against the roster a run will grow to
+   rather than the one it starts with.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must
-   not block unrelated PRs.
+   not block unrelated PRs. The brief runs against the real harness here,
+   so this tier is also where its failure path is observed for real: with
+   no lens daemon behind the checkout the party report answers with its
+   own unavailability error, which is injected as-is and reported — the
+   floor this tier prints is therefore a *failed*-brief floor, and is not
+   comparable to tier 3's.
 
 The telemetry event schema ([`schema/telemetry.json`](schema/telemetry.json),
 versioned independently) is the contract for downstream analysis.

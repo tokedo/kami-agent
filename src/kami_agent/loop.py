@@ -7,6 +7,14 @@ strings (kickoff, continuation) are injected by the runner from
 
 Forced endings (context guard, tool cap, errors) are silent (I4): no
 warning message, no final model call.
+
+Before the first model call the loop issues the session-start status
+brief (SPEC P1.12): one call to the pinned harness's general
+any-operator party-report tool, for the account's own operator, injected
+as a normal tool result. It is not a special path — the same tool stays
+available for the agent to call itself, and both invocations execute
+through ``_execute_intent`` and are telemetered identically, separated
+only by ``tool_call.initiator``.
 """
 
 from __future__ import annotations
@@ -62,6 +70,24 @@ CARRIED_APPLIED = "applied"
 CARRIED_INVALID = "invalid"
 
 _FILE_TOOLS = frozenset({"workspace_write", "workspace_read", "workspace_list", "workspace_delete"})
+
+# Who issued a tool call (tool_call.initiator, SPEC P9). "model" is every
+# intent the agent returned; "scaffold" is a call the scaffold made on its
+# own — currently only the session-start status brief.
+INITIATOR_MODEL = "model"
+INITIATOR_SCAFFOLD = "scaffold"
+
+# Session-start status brief (SPEC P1.12). The tool is the pinned harness's
+# general any-operator party report — every kami of one account with its
+# full vitals (state, HP current/total/percent, HP rate per hour, cooldown
+# seconds, accrual) — not a brief-specific entry point: the agent may call
+# it itself with any account, and does so through exactly this name.
+# ``account_index`` is the sentinel the tool defines for "the operator this
+# harness runs as", passed explicitly rather than left to the tool's
+# default so the recorded call says what it asked for.
+BRIEF_TOOL = "lens_party"
+BRIEF_ARGS: dict[str, Any] = {"account_index": -1}
+BRIEF_CALL_ID = "brief_1"
 
 _BACKOFF_BASE_S = 1.0
 _BACKOFF_MAX_S = 60.0
@@ -202,6 +228,7 @@ class AgentLoop:
 
     def run(self) -> SessionResult:
         messages: list[Message] = [UserMessage(text=self._kickoff_text)]
+        self._inject_brief(messages)
         continuation = False
         while True:
             response = self._call_model(messages, continuation)
@@ -236,6 +263,57 @@ class AgentLoop:
             reason = self._execute_batch(response.tool_calls, messages)
             if reason is not None:
                 return self._result(reason, messages)
+
+    # --- session-start status brief (SPEC P1.12) -----------------------------
+
+    def _inject_brief(self, messages: list[Message]) -> None:
+        """Call the party-report tool once and inject its result verbatim.
+
+        Runs before the first model call, so call 1 already carries the
+        account's own kami state instead of spending turns rediscovering
+        it. The result enters context as a normal tool result — an
+        assistant turn holding the call, then its result — so the model
+        sees what it would have seen had it made the call itself. Nothing
+        is summarized, reordered, filtered, or annotated: the harness
+        envelope is passed through under the same byte cap every tool
+        result gets (P2), and the same is true of a failure.
+
+        Degrade visibly, never block (SPEC X21): exactly one attempt, no
+        retry and no fallback content. A failure is injected as the error
+        result it is, telemetered like any other failed call, and the
+        session proceeds — the failure is data, not a reason to abort.
+
+        The brief consumes no ``session_tool_cap``, never advances the
+        consecutive-error counter, and never feeds the repetition breaker
+        (X20): those caps bound what the agent does. It is skipped
+        entirely when the loaded surface does not carry the tool, which
+        leaves no telemetry — an absent tool is visible in
+        ``run_start.harness_tools`` and in ``tools_hash``.
+        """
+        if self._game is None or BRIEF_TOOL not in {t.name for t in self._game.tool_defs}:
+            return
+        intent = ToolCall(id=BRIEF_CALL_ID, name=BRIEF_TOOL, args=dict(BRIEF_ARGS))
+        outcome = self._execute_intent(intent)
+        messages.append(AssistantMessage(text=None, tool_calls=(intent,)))
+        messages.append(
+            ToolResultMessage(
+                tool_call_id=intent.id,
+                content=outcome["content"],
+                is_error=not outcome["ok"],
+            )
+        )
+        self._emit_tool_call(
+            intent,
+            source=outcome["source"],
+            duration_ms=outcome["duration_ms"],
+            ok=outcome["ok"],
+            error=outcome.get("error"),
+            truncated=outcome.get("truncated", False),
+            original_bytes=outcome.get("original_bytes"),
+            tx_hash=outcome.get("tx_hash"),
+            terminal_state=outcome.get("terminal_state"),
+            initiator=INITIATOR_SCAFFOLD,
+        )
 
     # --- model calls (SPEC P8) ----------------------------------------------
 
@@ -380,6 +458,7 @@ class AgentLoop:
                     source=self._source_of(intent.name),
                     duration_ms=0.0,
                     ok=False,
+                    initiator=INITIATOR_MODEL,
                     skipped=True,
                 )
                 continue
@@ -397,6 +476,7 @@ class AgentLoop:
                 source=outcome["source"],
                 duration_ms=outcome["duration_ms"],
                 ok=outcome["ok"],
+                initiator=INITIATOR_MODEL,
                 error=outcome.get("error"),
                 truncated=outcome.get("truncated", False),
                 original_bytes=outcome.get("original_bytes"),
@@ -532,6 +612,7 @@ class AgentLoop:
         source: str,
         duration_ms: float,
         ok: bool,
+        initiator: str,
         error: str | None = None,
         skipped: bool = False,
         truncated: bool = False,
@@ -542,6 +623,9 @@ class AgentLoop:
         fields: dict[str, Any] = {
             "tool": intent.name,
             "source": source,
+            # Provenance, not policy (SPEC P9): "source" names which layer
+            # owns the tool, "initiator" names who asked for the call.
+            "initiator": initiator,
             "duration_ms": duration_ms,
             "ok": ok,
         }
