@@ -34,10 +34,16 @@ from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS
 REPO_ROOT = Path(__file__).parents[2]
 FIXTURE = Path(__file__).parent / "fixtures" / "harness_tools.json"
 
-# The read-only game tool the canned session calls. get_nodes exercises the
-# live Kamibots API (needs a registered account); list_accounts is keyless
-# (used by the CI live-harness workflow, where no account keys exist).
-HARNESS_TOOL = os.environ.get("KAMI_SMOKE_HARNESS_TOOL", "get_nodes")
+# The read-only game tool the canned session calls, and with it the
+# measurement convention the reported context floor is quoted on.
+#
+# It was get_nodes through the v1.x pins. The v2 surface removes get_nodes
+# (its reads moved behind the lens wrappers), so the convention re-bases on
+# list_accounts — keyless, local-roster-served, and already what the
+# live-harness workflow uses, so both tiers now quote one convention.
+# Floors either side of this change are NOT directly comparable; the
+# convention delta is measured, not assumed (README, Verification).
+HARNESS_TOOL = os.environ.get("KAMI_SMOKE_HARNESS_TOOL", "list_accounts")
 
 # Apparatus vocabulary that must never reach the agent (I1). Deliberately
 # apparatus-specific: in-game economics legitimately mention costs, prices,

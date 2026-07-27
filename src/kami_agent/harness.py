@@ -11,7 +11,7 @@ background thread and exposes the synchronous surface the loop needs
 transport's context managers are entered and exited inside a single
 manager task, as anyio requires.
 
-Dev pin: kami-harness v1.5.1 (``27592ce``) — the run manifest
+Dev pin: kami-harness v2 surface (``48bd154``) — the run manifest
 re-pins at launch; the SHA is manifest metadata, recorded on run_start.
 """
 
@@ -30,8 +30,9 @@ from mcp.client.stdio import stdio_client
 from kami_agent.adapters.base import ToolDef
 from kami_agent.loop import GameToolResult
 from kami_agent.tools.errors import ToolError
+from kami_agent.tools.receipts import classify_success
 
-HARNESS_DEV_PIN_SHA = "27592ce"
+HARNESS_DEV_PIN_SHA = "48bd154"
 
 DEFAULT_HANDSHAKE_TIMEOUT_S = 60.0
 
@@ -41,7 +42,16 @@ class HarnessError(Exception):
 
 
 def tools_hash(tools: list[ToolDef]) -> str:
-    """Deterministic hash of the loaded tool surface (session_start.tools_hash)."""
+    """Deterministic hash of the loaded tool surface (session_start.tools_hash).
+
+    This is the SCAFFOLD's fingerprint of the surface it loaded: it spans
+    the harness tools AND the scaffold tools, uses this module's own
+    serialization, and carries a ``sha256:`` prefix. The harness also
+    publishes a hash of its own registry, bare hex, over its own
+    serialization. **The two values are different by construction and
+    must never be equated or reconciled** — they answer different
+    questions (what the model was shown vs. what the harness registered).
+    """
     canonical = json.dumps(
         [
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
@@ -116,7 +126,13 @@ class HarnessClient:
     # --- GameTools ------------------------------------------------------------
 
     def execute(self, name: str, args: dict[str, Any]) -> GameToolResult:
-        """Call one harness tool; MCP-level errors surface as ToolError (P2)."""
+        """Call one harness tool; MCP-level errors surface as ToolError (P2).
+
+        The harness raises confirmed reverts and unconfirmed transactions
+        rather than returning them, so those arrive here as ``isError``
+        results. The message is re-raised **verbatim** — it is the only
+        account of what happened on-chain, and the agent gets it unedited.
+        """
         session = self._session
         if session is None:
             raise ToolError("harness is not connected")
@@ -127,7 +143,11 @@ class HarnessClient:
         )
         if result.isError:
             raise ToolError(text or f"{name} failed")
-        return GameToolResult(content=text, tx_hash=_extract_tx_hash(result, text))
+        return GameToolResult(
+            content=text,
+            tx_hash=_extract_tx_hash(result, text),
+            terminal_state=classify_success(text, getattr(result, "structuredContent", None)),
+        )
 
     # --- lifecycle --------------------------------------------------------------
 

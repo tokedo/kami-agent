@@ -1,7 +1,7 @@
 ---
 module: kami-agent
-version: 1.6
-describes: v0.2.0 (18f75d04)
+version: 1.7
+describes: v0.3.0
 ---
 
 # kami-agent — Contract Registry
@@ -49,7 +49,9 @@ Ordered steps, as implemented:
 8. **Spawn the harness child** and handshake (D1). Failure → a
    `session_start` / `session_end reason=errors` pair with zero model
    calls, a default-source `schedule_next`, and `session_aborted`.
-9. **Emit `session_start`** carrying `tools_hash` of the loaded surface.
+9. **Emit `session_start`** carrying `tools_hash` of the loaded surface
+   and, when the manifest pins one, the harness `presentation_mode`
+   (D1).
 10. **Build context**: frozen system prompt + `\n\n` + the file index
     (full `workspace/` tree with byte sizes, `reference/` collapsed to
     one `N files, N bytes, read-only` line).
@@ -153,10 +155,18 @@ names are manifest-pinned (`caps:` block):
   argument key order never distinguishes two calls.
 - **error-or-revert** = a loop-level failure, or a success-shaped result
   whose JSON content carries `status: "reverted"` or a non-empty
-  `error` field, at the top level or one `result` level down. On-chain
-  reverts return as successful tool results and so never advance the
-  consecutive-error counter — this rule is what ends parameter-sweep
-  revert loops.
+  `error` field, at the top level or one `result` level down. Both
+  halves are retained deliberately: **which half fires is a property of
+  the pinned harness, not of this rule.** Against a harness that
+  *returns* reverts in band they arrive success-shaped, are caught only
+  by the content half, and never advance the consecutive-error counter —
+  which is why this rule exists. Against one that *raises* them (D1)
+  the same call is a loop-level failure, so it advances
+  `max_consecutive_errors` too and a revert loop may end as `errors`
+  before reaching `repetition_same_tool_error_cap`. The knobs are
+  unchanged across that difference; the ending's `reason` is what
+  moves, so analysis must not read `reason=repetition` counts as a
+  harness-invariant measure of revert looping.
 - The first rule to trip names the `session_end` telemetry fields (P9).
 
 ### P6. Wake scheduling and clamps
@@ -263,7 +273,7 @@ class ModelAdapter(Protocol):
 
 `run/telemetry.jsonl`, one JSON object per line, append-only. Machine
 contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
-`version: 0.2.0`, shipped inside the wheel as package data and kept
+`version: 0.3.0`, shipped inside the wheel as package data and kept
 byte-identical to the repo copy. Every event is validated **before** it
 is written; an invalid event raises and never lands. Unknown fields are
 rejected (`unevaluatedProperties: false`), so additive changes require a
@@ -275,9 +285,9 @@ enforced), `run_id`, `session`, `event`.
 | event | required | optional |
 |---|---|---|
 | `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
-| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | — |
+| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `presentation_mode` |
 | `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response` |
-| `tool_call` | `tool`, `source` (`harness`\|`scaffold`), `duration_ms`, `ok` | `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash` |
+| `tool_call` | `tool`, `source` (`harness`\|`scaffold`), `duration_ms`, `ok` | `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state` |
 | `workspace_write` | `path`, `bytes`, `workspace_total_bytes` | — |
 | `workspace_delete` | `path`, `workspace_total_bytes` | — |
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
@@ -293,6 +303,26 @@ Reader notes (stable semantics):
   billable calls.
 - `session_end.tool_calls` counts emitted `tool_call` events, **skipped
   intents included**; `session_tool_cap` counts executed intents only.
+- `tool_call.ok` is **exception-keyed, agent-side**: false when the call
+  raised into the loop, true otherwise. It is not a claim about the
+  chain. Against a harness that returns confirmed reverts in band,
+  `ok=true` covers reverted transactions; against one that raises them
+  (D1), a revert is `ok=false` and `ok=true` regains its plain meaning
+  for a submitted transaction. Since which holds is a property of the
+  pinned harness, `ok` must be read together with `tx_terminal_state`
+  and never alone.
+- `tool_call.tx_terminal_state` names the transaction outcome the
+  harness reported — `confirmed_success` | `reverted` | `unconfirmed` |
+  `validation_rejected` | `batch_error` — classified once at ingestion
+  so downstream analysis never string-matches harness prose. It is
+  **absent** whenever the call was not one transaction outcome: reads,
+  scaffold tools, non-transaction errors, in-band partial batches, and
+  pre-send dry-run skips. Absence means *not classifiable as one
+  terminal state*, never *succeeded*.
+- `session_start.presentation_mode` is the mode the manifest pinned and
+  the scaffold passed to the harness child. Absent when the manifest
+  pinned none, in which case the harness applied its own default —
+  recorded as absence rather than guessed at.
 - `schedule_next` appears exactly once per session, `wake_default` case
   included.
 - `session_end reason=crash` is synthetic (P3).
@@ -406,12 +436,40 @@ suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
   (operator-asserted, **not** verified against the running child), and
   `tools_hash` — `sha256` over the sorted `(name, description,
   input_schema)` of the full loaded surface — recorded on every
-  `session_start`. Drift is therefore **detected in analysis and in CI**
+  `session_start`. That value is the **scaffold's** fingerprint of what
+  the model was shown: it spans harness *and* scaffold tools, uses this
+  module's serialization, and carries a `sha256:` prefix. A harness may
+  publish a hash of its own registry as well; such a value answers a
+  different question over different bytes and is **different by
+  construction**. The two are never equated, reconciled, or asserted
+  against each other. Drift is **detected in analysis and in CI**
   (a committed recorded-surface fixture whose hash is asserted), never
   refused at runtime.
+- **Presentation mode.** When the manifest pins `presentation_mode`, the
+  scaffold sets it in the harness child's environment as
+  `PRESENTATION_MODE` (an explicit `harness.env` entry still wins) and
+  records it on `session_start`. The value is passed through
+  **unvalidated and uncaught**: the scaffold owns no mode enum, and a
+  mode the pinned harness does not implement must abort the handshake
+  there — surfaced loudly by `init`'s connectivity check — rather than
+  be normalized here into a silently different run. With no mode pinned
+  the scaffold sets nothing and records nothing.
 - Failure surface consumed: an MCP `isError` result becomes a tool error
-  (P2); a success-shaped result carrying revert/error markers is
-  classified by P5.1 and by nothing else.
+  (P2), and **its message reaches the model verbatim** — the only
+  transformation applied to any tool result is the P2 byte cap. The
+  scaffold never rewords a harness error, never appends judgment or
+  advice to one, and never retries a failed tool call: the loop's retry
+  policy covers model calls only (P8), so an intent is dispatched to the
+  harness exactly once. A success-shaped result carrying revert/error
+  markers is classified by P5.1 and by nothing else.
+- **Transaction outcomes are recorded, not interpreted.** A harness may
+  report a submitted transaction's outcome by returning it in band or by
+  raising it; either way the outcome is classified once, at ingestion,
+  into `tool_call.tx_terminal_state` (P9) from the harness's own
+  contract text. Analysis therefore splits validation-rejects, reverts,
+  and unconfirmed transactions on a field. The classification is
+  observation only: it changes nothing the agent sees, and an
+  unrecognized message is recorded as no state rather than guessed at.
 - `tx_hash` is extracted best-effort from structured content or JSON
   text, top level or one `result` level down, for telemetry only.
 - **Cap arithmetic assumption.** Every call re-sends the system prompt,
@@ -469,6 +527,7 @@ at construction, everything else is silently ignored.
 | `workspace_quota_bytes` | P11 |
 | `lock_stale_s` | P4 |
 | `chain_rpc_url` | `init` connectivity check only |
+| `presentation_mode` | D1 — passed to the harness child as `PRESENTATION_MODE`, recorded on `session_start`; never validated scaffold-side |
 | `harness.{command,args,cwd,env,handshake_timeout_s}` | D1 |
 | `pins.{agent_sha,harness_sha,gdd_sha}` | `run_start` provenance only — recorded, never verified |
 
@@ -527,6 +586,9 @@ config copy, transcripts, or telemetry.
 | I18 | The tool surface presented to the model is deterministic and collision-free | `tests/unit/test_loop.py::test_harness_scaffold_name_collision_rejected`, `tests/unit/test_harness_client.py::test_tools_hash_is_deterministic_and_sensitive` |
 | I19 | Tool schemas stay inside the subset all three providers accept | `tests/unit/test_scaffold_tools.py::test_tool_defs_cover_spec_surface` (no `oneOf`/`anyOf`/`allOf`) + the tri-provider tier parsing every call natively |
 | I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress | the scaffold tool list is exactly the seven of P10 (`test_tool_defs_cover_spec_surface`); network-level closure is operator-owned (see *Unowned*, README) |
+| I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
+| I22 | The three post-broadcast terminal states plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing), `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
+| I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
 
 ---
 
@@ -596,6 +658,26 @@ a bug; changing one is a spec change, not a fix.
 - **X16 — `init` warns rather than fails when `reference/` is absent**,
   so dev runs work; a production bring-up without it is an operator
   error the scaffold will not catch.
+- **X17 — `presentation_mode` is passed to the harness unvalidated, on
+  purpose.** The scaffold could reject a mode the pinned harness does
+  not implement and give a tidier error. It does not: the harness owns
+  the mode set, so validating here would duplicate a contract that can
+  drift, and catching the harness's own refusal would turn a
+  misconfigured manifest into a quietly different run. The failure
+  lands at `init`, loudly, which is the intended friction.
+- **X18 — `tool_call.tx_terminal_state` is absent, not `unknown`, when a
+  call is not one transaction outcome.** Reads, scaffold tools,
+  in-band partial batches, and dry-run skips carry no value at all. An
+  explicit `unknown` would be indistinguishable from a classification
+  failure; absence forces the reader to treat "no state" as "not one
+  state" rather than as a fourth outcome.
+- **X19 — the classifier matches the harness's contract prose, and
+  degrades to no classification rather than to a guess.** The terminal
+  state is only recoverable from message text, so drift in that text
+  silently costs classification (the field goes absent) instead of
+  producing a wrong label. The recorded-surface CI fixture and the
+  copied message text in the fake MCP server are what surface the
+  drift.
 
 ---
 
@@ -625,6 +707,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 1.7 | v0.3.0 | Consumption of a harness that **raises** confirmed reverts and unconfirmed transactions instead of returning them: harness error messages are contractually verbatim to the model and dispatched once (I21); the transaction outcome is classified once at ingestion into `tool_call.tx_terminal_state`, a closed five-value enum, so analysis splits validation-rejects / reverts / unconfirmed on a field rather than on prose (I22, X18, X19); `tool_call.ok` restated as exception-keyed and harness-dependent, to be read with the new field and never alone; P5.1's error-or-revert note restated as harness-dependent, with knobs unchanged. Harness `presentation_mode` pinned in the manifest, passed to the child unvalidated, and recorded on every `session_start` (I23, X17). `tools_hash` restated as the scaffold's own fingerprint, different by construction from any hash a harness publishes of its own registry. Telemetry schema 0.2.0 → 0.3.0 (two additive optional fields). |
 | 1.6 | v0.2.0 (18f75d04) | Converged to a contract registry: Provides / Depends / Invariants / Deliberate deviations / Non-goals / Changelog, every claim verified against the code and paired with its enforcement. Newly stated as contract: the `run.lock` and transcript layout, the closed run-session outcome set, executed-vs-emitted tool-call accounting, `stop_reason: "error"`, the telemetry schema version as a downstream contract, the recorded-not-negotiated harness identity, per-provider caching modes and what accounting assumes of each, the consumed manifest key list, and the sixteen accepted deviations. Narrative, packaging, and CI-tier prose moved to `README.md` / `docs/packaging.md`. |
 | 1.5 | — | Repetition breaker as a third forced-ending class; carried execution of a cap-skipped final-turn `set_next_wake`; three system-prompt additions (no human reads the text, no in-session waiting, gas is spent on reverts); workspace-root-relative file paths; empty-response retry semantics; consecutive (not cumulative) identical-call counting. |
 | 1.4 | — | Cache-aware token accounting: provider-side prompt-cache usage measured on all three providers, Anthropic caching explicitly requested via `cache_control` request metadata, `cost_usd` cache-aware, price table extended with cache-rate columns. Prompt bytes and agent-visible channels unchanged. |

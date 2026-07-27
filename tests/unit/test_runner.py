@@ -110,6 +110,27 @@ def events_of(run_dir, kind=None):
     return [e for e in events if kind is None or e["event"] == kind]
 
 
+# --- presentation_mode telemetry ---------------------------------------------------
+
+
+def test_pinned_presentation_mode_lands_on_every_session_start(run_dir):
+    """The effective mode is recorded per session, not only in the config copy."""
+    adapter = ScriptedAdapter(response(end_call()), response(end_call()))
+    config = config_for(run_dir, presentation_mode="envelope")
+    run_session(config, adapter, clock=Clock())
+    run_session(config, adapter, clock=Clock(), trigger="manual")
+    starts = events_of(run_dir, "session_start")
+    assert len(starts) == 2
+    assert [s["presentation_mode"] for s in starts] == ["envelope", "envelope"]
+
+
+def test_presentation_mode_is_recorded_as_given(run_dir):
+    """Telemetry reports what was pinned; it is not an enum the scaffold owns."""
+    adapter = ScriptedAdapter(response(end_call()))
+    run_session(config_for(run_dir, presentation_mode="name-free"), adapter, clock=Clock())
+    assert events_of(run_dir, "session_start")[0]["presentation_mode"] == "name-free"
+
+
 # --- full session lifecycle -----------------------------------------------------
 
 
@@ -135,6 +156,8 @@ def test_full_session_lifecycle(run_dir):
     assert start["budget_remaining_usd"] == pytest.approx(10.0)
     assert start["wallclock_elapsed_s"] == 0.0
     assert start["tools_hash"].startswith("sha256:")
+    # No mode pinned in this config → absence, not an assumed default.
+    assert "presentation_mode" not in start
 
     end = events_of(run_dir, "session_end")[0]
     assert end["reason"] == "agent"

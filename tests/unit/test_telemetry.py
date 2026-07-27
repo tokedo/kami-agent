@@ -301,3 +301,59 @@ def test_optional_fields_can_be_omitted(writer):
     record = writer.emit("tool_call", session=4, **minimal)
     assert "truncated" not in record
     assert "tx_hash" not in record
+
+
+# --- schema 0.3.0 additions: receipt status + presentation mode -------------------
+
+
+def test_schema_version_is_pinned():
+    """Additive changes require a version bump (unevaluatedProperties: false)."""
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.3.0"
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["confirmed_success", "reverted", "unconfirmed", "validation_rejected", "batch_error"],
+)
+def test_every_terminal_state_is_accepted(writer, state):
+    record = writer.emit(
+        "tool_call",
+        session=1,
+        tool="harvest_stop",
+        source="harness",
+        duration_ms=900.0,
+        ok=state == "confirmed_success",
+        tx_terminal_state=state,
+    )
+    assert record["tx_terminal_state"] == state
+
+
+def test_invented_terminal_state_rejected(writer):
+    """The enum is closed: a new harness outcome must be a schema change."""
+    with pytest.raises(EventValidationError):
+        writer.emit(
+            "tool_call",
+            session=1,
+            tool="harvest_stop",
+            source="harness",
+            duration_ms=1.0,
+            ok=False,
+            tx_terminal_state="probably_fine",
+        )
+
+
+def test_terminal_state_is_optional(writer):
+    record = writer.emit(
+        "tool_call", session=1, tool="lens_kami", source="harness", duration_ms=1.0, ok=True
+    )
+    assert "tx_terminal_state" not in record
+
+
+def test_session_start_carries_presentation_mode(writer):
+    payload = dict(EXAMPLE_PAYLOADS["session_start"], presentation_mode="envelope")
+    record = writer.emit("session_start", session=1, **payload)
+    assert record["presentation_mode"] == "envelope"
+    # Optional: an unpinned mode is recorded as absence, never invented.
+    assert "presentation_mode" not in writer.emit(
+        "session_start", session=2, **EXAMPLE_PAYLOADS["session_start"]
+    )

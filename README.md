@@ -84,6 +84,13 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    — one canned session per adapter against real provider APIs with a fake
    harness serving the *recorded* tool surface of the pinned kami-harness.
    Fork PRs skip cleanly, since repo secrets are not exposed to them.
+   This tier also reports the observed per-call fixed context floor that
+   the SPEC D1 cap-arithmetic assumption needs, on a fixed measurement
+   convention: the canned kickoff calls one keyless read-only harness
+   tool, `list_accounts`. Floors are only comparable across pins that
+   share that convention — when the named tool has to change because the
+   pinned surface no longer serves it, the convention delta is measured
+   on one surface rather than assumed away.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must

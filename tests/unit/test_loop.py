@@ -17,6 +17,7 @@ from kami_agent.adapters.base import (
 from kami_agent.governor import PriceTable
 from kami_agent.loop import AgentLoop, GameToolResult, LoopCaps, SessionResult
 from kami_agent.telemetry import TelemetryWriter, read_events
+from kami_agent.tools.errors import ToolError
 from kami_agent.tools.scaffold import ScaffoldTools
 
 PRICES = PriceTable(input_usd_per_mtok=3.0, output_usd_per_mtok=15.0)
@@ -179,6 +180,118 @@ def test_game_tool_routing_and_tx_hash(run_dir):
     assert game_event["tool"] == "get_state"
     assert game_event["source"] == "harness"
     assert game_event["tx_hash"] == "0xabc"
+
+
+# --- receipt status: three terminal states, kept distinct (D1, P9) ---------------
+
+REVERT_MESSAGE = (
+    "transaction 0xbadbeef landed on-chain in block 77 and REVERTED: gas was "
+    "spent (91234 gas) and no state change was applied. Revert reason "
+    "(best-effort eth_call replay at block 77): insufficient stamina"
+)
+UNCONFIRMED_MESSAGE = (
+    "transaction 0xfeed is UNCONFIRMED: it was broadcast, but no receipt arrived "
+    "within 120s. It may still be included and spend gas later. Check its "
+    "on-chain status before retrying — a blind retry can execute the action twice."
+)
+REJECTED_MESSAGE = "validation failed; no transaction sent: kami 42 is RESTING, not HARVESTING"
+
+
+class RaisingGame(FakeGame):
+    """A harness that raises its transaction outcomes, as v2 does."""
+
+    def __init__(self, message):
+        super().__init__()
+        self._message = message
+
+    def execute(self, name, args):
+        self.calls.append((name, args))
+        raise ToolError(self._message)
+
+
+@pytest.mark.parametrize(
+    ("message", "state"),
+    [
+        (REVERT_MESSAGE, "reverted"),
+        (UNCONFIRMED_MESSAGE, "unconfirmed"),
+        (REJECTED_MESSAGE, "validation_rejected"),
+    ],
+)
+def test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field(run_dir, message, state):
+    """The model gets the harness's words; analysis gets a field, not those words."""
+    adapter = ScriptedAdapter(
+        response(call("get_state", id_="g1")),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter, game=RaisingGame(message))
+    loop.run()
+
+    # (a) verbatim to the model: the whole message, nothing prepended,
+    # appended, reworded, or summarized.
+    results = [m for m in adapter.requests[1]["messages"] if isinstance(m, ToolResultMessage)]
+    assert results[0].is_error
+    assert results[0].content == message
+
+    # (b) the terminal state is a field, so the split needs no string-matching.
+    event = events_of(run_dir, "tool_call")[0]
+    assert event["tx_terminal_state"] == state
+    assert event["ok"] is False
+    assert event["error"] == message
+
+
+def test_a_raised_outcome_is_executed_once_and_never_retried(run_dir):
+    """No retry-swallowing: a reverted or unconfirmed tx must not be re-sent."""
+    game = RaisingGame(UNCONFIRMED_MESSAGE)
+    adapter = ScriptedAdapter(
+        response(call("get_state", id_="g1")),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter, game=game)
+    loop.run()
+    assert game.calls == [("get_state", {})]
+    assert len(events_of(run_dir, "tool_call")) == 2  # the call + end_session
+
+
+def test_scaffold_failures_carry_no_terminal_state(run_dir):
+    """Only the harness reports transaction outcomes; scaffold errors are not ones."""
+    adapter = ScriptedAdapter(
+        response(call("workspace_read", {"path": "workspace/ghost.md"}, id_="x1")),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter)
+    loop.run()
+    assert "tx_terminal_state" not in events_of(run_dir, "tool_call")[0]
+
+
+def test_confirmed_success_is_recorded_from_the_harness_result(run_dir):
+    class ConfirmingGame(FakeGame):
+        def execute(self, name, args):
+            self.calls.append((name, args))
+            return GameToolResult(
+                content='{"tx_hash": "0xc0ffee", "status": "success"}',
+                tx_hash="0xc0ffee",
+                terminal_state="confirmed_success",
+            )
+
+    adapter = ScriptedAdapter(
+        response(call("get_state", id_="g1")),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter, game=ConfirmingGame())
+    loop.run()
+    event = events_of(run_dir, "tool_call")[0]
+    assert event["ok"] is True
+    assert event["tx_terminal_state"] == "confirmed_success"
+
+
+def test_reads_carry_no_terminal_state(run_dir):
+    adapter = ScriptedAdapter(
+        response(call("get_state", id_="g1")),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter, game=FakeGame())
+    loop.run()
+    assert "tx_terminal_state" not in events_of(run_dir, "tool_call")[0]
 
 
 # --- I12: strict serialization + end_session batch semantics ------------------

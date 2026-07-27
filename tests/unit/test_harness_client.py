@@ -22,7 +22,16 @@ def client():
 def test_handshake_loads_tools(client):
     assert client.server_name == "fake-kami-harness"
     names = [t.name for t in client.tool_defs]
-    assert names == ["echo", "do_tx", "boom"]
+    assert names == [
+        "echo",
+        "do_tx",
+        "boom",
+        "confirmed_tx",
+        "revert_tx",
+        "unconfirmed_tx",
+        "rejected_tx",
+        "batch_tx",
+    ]
     echo = client.tool_defs[0]
     assert echo.description == "Echo the text back."
     assert echo.input_schema["type"] == "object"
@@ -53,6 +62,38 @@ def test_tool_failure_raises_tool_error(client):
 def test_unknown_tool_raises_tool_error(client):
     with pytest.raises(ToolError):
         client.execute("no_such_tool", {})
+
+
+def test_raised_terminal_states_reach_the_caller_verbatim(client):
+    """A revert and an unconfirmed tx are errors here, with the text untouched.
+
+    The harness raises both rather than returning them, so they arrive as
+    isError results. Every fact the harness stated — hash, block, gas,
+    revert reason, the do-not-blind-retry warning — must survive to the
+    tool result the model reads; the scaffold adds and removes nothing.
+    """
+    with pytest.raises(ToolError) as revert:
+        client.execute("revert_tx", {})
+    message = str(revert.value)
+    for fact in ("0xbadbeef", "block 77", "REVERTED", "91234 gas", "insufficient stamina"):
+        assert fact in message
+
+    with pytest.raises(ToolError) as unconfirmed:
+        client.execute("unconfirmed_tx", {})
+    message = str(unconfirmed.value)
+    for fact in ("0xfeed", "UNCONFIRMED", "120s", "a blind retry can"):
+        assert fact in message
+
+
+def test_confirmed_success_is_classified_on_the_returned_result(client):
+    result = client.execute("confirmed_tx", {})
+    assert result.terminal_state == "confirmed_success"
+    assert result.tx_hash == "0xc0ffee"
+
+
+def test_reads_carry_no_terminal_state(client):
+    """Only transaction outcomes get one; a read is not one."""
+    assert client.execute("echo", {"text": "hi"}).terminal_state is None
 
 
 def test_handshake_failure_aborts(tmp_path):
