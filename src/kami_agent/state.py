@@ -60,6 +60,10 @@ def fold_telemetry(events: Iterable[dict[str, Any]]) -> RunState:
     - ``session_counter``: highest session number seen (the counter is
       persisted before the first model call, so a crashed session still
       claims its number, SPEC P1.7).
+
+    ``llm_request`` events are write-ahead markers and are deliberately
+    NOT folded into accounting: they carry no usage, and one exists for
+    every model call, so counting them would double every total.
     """
     state = RunState()
     for event in events:
@@ -90,6 +94,36 @@ def crashed_session(events: Iterable[dict[str, Any]]) -> int | None:
         elif event.get("event") == "session_end":
             open_sessions.discard(event["session"])
     return max(open_sessions) if open_sessions else None
+
+
+def phantom_requests(events: Iterable[dict[str, Any]], session: int) -> list[int]:
+    """``request_seq`` values in ``session`` that were started and never completed.
+
+    A model request is written ahead (``llm_request``) and its outcome is
+    written after (``llm_call``, carrying the same ``request_seq``). A
+    request with no completion is one the provider may have billed and
+    that nothing recorded the result of — the crash landed in between.
+
+    Before the write-ahead existed such a call left no trace at all, which
+    made it unrecoverable after the fact: nothing local knew the request
+    had happened. Recovery uses this to write a phantom row instead
+    (SPEC P3), so the gap is named rather than silently absent.
+
+    Returned sorted, so recovery is deterministic and idempotent.
+    """
+    started: set[int] = set()
+    completed: set[int] = set()
+    for event in events:
+        if event.get("session") != session:
+            continue
+        seq = event.get("request_seq")
+        if not isinstance(seq, int):
+            continue
+        if event.get("event") == "llm_request":
+            started.add(seq)
+        elif event.get("event") == "llm_call":
+            completed.add(seq)
+    return sorted(started - completed)
 
 
 def session_totals(events: Iterable[dict[str, Any]], session: int) -> dict[str, Any]:

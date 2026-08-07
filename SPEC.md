@@ -1,7 +1,7 @@
 ---
 module: kami-agent
-version: 1.8
-describes: v0.3.2
+version: 1.9
+describes: v0.4.0
 ---
 
 # kami-agent — Contract Registry
@@ -57,8 +57,8 @@ Ordered steps, as implemented:
     one `N files, N bytes, read-only` line).
 11. **Kickoff**: the first user message is the frozen constant
     `prompts/kickoff.txt`. No dynamic content, no digits.
-12. **Session-start brief** (P1.12, below): one harness party-report call
-    for the account's own operator, injected as a normal tool result.
+12. **Session-start brief** (P1.12, below): one compact roster query to
+    the world-state daemon (D7), injected as a tool result.
 13. **Agent loop** (P2) until a stop reason (P5).
 14. **Persist**: `session_end`, transcript file, state cache.
 15. **Schedule** (P6): exactly one `schedule_next`.
@@ -67,40 +67,55 @@ Ordered steps, as implemented:
 #### P1.12 Session-start status brief
 
 Before the first model call — the same point at which the file index is
-built into the system prompt (P1.10) — the scaffold calls the pinned
-harness's **general any-operator party-report tool** once, for the
-account's own operator, and injects the result into the session context.
+built into the system prompt (P1.10) — the scaffold issues **one compact
+roster query to the world-state daemon** (D7) and injects the answer into
+the session context.
 
-- **The tool is `lens_party`** on the pinned surface (D1). Chosen because
-  one call covers the whole contract in one result: every kami the
-  account owns, each with its on-chain `state` and its calculated vitals
-  — `hp` (current/total/percent), `hpRatePerHr` (from which projected HP
-  follows), `cooldownSec`, and accrual. It is the general tool, not a
-  brief-specific entry point: `account_index` selects any account, and
-  the brief passes the tool's own sentinel for "the operator this harness
-  runs as" (`-1`) explicitly rather than relying on its default.
-- **No special path.** The same tool stays available for the agent to
-  call itself, for any account, unchanged. Both invocations execute
-  through one code path and are telemetered identically; only
-  `tool_call.initiator` separates them (P9).
-- **Injected as a normal tool result**: an assistant turn carrying the
-  call, then its result — the shape the model would have seen had it made
-  the call itself. The result is passed through **verbatim**: envelope
+- **The query is `roster`**, taken straight from the daemon over its own
+  socket, not through the harness. One line per kami — on-chain `index`,
+  `state`, and `[hp, hpTotal]` — plus the room the account itself is
+  standing in. It carries no authored strings at all by the query's
+  design, so its `untrusted` path list is empty and its answer is
+  identical in name-free mode.
+- **No arguments are sent.** The daemon prefills the account index of an
+  operator-argument query from its own configured default operator. The
+  scaffold has no way to know which account a run is, so it asks the
+  daemon rather than asserting one (D7).
+- **It is a special path** (X22). The previous version's claim that it
+  was not is retired: the roster is not a tool, it is not on the surface
+  the model is shown, the agent cannot issue it, and it runs on its own
+  execution path rather than through the loop's tool dispatch. What the
+  agent keeps is the **full** per-kami detail — names, HP rate, accrual,
+  cooldown, node — on the harness's own `lens_party`, unchanged and
+  callable for any account.
+- **Injected as a tool result**: an assistant turn carrying the call,
+  then its result. The answer is passed through **verbatim**: envelope
   untouched, nothing summarized, reordered, filtered, or annotated. The
-  P2 byte cap is the only transformation, as it is for every tool result.
+  scaffold owns only the serialization (compact JSON) and the P2 byte
+  cap, which is the transformation every tool result gets.
 - **Degrade visibly, never block** (X21). Exactly one attempt. A failure
-  is injected as the error result it is and the session continues; there
-  is no retry, no fallback content, and no abort. The failure is data.
+  is injected as a minimal machine-shaped record — `{"error": {"code",
+  "message"}}` — and the session continues; there is no retry, no
+  fallback content, and no abort. A query error carries the daemon's own
+  code and message. A transport failure has no daemon text to quote, so
+  its code is the scaffold's (`LENS_UNAVAILABLE`) and its message is the
+  operating system's; that record is frozen and leak-scanned exactly as
+  the three prompt strings are (P13, I1).
 - The brief consumes no `session_tool_cap`, never advances the
   consecutive-error counter, and never feeds the repetition breaker
-  (X20). It emits a `tool_call` event and so counts in
-  `session_end.tool_calls`.
-- It is **skipped entirely** when the loaded surface does not carry the
-  tool, leaving no telemetry — an absent tool is already visible in
-  `run_start.harness_tools` and in `tools_hash`.
+  (X20). It emits a `tool_call` event with `source: lens` and so counts
+  in `session_end.tool_calls`.
+- It is **skipped entirely** when no daemon is configured
+  (`lens.enabled: false`), leaving no telemetry. It is *not* skipped when
+  a configured daemon is unreachable: that degrades visibly instead, so a
+  run that expected a brief and got none says so.
 - The brief sits in call-1 context, so it is part of the fixed floor D1's
   cap arithmetic is sized against, and its size is linear in the
-  account's roster size. The smoke tier reports both numbers together.
+  account's roster size. The compact form cut both the constant and the
+  slope by close to an order of magnitude against the party report it
+  replaced, which is most of why D1's ⅓-cap assumption is no longer
+  under pressure from roster growth. The smoke tier reports both numbers
+  together; floors do not compare across 0.4.0.
 
 ### P2. Agent loop
 
@@ -114,9 +129,10 @@ account's own operator, and injects the result into the session context.
 - Each executed intent appends one `tool_result` message and emits one
   `tool_call` event.
 - The session opens on the kickoff message followed by the session-start
-  brief's call/result pair (P1.12); from there the alternation is the
-  agent's. Error counting, the tool cap, and the repetition breaker all
-  count agent-executed intents only.
+  brief's call/result pair (P1.12) — which the loop synthesizes rather
+  than dispatches; from there the alternation is the agent's. Error
+  counting, the tool cap, and the repetition breaker all count
+  agent-executed intents only.
 - `end_session` takes effect immediately: every later intent in the same
   batch is skipped, emitted as `tool_call` with `ok=false, skipped=true`,
   and produces no tool-result message.
@@ -153,6 +169,26 @@ account's own operator, and injects the result into the session context.
   are folded from that session's events. Recovery is idempotent.
 - A crashed session keeps its session number (the counter is persisted
   at P1.7, before the first model call).
+- **Phantom model requests.** Every model request is written ahead as an
+  `llm_request` carrying a session-monotonic `request_seq`, before the
+  request is sent; the `llm_call` that completes it carries the same
+  number. A request with no completion is one the provider may have
+  billed and whose outcome nothing recorded — the crash landed between
+  them. Recovery writes a synthetic `llm_call` for each, before the
+  crash `session_end` so the totals count it, on exactly the terms any
+  other failed-but-billed attempt gets: `usage_unknown: true`,
+  `cost_usd: 0`, `stop_reason: "error"`, plus `phantom: true`. No usage
+  is estimated — the row names a gap, it does not fill one. Idempotent:
+  a second pass finds the request completed by the row the first wrote.
+  `llm_request` events are never folded into accounting (one exists per
+  model call, so counting them would double every total).
+- **Residual exposure, stated precisely.** The write-ahead closes the
+  window between a request being billed and its outcome being recorded.
+  It cannot close the window between the process deciding to send and
+  the `llm_request` line reaching disk — a kill inside that interval
+  (microseconds, bounded by one `write`+`fsync`) still loses a request
+  that may have been billed. Nothing local can observe that case; only
+  the provider's own ledger can.
 
 ### P4. Lockfile semantics
 
@@ -272,9 +308,28 @@ or t_max; the overshoot is bounded by the session caps and recorded as
 
 **P7.4 What is counted.** Every `llm_call` event contributes to
 `cumulative_usd` / `cumulative_tokens`, including failed attempts
-(logged at cost 0 with `usage_unknown: true`) and retried empty
-responses (cost 0, `empty_response: true`). In-world resources (MUSU,
-ONYX, gas) are outside `budget_usd` and are not tracked here.
+(logged at cost 0 with `usage_unknown: true`), retried empty responses
+(cost 0, `empty_response: true`), and recovery-written phantoms (cost 0,
+`phantom: true`, P3). `llm_request` events contribute nothing. In-world
+resources (MUSU, ONYX, gas) are outside `budget_usd` and are not tracked
+here.
+
+`usage_unknown` is honest but lossy, and lossy in **two different ways**
+that analysis must not merge:
+
+- *Transport-lossy* — the call failed before a response existed
+  (timeout, connection failure, 5xx, a rate limit). There is genuinely
+  no usage to record, and the provider may or may not have billed it.
+- *Normalization-discarded* — a response arrived, **with its usage in
+  hand**, and the adapter refused it (an unmappable stop reason,
+  unparseable tool arguments, no candidates). The tokens were real and
+  are known at that moment; the current implementation discards them and
+  records cost 0 anyway, which understates spend by exactly those calls.
+
+Recovering the second class is a behavior change, deliberately out of
+scope at this version and named here so it is not mistaken for a bug
+report. Both classes reconcile against the provider ledger; neither
+reconciles against this scaffold alone.
 
 ### P8. Model adapter interface
 
@@ -292,8 +347,11 @@ class ModelAdapter(Protocol):
   providers accept (objects, scalars, arrays, enums, required; no
   `oneOf`/`anyOf`/`allOf`).
 - `AdapterResponse = {text_blocks, tool_calls, stop_reason, usage,
-  provider_state?, provider_meta}`; `provider_meta` is logged raw and
-  never parsed by the loop.
+  provider_state?, provider_meta, request_id?}`; `provider_meta` is
+  logged raw and never parsed by the loop. `request_id` is the
+  provider's own identifier for the call where the SDK serves one (D2),
+  never minted by the adapter, and it is also carried on `AdapterError`
+  so a failed-but-billed attempt is as traceable as a successful one.
 - `stop_reason` is the closed enum `end_turn | tool_use | max_tokens |
   refusal`. An unmappable provider stop reason raises rather than being
   guessed.
@@ -312,12 +370,21 @@ class ModelAdapter(Protocol):
   with `empty_response: true`, never routed into the continuation/error
   path. An empty-but-billed response (nonzero usage) keeps normal
   handling.
+- **No exception escapes the call site unrecorded.** A fault the adapter
+  did not normalize into an `AdapterError` — an SDK shape it did not
+  expect, a fault inside response parsing — is caught on the same terms
+  as a non-retryable error: an `llm_call` at cost 0 with
+  `usage_unknown: true`, then `reason=errors`. Before 0.4.0 such a fault
+  propagated out of the loop and the session died with **no `llm_call`
+  row at all**, leaving a billed call invisible to accounting. The catch
+  is deliberately broad; the point is that no exception type can
+  reintroduce that hole.
 
 ### P9. Telemetry event schema — downstream contract
 
 `run/telemetry.jsonl`, one JSON object per line, append-only. Machine
 contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
-`version: 0.3.1`, shipped inside the wheel as package data and kept
+`version: 0.4.0`, shipped inside the wheel as package data and kept
 byte-identical to the repo copy. Every event is validated **before** it
 is written; an invalid event raises and never lands. Unknown fields are
 rejected (`unevaluatedProperties: false`), so additive changes require a
@@ -329,9 +396,10 @@ enforced), `run_id`, `session`, `event`.
 | event | required | optional |
 |---|---|---|
 | `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
-| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `presentation_mode` |
-| `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response` |
-| `tool_call` | `tool`, `source` (`harness`\|`scaffold`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state` |
+| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `presentation_mode`, `harness_tools_hash` |
+| `llm_request` | `request_seq` | — |
+| `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response`, `request_seq`, `phantom`, `provider_request_id`, `cache_write_5m_tokens`, `cache_write_1h_tokens` |
+| `tool_call` | `tool`, `source` (`harness`\|`scaffold`\|`lens`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `call_seq`, `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state`, `txs[]`, `result_error_shaped`, `provider_call_id`, `provider_call_id_duplicate`, `lens_stale`, `lens_block` |
 | `workspace_write` | `path`, `bytes`, `workspace_total_bytes` | — |
 | `workspace_delete` | `path`, `workspace_total_bytes` | — |
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
@@ -356,16 +424,58 @@ Reader notes (stable semantics):
   pinned harness, `ok` must be read together with `tx_terminal_state`
   and never alone.
 - `tool_call.initiator` names **who asked for the call**, which `source`
-  does not: `source` names the layer that owns the tool, `initiator`
-  names the layer that wanted it run. `model` is every intent the agent
-  returned; `scaffold` is only the session-start brief (P1.12) — a
-  `harness`-source call with a `scaffold` initiator. **Any measure of
-  agent behavior must exclude scaffold-initiated calls**: they are reads
-  the agent did not choose, and they consume none of the caps that bound
-  what it does. The field is optional in the schema so streams written
-  under 0.3.0 and earlier still validate; from 0.3.1 on it is emitted on
-  every `tool_call`, so its absence in a 0.3.1+ stream is a defect, not a
-  default.
+  does not: `source` names the layer that owns the thing called,
+  `initiator` names the layer that wanted it run. `model` is every
+  intent the agent returned; `scaffold` is only the session-start brief
+  (P1.12) — a `lens`-source call with a `scaffold` initiator. **Any
+  measure of agent behavior must exclude scaffold-initiated calls**:
+  they are reads the agent did not choose, and they consume none of the
+  caps that bound what it does. The field is optional in the schema so
+  streams written under 0.3.0 and earlier still validate; from 0.3.1 on
+  it is emitted on every `tool_call`, so its absence in a 0.3.1+ stream
+  is a defect, not a default.
+- **`tool_call.call_seq` is the stream's own call identity**, minted by
+  the scaffold, one per emitted row, monotonic within a session, skipped
+  intents included. Before 0.4.0 telemetry carried no call identity at
+  all: two rows of the same tool in one turn were indistinguishable
+  without reading the transcript. `provider_call_id` records the id the
+  provider supplied, verbatim and **not trusted to be unique** — when
+  one repeats inside a turn, `provider_call_id_duplicate` says so (X23).
+  **Join rule: pair results to calls by ORDER, on every provider, never
+  by id.** This is not hypothetical prudence: a run-004 case that looked
+  like a scaffold routing defect — two same-tool calls reported with
+  identical results and one id — was adjudicated against the raw
+  transcript and found to be an **analysis mis-join**; the recorded
+  calls had distinct ids and distinct results, and the loop's routing
+  was correct. The identity fields exist so that adjudication never
+  again requires a transcript read.
+- **`tool_call.ok` is not moved by `result_error_shaped`.** `ok` stays
+  exception-keyed: a tool that reports failure by *returning* a body
+  with an `error` field still records `ok: true`. The new field names
+  that shape without redefining `ok`, which would have silently rewritten
+  the meaning of every stream written before 0.4.0. Read `ok`,
+  `tx_terminal_state`, and `result_error_shaped` together.
+- **`tool_call.tx_hash` now covers the raised path.** Reverted and
+  unconfirmed transactions name their hash in the harness's prose; from
+  0.4.0 it is lifted onto the field at ingestion, so the hash is no
+  longer reachable only by parsing `error` — the one field this section
+  tells readers not to parse. Batch errors and validation rejections
+  still carry none, because neither is one transaction.
+- **`tool_call.txs[]`** carries the per-transaction receipts a
+  multi-transaction result reported in band, verbatim and in document
+  order, including the step that failed. Those transactions are final
+  on-chain regardless of the call's overall outcome; a transaction-keyed
+  reconciliation that ignores them comes up short.
+- `session_start.harness_tools_hash` is the hash the **harness**
+  published of its **own** registry, taken verbatim from the handshake
+  (bare hex). It answers a different question over different bytes than
+  `tools_hash`, and the two are different by construction: never equate,
+  reconcile, or assert them against each other (D1).
+- `llm_request` is a write-ahead marker, not a call (P3). It carries no
+  usage and **must never be folded into accounting**: one exists per
+  model request, so counting them doubles every total. An `llm_request`
+  with no matching `llm_call` in a closed session means recovery did not
+  run; in a live stream it means the request is in flight.
 - `tool_call.tx_terminal_state` names the transaction outcome the
   harness reported — `confirmed_success` | `reverted` | `unconfirmed` |
   `validation_rejected` | `batch_error` — classified once at ingestion
@@ -408,9 +518,14 @@ tools first, scaffold tools second, deterministic so `tools_hash` is
 stable.
 
 The list above is the whole scaffold surface. The session-start brief
-(P1.12) added no entry to it: the brief is a call to a harness tool, so
-the tool surface the model is shown — and with it `tools_hash` — is
-unchanged by its existence.
+(P1.12) adds no entry to it, and from 0.4.0 that is true more strongly
+than before: the brief is not a tool at all. Its name appears in the
+injected assistant turn and in telemetry, never in the tool definitions
+sent to the provider, so the surface the model is shown — and with it
+`tools_hash` — is unchanged by its existence. A harness that registered
+a tool of the brief's name is refused at loop construction
+(`ValueError`), before any model call, on the same terms as a
+scaffold-name collision: one name meaning two things is a mis-pin.
 
 ### P11. Workspace conventions
 
@@ -532,30 +647,38 @@ suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
   unrecognized message is recorded as no state rather than guessed at.
 - `tx_hash` is extracted best-effort from structured content or JSON
   text, top level or one `result` level down, for telemetry only.
-- **One tool is depended on by name.** The session-start brief (P1.12)
-  calls `lens_party`, the surface's general any-operator party report,
-  for the account's own operator. This is the scaffold's only
-  name-coupling to the harness surface, and it is a soft one: a pin whose
-  surface does not carry the tool simply produces no brief (X20), and one
-  that carries it under changed semantics produces a brief whose content
-  is whatever the harness now returns — recorded, not validated, exactly
-  as every other harness result is.
+- **No tool is depended on by name.** The scaffold's one name-coupling
+  to the harness surface was the session-start brief's `lens_party`
+  call; from 0.4.0 the brief reads the daemon directly (D7) and the
+  coupling is gone. The scaffold now consumes the surface entirely as
+  given: it depends on no tool existing, and refuses only the reverse
+  case — a tool named like the brief (P10).
 - **Cap arithmetic assumption.** Every call re-sends the system prompt,
   the file index, the entire tool surface, and the session-start brief.
   That fixed floor must leave room for a session to be more than one
   call: the worst-case first-call floor is assumed **≤ 1/3 of
-  `session_token_cap`**. The brief makes the floor a function of the
-  account's roster size — it grows linearly in the number of kamis the
-  account owns, and that number grows over a run — so the assumption is
-  no longer a one-off measurement but one that has to be re-checked as
-  the roster grows. This is
-  **not enforced anywhere in the scaffold** — it is an operator sizing
+  `session_token_cap`**. The brief still makes the floor a function of
+  the account's roster size, and that number still grows over a run —
+  but the compact roster cut both the constant and the per-kami slope by
+  close to an order of magnitude against the party report it replaced,
+  so roster growth is no longer the term that threatens the assumption.
+  It remains a standing measurement, not a one-off. This is **not
+  enforced anywhere in the scaffold** — it is an operator sizing
   obligation on the manifest. The tri-provider smoke tier reports the
-  observed floor (`fixed_floor_input_tokens=…`) for that purpose. A
-  violated assumption degrades quietly into single-call sessions; a
-  grossly undersized `session_token_cap` relative to the model's context
-  window instead produces `reason=errors` sessions that analysis would
-  misread as model failure.
+  observed floor (`fixed_floor_input_tokens=…`) for that purpose;
+  floors do not compare across 0.4.0, in either the brief's content or
+  its serialization. A violated assumption degrades quietly into
+  single-call sessions; a grossly undersized `session_token_cap`
+  relative to the model's context window instead produces
+  `reason=errors` sessions that analysis would misread as model failure.
+- **The harness's own published identity is recorded.** The MCP
+  handshake carries the harness's hash of its own registry in the
+  `instructions` field. It is parsed out and recorded on `session_start`
+  as `harness_tools_hash`, bare hex, unmodified. This does not weaken
+  the never-equate rule above — it strengthens the CI drift check by
+  giving it the harness's own claim to compare against the harness's own
+  SPEC, while the scaffold's `tools_hash` keeps answering its separate
+  question. Absent when the pinned harness publishes nothing.
 - **Context-guard headroom** (same owner): because the guard is checked
   post-call, one full turn lands in context before the next check.
   Headroom below the model's context window must cover
@@ -577,6 +700,20 @@ logging (P8).
 are byte-identical with or without it, and nothing about caching reaches
 the agent (I1). Prices are manifest-pinned list prices (D3); their
 correctness against provider invoices is operator-owned.
+
+**Per-call provenance served, by provider.** Recorded where it exists,
+recorded as absent where it does not — absence is never read as zero.
+
+| provider | per-call request id | cache-lifetime split |
+|---|---|---|
+| Anthropic | `_request_id` on the response, from the `request-id` header; also on API errors | **yes** — `usage.cache_creation.ephemeral_5m_input_tokens` / `.ephemeral_1h_input_tokens`, recorded as `cache_write_5m_tokens` / `cache_write_1h_tokens` |
+| OpenAI | `_request_id` on the response, from the `x-request-id` header; also on API errors | **none** — `prompt_tokens_details` carries `cached_tokens` and `audio_tokens` only |
+| Google | `response_id` on the response — a **model** response id, not a transport request id; no header without `include_sdk_http_response`, which would change the pinned request configuration and is deliberately not set. Errors carry none | **none** — `cache_tokens_details` is a per-**modality** breakdown, not a lifetime one |
+
+The Anthropic split is worth having beyond bookkeeping: the adapter
+requests 5-minute entries only, so a non-zero 1-hour figure would be a
+finding, and recording both makes N5's no-long-TTL claim a measured fact
+per call rather than a claim about the request that was sent.
 
 ### D3. Manifest fields consumed
 
@@ -600,9 +737,10 @@ at construction, everything else is silently ignored.
 | `workspace_quota_bytes` | P11 |
 | `lock_stale_s` | P4 |
 | `chain_rpc_url` | `init` connectivity check only |
-| `presentation_mode` | D1 — passed to the harness child as `PRESENTATION_MODE`, recorded on `session_start`; never validated scaffold-side |
+| `presentation_mode` | D1 — passed to the harness child as `PRESENTATION_MODE`, recorded on `session_start`; never validated scaffold-side. Also selects the brief's `noAuthored` request flag (D7), so both read paths ask the daemon for the same composition |
 | `harness.{command,args,cwd,env,handshake_timeout_s}` | D1 |
-| `pins.{agent_sha,harness_sha,gdd_sha}` | `run_start` provenance only — recorded, never verified |
+| `lens.{socket_path,timeout_s,enabled}` | D7 — the world-state daemon the session-start brief reads. `socket_path` unset resolves `KAMI_LENS_SOCKET`, then the platform default; `enabled: false` is the only way to run with no brief at all |
+| `pins.{agent_sha,harness_sha,lens_sha,gdd_sha}` | `run_start` provenance only — recorded, never verified |
 
 Not manifest-driven despite being run parameters: **`poll_cadence`**
 (an argument to the supervisor's cron installer, default 5 min) and
@@ -633,6 +771,44 @@ atomic `os.replace` for the state cache. Keys are read from a run-dir
 `.env` (existing environment wins) and never enter the manifest, the
 config copy, transcripts, or telemetry.
 
+### D7. kami-lens daemon socket
+
+New at 0.4.0: the scaffold consumes the world-state daemon **directly**,
+for one thing only — the session-start brief (P1.12). Everything else
+the agent perceives still arrives through the harness (D1), which reads
+the same daemon over the same socket.
+
+- **Wire protocol**: JSON-lines over a unix domain socket. One request
+  object per line in — `{"id", "query", "args"?: [string],
+  "noAuthored"?}` — one response per line out, either
+  `{"id", "ok": true, data, untrusted, meta}` or
+  `{"id", "ok": false, "error": {"code", "message"}}`. The envelope is
+  returned verbatim minus the transport keys.
+- **Socket resolution**: `lens.socket_path`, then `KAMI_LENS_SOCKET`,
+  then the daemon's platform default. The harness resolves the same
+  three levels for its own reads; a mismatch would point the brief at a
+  different daemon than every other read in the run.
+- **Operator obligation, and the shape of not meeting it yet.** The
+  brief sends no account argument, because the scaffold has no way to
+  know which account a run is. The daemon fills it from its own
+  configured default operator. Until that is set, the brief **degrades
+  visibly every session** with the daemon's own error — which is the
+  *expected* early-run shape, not a misconfiguration: provisioning sets
+  the default operator once the account exists, which is after the run
+  has begun. `init` reports which of the two states it found and fails on
+  neither.
+- **No client-side retry, ever.** One attempt per session (X21). The
+  loop's retry policy covers model calls only, exactly as it does for
+  harness tools (D1).
+- **Nothing is validated.** The answer is whatever the pinned daemon
+  serves. A daemon whose `roster` changed shape produces a brief of that
+  shape — recorded, not checked — on the same terms as every harness
+  result. The scaffold owns the serialization and the byte cap and
+  nothing else.
+- **Construction cannot fail.** A client opens no connection until it is
+  queried, so an unreachable daemon can never abort a session; it is
+  discovered by the brief and degrades there.
+
 ---
 
 ## Invariants
@@ -662,7 +838,10 @@ config copy, transcripts, or telemetry.
 | I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
 | I22 | The three post-broadcast terminal states plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing), `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
 | I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
-| I24 | The session-start brief is one call to the general party-report tool, executed before the first model call, injected verbatim as a normal tool result, attempted exactly once, and separable in telemetry from what the agent chose — and it bounds nothing the agent does | `tests/unit/test_brief.py` — ordering (`test_brief_is_executed_before_the_first_model_call`), whole-message verbatimness (`::test_brief_result_is_injected_verbatim`), no special path (`::test_brief_is_the_general_tool_and_stays_available_to_the_agent`), provenance (`::test_brief_is_telemetered_like_any_tool_call_and_marked_scaffold_initiated`), cap/counter/breaker exclusion (`::test_brief_consumes_no_session_tool_cap`, `::test_a_failed_brief_does_not_advance_the_consecutive_error_counter`, `::test_brief_never_feeds_the_repetition_breaker`), degradation (`::test_a_failing_brief_is_injected_as_its_error_and_the_session_proceeds`, `::test_a_failing_brief_is_attempted_exactly_once`, `::test_no_brief_when_the_loaded_surface_does_not_carry_the_tool`); end to end through the real CLI in the `cron-smoke` job and natively per provider in the tri-provider tier |
+| I24 | The session-start brief is one daemon query, executed before the first model call, injected verbatim as a tool result, attempted exactly once, separable in telemetry from what the agent chose — and it bounds nothing the agent does | `tests/unit/test_brief.py` — ordering (`test_brief_is_executed_before_the_first_model_call`), whole-message verbatimness (`::test_brief_result_is_injected_verbatim`), special-path closure (`::test_the_brief_is_a_special_path_and_the_agent_cannot_make_it`, `::test_full_per_kami_detail_stays_on_the_harness_surface`, `::test_a_harness_tool_of_the_briefs_name_is_refused_before_any_model_call`), provenance (`::test_brief_is_telemetered_and_marked_scaffold_initiated_from_the_lens`), cap/counter/breaker exclusion (`::test_brief_consumes_no_session_tool_cap`, `::test_a_failed_brief_does_not_advance_the_consecutive_error_counter`, `::test_brief_never_feeds_the_repetition_breaker`), degradation (`::test_a_query_error_is_injected_as_the_daemons_own_words`, `::test_an_unreachable_daemon_is_injected_as_the_minimal_record`, `::test_a_failing_brief_is_attempted_exactly_once`, `::test_no_brief_when_no_daemon_is_configured`); wire protocol against a real socket in `tests/unit/test_lens.py`; end to end through the real CLI against a stand-in daemon in the `cron-smoke` job, and natively per provider in the tri-provider tier |
+| I25 | A model request that was sent always leaves a record, whether or not its outcome did — and the write-ahead marker never inflates accounting | `tests/unit/test_loop.py::test_every_model_request_is_written_before_it_is_sent` (asserts the marker is on disk at the moment the request goes out), `::test_each_retry_is_its_own_request`, `::test_write_ahead_markers_never_contribute_to_accounting`, `::test_an_unnormalizable_response_is_recorded_instead_of_escaping`; recovery in `tests/unit/test_runner.py::test_a_request_that_never_completed_is_named_not_lost`, `::test_the_phantom_is_counted_by_the_crash_session_end`, `::test_phantom_recovery_is_idempotent`, `::test_a_completed_request_is_never_called_phantom`; pairing re-asserted per session by `tests/cron_smoke/check_telemetry.py` |
+| I26 | Every emitted `tool_call` row is 1:1 with the intent behind it, and a provider that reuses a call id is recorded rather than obeyed or refused | `tests/unit/test_loop.py::test_every_emitted_row_carries_a_monotonic_call_identity`, `::test_skipped_intents_also_get_an_identity`, `::test_provider_call_ids_are_recorded_verbatim`, `::test_a_reused_provider_call_id_is_flagged_and_both_calls_still_execute` (both calls run, in order, with their own arguments, and nothing raises); `check_telemetry.py` asserts `call_seq` is unique and ordered in a real session |
+| I27 | Transaction evidence survives into telemetry from both the returned and the raised path, and from every nesting level a multi-transaction payload uses | `tests/unit/test_receipts.py` (`test_raised_revert_and_unconfirmed_yield_their_transaction_hash`, `::test_a_batch_error_yields_no_single_hash`, `::test_a_pre_signing_rejection_has_no_hash_to_report`, `::test_a_hash_quoted_outside_the_contract_clause_is_not_read_as_the_transaction`), `tests/unit/test_harness_client.py::test_per_hop_receipts_are_copied_from_a_top_level_array`, `::test_per_row_receipts_are_copied_from_inside_a_batch_result_list`, `tests/unit/test_loop.py::test_a_reverted_transaction_records_its_hash_on_the_field`, `::test_in_band_receipts_and_error_shaped_results_reach_telemetry` |
 
 ---
 
@@ -752,25 +931,51 @@ a bug; changing one is a spec change, not a fix.
   producing a wrong label. The recorded-surface CI fixture and the
   copied message text in the fake MCP server are what surface the
   drift.
-- **X20 — the session-start brief consumes no cap and is skipped, not
-  reported, when the tool is absent.** It executes a real harness call
-  yet counts toward neither `session_tool_cap` nor the consecutive-error
-  counter nor the repetition breaker, and a pin whose surface lacks
-  `lens_party` produces no brief and no telemetry at all. Both halves
-  follow from the same reading: those counters exist to bound what the
-  *agent* does, and a read the agent did not choose must not shrink its
-  session or end it. The asymmetry is deliberate — the brief still emits
-  a `tool_call` event and still counts in `session_end.tool_calls`, so
-  nothing is hidden, it is only excluded from the caps.
-- **X21 — a failed brief is injected as its error and the session
-  proceeds.** One attempt, no retry, no fallback content, no abort: the
-  error text the harness produced becomes the first tool result the model
-  sees. The alternatives are worse. Retrying would make the scaffold do
-  for itself what D1 forbids it to do for the agent; substituting
-  placeholder content would put scaffold-authored prose in an
-  agent-visible channel; aborting would let an unavailable read-side
-  daemon end sessions that could still act. A session that opens on a
-  visible failure is a session whose telemetry says so.
+- **X20 — the session-start brief consumes no cap, and it is skipped
+  only when no daemon is configured.** It performs a real read yet
+  counts toward neither `session_tool_cap` nor the consecutive-error
+  counter nor the repetition breaker: those counters exist to bound what
+  the *agent* does, and a read the agent did not choose must not shrink
+  its session or end it. The asymmetry is deliberate — the brief still
+  emits a `tool_call` event and still counts in
+  `session_end.tool_calls`, so nothing is hidden, it is only excluded
+  from the caps. The skip condition narrowed at 0.4.0: with no tool
+  surface to consult, the only way to learn whether a daemon is there is
+  to ask, so a *configured but unreachable* daemon degrades visibly
+  rather than vanishing. Silence would make "the brief never ran" and
+  "the brief was never wanted" the same reading.
+- **X21 — a failed brief is injected as a minimal error record and the
+  session proceeds.** One attempt, no retry, no fallback content, no
+  abort. For a query error the record is the daemon's own code and
+  message. For a transport failure there is no daemon text to quote, so
+  the scaffold composes `{"error": {"code": "LENS_UNAVAILABLE",
+  "message": <the OS's own text>}}` — the narrowest thing that can be
+  said. That single authored token is a real cost, accepted over the
+  alternatives: retrying would make the scaffold do for itself what D1
+  forbids it to do for the agent; substituting placeholder *content*
+  would put scaffold-authored prose where world state belongs; aborting
+  would let an unavailable read-side daemon end sessions that could
+  still act. The record is machine-shaped, carries no advice, and is
+  frozen and leak-scanned like the three prompt strings (P13, I1).
+- **X22 — the brief is a special path, and says so.** Through 0.3.2 the
+  brief was a call to a general harness tool the agent could equally
+  make, and "no special path" was a contract. It is not one any more:
+  the roster is read straight from the daemon, the name is not on the
+  tool surface, the agent cannot issue the call, and the loop
+  synthesizes the call/result pair instead of dispatching it. The
+  compaction is worth the exception — the daemon owns compaction, and
+  the compact form is what keeps the fixed floor from growing with the
+  roster — but the exception is real and is not to be re-described as
+  symmetry. What preserves the agent's reach is that the **full**
+  per-kami detail stays on `lens_party`, unchanged.
+- **X23 — a duplicated provider call id is recorded, never obeyed and
+  never refused.** The loop routes results positionally, so a repeated
+  id changes nothing about execution: both calls run, in order, with
+  their own arguments. It is flagged because anything that joins results
+  to calls *by id* is silently wrong for those rows. It does not raise,
+  because a provider quirk must not end a session — and it is not
+  deduplicated, because N9 forbids that and because the two calls are
+  genuinely different intents.
 
 ---
 
@@ -783,7 +988,9 @@ a bug; changing one is a spec change, not a fix.
 - **N4** Self-funding or economic self-sustainability.
 - **N5** Long-TTL or cross-session prompt caching, and explicit cache
   APIs on OpenAI/Gemini — their automatic caching is measured, not
-  managed.
+  managed. From 0.4.0 the Anthropic half of this is **verified rather
+  than asserted**: cache writes are recorded split by entry lifetime, so
+  a 1-hour entry would show up as one (D2).
 - **N6** Web access, shell access, or any non-harness network channel
   from the agent loop.
 - **N7** Any UI.
@@ -800,6 +1007,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 1.9 | v0.4.0 | Consumption of the kami-harness 2.1.0 surface (101 tools) and of the kami-lens 0.3.0 compact roster. **The session-start brief becomes a direct daemon read** (P1.12, new D7): one `roster` query over the daemon's own socket, replacing the harness `lens_party` call. It is now explicitly a special path (X22) — not a tool, not on the surface, not issuable by the agent, refused at construction if a harness registers its name (P10) — and the compaction cuts both the fixed floor's brief term and its slope in roster size by close to an order of magnitude, which is what takes roster growth off D1's cap-arithmetic assumption. Failures degrade to a minimal machine-shaped record, the transport half of which is the one string the scaffold authors and is frozen accordingly (X21, P13). **Telemetry integrity** (P3, P9): every model request is written ahead as `llm_request` and paired by `request_seq`, so a request billed but never completed is recovered as a named `phantom` row instead of vanishing, with the residual window stated exactly; no exception can escape the call site unrecorded (P8); `call_seq` gives the stream its own 1:1 call identity and `provider_call_id`/`provider_call_id_duplicate` record — without obeying or refusing — a provider that reuses an id (X23, I26), the class that once presented as a routing defect and was adjudicated to be an analysis mis-join; `tx_hash` now covers the raised path and `txs[]` carries in-band per-transaction receipts from both nesting levels (I27); `result_error_shaped` names a returned-rather-than-raised failure without moving `ok`. Per-call `provider_request_id` and the Anthropic cache-lifetime split are recorded where served and as absent where not (D2), which makes N5 measured. `harness_tools_hash` records the harness's own published registry hash beside — never equated with — the scaffold's. `usage_unknown`'s two distinct lossy classes are separated in P7.4, with the recoverable one named as out of scope. Telemetry schema 0.3.1 → 0.4.0: one new event type, one widened enum (`tool_call.source` gains `lens`), the rest additive. |
 | 1.8 | v0.3.2 | Session-start status brief (P1.12): before the first model call the scaffold calls the pinned surface's general any-operator party report, `lens_party`, for the account's own operator, and injects the result verbatim as a normal tool result — one call covering every owned kami's on-chain state, HP current/total/rate, and cooldown, so orientation is not re-derived from scratch each session. Explicitly not a special path: the same tool stays available to the agent for any account, both invocations share one execution path, and only the new `tool_call.initiator` (`model` \| `scaffold`) separates them (P9). The brief is attempted exactly once and degrades visibly — a failure is injected as the error it is and the session continues (X21) — and it bounds nothing the agent does: no `session_tool_cap`, no error counter, no repetition breaker (X20). No new scaffold tool, so `tools_hash` is unchanged (P10). Telemetry schema 0.3.0 → 0.3.1 (one additive optional field). D1's cap arithmetic restated: the fixed floor now grows linearly with the account's roster size, so it is a standing measurement, not a one-off. |
 | 1.7 | v0.3.0 | Consumption of a harness that **raises** confirmed reverts and unconfirmed transactions instead of returning them: harness error messages are contractually verbatim to the model and dispatched once (I21); the transaction outcome is classified once at ingestion into `tool_call.tx_terminal_state`, a closed five-value enum, so analysis splits validation-rejects / reverts / unconfirmed on a field rather than on prose (I22, X18, X19); `tool_call.ok` restated as exception-keyed and harness-dependent, to be read with the new field and never alone; P5.1's error-or-revert note restated as harness-dependent, with knobs unchanged. Harness `presentation_mode` pinned in the manifest, passed to the child unvalidated, and recorded on every `session_start` (I23, X17). `tools_hash` restated as the scaffold's own fingerprint, different by construction from any hash a harness publishes of its own registry. Telemetry schema 0.2.0 → 0.3.0 (two additive optional fields). |
 | 1.6 | v0.2.0 (18f75d04) | Converged to a contract registry: Provides / Depends / Invariants / Deliberate deviations / Non-goals / Changelog, every claim verified against the code and paired with its enforcement. Newly stated as contract: the `run.lock` and transcript layout, the closed run-session outcome set, executed-vs-emitted tool-call accounting, `stop_reason: "error"`, the telemetry schema version as a downstream contract, the recorded-not-negotiated harness identity, per-provider caching modes and what accounting assumes of each, the consumed manifest key list, and the sixteen accepted deviations. Narrative, packaging, and CI-tier prose moved to `README.md` / `docs/packaging.md`. |

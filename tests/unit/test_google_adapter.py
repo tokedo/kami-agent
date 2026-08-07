@@ -273,3 +273,33 @@ def test_complete_wraps_api_errors_and_connection_errors():
     with pytest.raises(AdapterError) as excinfo:
         adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
     assert excinfo.value.retryable
+
+
+# --- per-call provenance (SPEC D2, P9, 0.4.0) --------------------------------
+
+
+def test_the_response_id_is_recorded_as_the_per_call_identifier():
+    """The closest identifier the SDK serves without changing the request.
+
+    It is a model response id, NOT a transport request id: the raw headers
+    would need include_sdk_http_response, which alters the pinned request
+    configuration and is deliberately not set.
+    """
+    response = load_fixture("text_stop")
+    response.response_id = "resp-abc-123"
+    adapter, _ = make_adapter(response)
+    assert adapter.complete("s", [UserMessage(text="hi")], [], PARAMS).request_id == "resp-abc-123"
+
+
+def test_a_response_without_one_carries_none():
+    adapter, _ = make_adapter(load_fixture("text_stop"))
+    assert adapter.complete("s", [UserMessage(text="hi")], [], PARAMS).request_id is None
+
+
+def test_implicit_caching_serves_no_lifetime_split():
+    """cache_tokens_details is a per-MODALITY breakdown, not a TTL one."""
+    adapter, _ = make_adapter(load_fixture("cached_usage"))
+    usage = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS).usage
+    assert usage.cache_read_tokens > 0
+    assert usage.cache_write_5m_tokens is None
+    assert usage.cache_write_1h_tokens is None

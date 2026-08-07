@@ -91,7 +91,9 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    keys), judged by real exit codes and explicit telemetry assertions.
 3. **Tri-provider recorded-surface** (`uv run pytest tests/smoke`, per PR)
    — one canned session per adapter against real provider APIs with a fake
-   harness serving the *recorded* tool surface of the pinned kami-harness.
+   harness serving the *recorded* tool surface of the pinned kami-harness
+   and a fixture daemon serving the brief. **It bills real provider
+   calls**, so it is run deliberately, not as part of a local test sweep.
    Fork PRs skip cleanly, since repo secrets are not exposed to them.
    This tier also reports the observed per-call fixed context floor that
    the SPEC D1 cap-arithmetic assumption needs, on a fixed measurement
@@ -105,32 +107,42 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    under**, which is why the recorded fixture names its own. Harness tool
    descriptions are docstrings, and CPython 3.13 strips their common
    leading indentation at compile time where 3.12 retains it: the same
-   harness commit therefore serves the same 99 tools with materially
+   harness commit therefore serves the same 101 tools with materially
    different description bytes, a different hash, and a different floor.
    The packaged image (`Dockerfile`) is `python:3.13-slim`, so 3.13 is
    the reference — every tier that spawns a harness must match it, and
    the live tier asserts the surface it gets equals the recorded one.
 
-   Since the session-start brief (SPEC P1.12) lands in call-1 context, it
-   is part of the floor, and its size is linear in how many kamis the
-   account owns — the one term in the floor that **moves during a run**.
-   Against the recorded surface the brief is served from a committed
-   fixture (`tests/smoke/fixtures/party_brief.json`: synthetic roster,
-   real envelope shape), so the floor is reproducible; the report quotes
-   the roster size next to the floor, because one is not interpretable
-   without the other. `KAMI_SMOKE_BRIEF_KAMIS=N` re-measures the floor at
-   any roster size, which is how the sizing headroom in a manifest's
-   `session_token_cap` is checked against the roster a run will grow to
-   rather than the one it starts with.
+   Since the session-start brief (SPEC P1.12, D7) lands in call-1
+   context, it is part of the floor, and its size is linear in how many
+   kamis the account owns — the one term in the floor that **moves
+   during a run**. Against the recorded surface the brief is served from
+   a committed fixture (`tests/smoke/fixtures/roster_brief.json`:
+   synthetic roster, real envelope shape), so the floor is reproducible;
+   the report quotes the roster size next to the floor, because one is
+   not interpretable without the other. `KAMI_SMOKE_BRIEF_KAMIS=N`
+   re-measures the floor at any roster size, which is how the sizing
+   headroom in a manifest's `session_token_cap` is checked against the
+   roster a run will grow to rather than the one it starts with.
+
+   **Floors do not compare across 0.4.0.** The brief changed from a full
+   party report to a compact roster, and from the harness's
+   pretty-printed serialization to the scaffold's compact one. Both cut
+   it; together they cut it by roughly an order of magnitude at a given
+   roster size and flatten its slope in roster size by about as much
+   again. The fixture that measured the old shape also measured it
+   wrongly — compact bytes for a path that pretty-printed, and an
+   envelope `meta` block the daemon never served — so pre-0.4.0 floors
+   describe a shape no model ever saw.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must
-   not block unrelated PRs. The brief runs against the real harness here,
-   so this tier is also where its failure path is observed for real: with
-   no lens daemon behind the checkout the party report answers with its
-   own unavailability error, which is injected as-is and reported — the
-   floor this tier prints is therefore a *failed*-brief floor, and is not
-   comparable to tier 3's.
+   not block unrelated PRs. This tier is also where the brief's real
+   failure path is observed: it queries the daemon socket directly, so
+   with no kami-lens daemon running it degrades to its unavailability
+   record, which is injected as-is and reported — the floor this tier
+   prints is then a *failed*-brief floor, and is not comparable to
+   tier 3's.
 
 The telemetry event schema ([`schema/telemetry.json`](schema/telemetry.json),
 versioned independently) is the contract for downstream analysis.

@@ -9,18 +9,19 @@ Forced endings (context guard, tool cap, errors) are silent (I4): no
 warning message, no final model call.
 
 Before the first model call the loop issues the session-start status
-brief (SPEC P1.12): one call to the pinned harness's general
-any-operator party-report tool, for the account's own operator, injected
-as a normal tool result. It is not a special path — the same tool stays
-available for the agent to call itself, and both invocations execute
-through ``_execute_intent`` and are telemetered identically, separated
-only by ``tool_call.initiator``.
+brief (SPEC P1.12): one compact roster query to the kami-lens daemon,
+made by the scaffold over the daemon's own socket, injected as a tool
+result. It **is** a special path (X22): the query is not on the tool
+surface, the agent cannot make it, and it runs on its own execution
+path rather than through ``_execute_intent``.
 """
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -40,6 +41,7 @@ from kami_agent.adapters.base import (
     UserMessage,
 )
 from kami_agent.governor import PriceTable, cost_usd
+from kami_agent.lens import LensError
 from kami_agent.repetition import (
     DEFAULT_IDENTICAL_CAP,
     DEFAULT_MIN_DISTINCT,
@@ -51,7 +53,7 @@ from kami_agent.repetition import (
 )
 from kami_agent.telemetry import TelemetryWriter
 from kami_agent.tools.errors import ToolError
-from kami_agent.tools.receipts import classify_error
+from kami_agent.tools.receipts import classify_error, error_shaped_payload, tx_hash_from_error
 from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS, SCAFFOLD_TOOL_NAMES, ScaffoldTools
 from kami_agent.tools.truncation import cap_tool_result
 
@@ -77,16 +79,39 @@ _FILE_TOOLS = frozenset({"workspace_write", "workspace_read", "workspace_list", 
 INITIATOR_MODEL = "model"
 INITIATOR_SCAFFOLD = "scaffold"
 
-# Session-start status brief (SPEC P1.12). The tool is the pinned harness's
-# general any-operator party report — every kami of one account with its
-# full vitals (state, HP current/total/percent, HP rate per hour, cooldown
-# seconds, accrual) — not a brief-specific entry point: the agent may call
-# it itself with any account, and does so through exactly this name.
-# ``account_index`` is the sentinel the tool defines for "the operator this
-# harness runs as", passed explicitly rather than left to the tool's
-# default so the recorded call says what it asked for.
-BRIEF_TOOL = "lens_party"
-BRIEF_ARGS: dict[str, Any] = {"account_index": -1}
+# Which layer owns the thing that was called (tool_call.source, SPEC P9).
+SOURCE_HARNESS = "harness"
+SOURCE_SCAFFOLD = "scaffold"
+# The world-state daemon, reached directly by the scaffold. Neither of the
+# other two: the harness does not own this call and the scaffold does not
+# own the answer.
+SOURCE_LENS = "lens"
+
+# Session-start status brief (SPEC P1.12). A compact roster query straight
+# to the kami-lens daemon: one line per kami (index, state, [hp, hpTotal])
+# plus the room the account is standing in. Full per-kami detail stays on
+# the harness's own party report, which the agent can still call itself.
+#
+# BRIEF_QUERY is the daemon's registry name. BRIEF_TOOL is the name the
+# injected call and its telemetry row carry — it is NOT on the tool surface
+# and the agent cannot call it (X22). It must not collide with a harness
+# tool name, and that is ENFORCED at loop construction rather than assumed
+# from the spelling: nothing stops a future harness from registering a
+# function of this name, and a pin that did would mean the two layers
+# disagree about who serves the roster.
+#
+# The name deliberately stays inside the [A-Za-z0-9_-] set every provider
+# accepts for a function name. A dotted namespace would be collision-proof
+# by construction, but the injected assistant turn carries this name to
+# three provider APIs, and at least one of them documents that character
+# set as a constraint.
+#
+# No arguments: the daemon prefills the account index of an
+# operator-argument query from its own configured default operator when the
+# argument list is empty (D7).
+BRIEF_TOOL = "lens_roster"
+BRIEF_QUERY = "roster"
+BRIEF_ARGS: dict[str, Any] = {}
 BRIEF_CALL_ID = "brief_1"
 
 _BACKOFF_BASE_S = 1.0
@@ -100,11 +125,19 @@ class GameToolResult:
     ``terminal_state`` is the transaction outcome the harness reported,
     when the result is one (SPEC D1); None for reads and for anything
     that is not a single submitted transaction.
+
+    ``txs`` is the per-transaction receipt evidence a multi-transaction
+    result carries in band — one entry per hop or per item, each with
+    whatever of ``tx_hash`` / ``status`` / ``block`` / ``gas_used`` the
+    harness reported. Copied out verbatim for telemetry so a tx-keyed
+    reconciliation does not have to parse transcripts; empty whenever the
+    payload carried none.
     """
 
     content: str
     tx_hash: str | None = None
     terminal_state: str | None = None
+    txs: tuple[dict[str, Any], ...] = ()
 
 
 @runtime_checkable
@@ -115,6 +148,13 @@ class GameTools(Protocol):
     def tool_defs(self) -> list[ToolDef]: ...
 
     def execute(self, name: str, args: dict[str, Any]) -> GameToolResult: ...
+
+
+@runtime_checkable
+class LensQuery(Protocol):
+    """The world-state daemon surface the brief needs (implemented in lens.py)."""
+
+    def query(self, name: str, args: list[Any] | None = None) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +218,7 @@ class AgentLoop:
         params: SamplingParams,
         prices: PriceTable,
         caps: LoopCaps,
+        lens: LensQuery | None = None,
         cumulative_usd: float = 0.0,
         cumulative_tokens: int = 0,
         sleep: Callable[[float], None] = time.sleep,
@@ -194,6 +235,7 @@ class AgentLoop:
         self._params = params
         self._prices = prices
         self._caps = caps
+        self._lens = lens
         self._cumulative_usd = cumulative_usd
         self._cumulative_tokens = cumulative_tokens
         self._sleep = sleep
@@ -202,6 +244,13 @@ class AgentLoop:
         collisions = {t.name for t in game_defs} & SCAFFOLD_TOOL_NAMES
         if collisions:
             raise ValueError(f"harness tools shadow scaffold tools: {sorted(collisions)}")
+        # The brief's name is not on the surface, so a harness tool of the
+        # same name would make one name mean two things — an injected call
+        # the agent cannot make, and a real tool it can. That is a mis-pin,
+        # not a runtime condition to absorb: refuse before any model call,
+        # exactly as a scaffold collision does.
+        if BRIEF_TOOL in {t.name for t in game_defs}:
+            raise ValueError(f"harness tool shadows the session-start brief name: {BRIEF_TOOL!r}")
         # Game tools first, scaffold tools second (SPEC P10 order); the order
         # is deterministic so tools_hash is stable.
         self._tool_defs: list[ToolDef] = game_defs + list(SCAFFOLD_TOOL_DEFS)
@@ -223,6 +272,17 @@ class AgentLoop:
         )
         self._repetition_trip: RepetitionTrip | None = None
         self._carried_wake: str | None = None
+        # Scaffold-internal per-call identity (SPEC P9). Telemetry carried no
+        # call identity at all before 0.4.0, so two rows of the same tool in
+        # one turn could not be told apart, and a provider that reuses a call
+        # id could not be distinguished from a genuine repeat without reading
+        # the transcript. One monotonic number per EMITTED tool_call row,
+        # skipped intents included, makes the row↔intent correspondence 1:1
+        # on the face of the stream.
+        self._call_seq = 0
+        # One monotonic number per model REQUEST, written ahead of the call
+        # so a request that is billed but never completed leaves a record.
+        self._request_seq = 0
 
     # --- public --------------------------------------------------------------
 
@@ -267,52 +327,85 @@ class AgentLoop:
     # --- session-start status brief (SPEC P1.12) -----------------------------
 
     def _inject_brief(self, messages: list[Message]) -> None:
-        """Call the party-report tool once and inject its result verbatim.
+        """Query the daemon's compact roster once and inject it verbatim.
 
         Runs before the first model call, so call 1 already carries the
         account's own kami state instead of spending turns rediscovering
-        it. The result enters context as a normal tool result — an
-        assistant turn holding the call, then its result — so the model
-        sees what it would have seen had it made the call itself. Nothing
-        is summarized, reordered, filtered, or annotated: the harness
-        envelope is passed through under the same byte cap every tool
-        result gets (P2), and the same is true of a failure.
+        it. The answer enters context as a tool result — an assistant
+        turn holding the call, then its result — which is the shape a
+        model reads as "a read already happened". Nothing is summarized,
+        reordered, filtered, or annotated: the daemon envelope is
+        serialized compactly and passed through under the same byte cap
+        every tool result gets (P2), and the same is true of a failure.
+
+        **This is a special path** (X22), and the previous version's
+        claim that it was not is retired. The roster is not a harness
+        tool: the scaffold speaks to the daemon itself, on its own
+        execution path, and the agent cannot issue this call. What the
+        agent keeps is the full per-kami detail on the harness's own
+        party report, unchanged.
 
         Degrade visibly, never block (SPEC X21): exactly one attempt, no
-        retry and no fallback content. A failure is injected as the error
-        result it is, telemetered like any other failed call, and the
+        retry and no fallback content. A failure is injected as the
+        minimal machine-shaped error record it is, telemetered, and the
         session proceeds — the failure is data, not a reason to abort.
+        A query error carries the daemon's own code and message; a
+        transport failure has no daemon text to quote, so its code is the
+        scaffold's and its message is the operating system's.
 
         The brief consumes no ``session_tool_cap``, never advances the
         consecutive-error counter, and never feeds the repetition breaker
         (X20): those caps bound what the agent does. It is skipped
-        entirely when the loaded surface does not carry the tool, which
-        leaves no telemetry — an absent tool is visible in
-        ``run_start.harness_tools`` and in ``tools_hash``.
+        entirely when no daemon is configured, which leaves no telemetry.
         """
-        if self._game is None or BRIEF_TOOL not in {t.name for t in self._game.tool_defs}:
+        if self._lens is None:
             return
         intent = ToolCall(id=BRIEF_CALL_ID, name=BRIEF_TOOL, args=dict(BRIEF_ARGS))
-        outcome = self._execute_intent(intent)
+        start = time.perf_counter()
+        stale: bool | None = None
+        block: int | None = None
+        try:
+            envelope = self._lens.query(BRIEF_QUERY)
+        except LensError as exc:
+            # The record IS the failure text: no rewording, no advice.
+            raw = exc.as_record()
+            ok = False
+            error: str | None = raw
+        else:
+            raw = json.dumps(envelope, ensure_ascii=False)
+            ok = True
+            error = None
+            meta = envelope.get("meta")
+            if isinstance(meta, dict):
+                # Operator-side only (I1): recorded so analysis can see the
+                # brief was served from degraded state without reparsing the
+                # transcript. Never a separate agent-visible channel — the
+                # same values are already inside the injected envelope.
+                if isinstance(meta.get("stale"), bool):
+                    stale = meta["stale"]
+                if isinstance(meta.get("blockNumber"), int):
+                    block = meta["blockNumber"]
+        duration_ms = (time.perf_counter() - start) * 1000
+        capped = cap_tool_result(raw, self._caps.tool_result_max_bytes)
         messages.append(AssistantMessage(text=None, tool_calls=(intent,)))
         messages.append(
             ToolResultMessage(
                 tool_call_id=intent.id,
-                content=outcome["content"],
-                is_error=not outcome["ok"],
+                content=capped.content,
+                is_error=not ok,
             )
         )
         self._emit_tool_call(
             intent,
-            source=outcome["source"],
-            duration_ms=outcome["duration_ms"],
-            ok=outcome["ok"],
-            error=outcome.get("error"),
-            truncated=outcome.get("truncated", False),
-            original_bytes=outcome.get("original_bytes"),
-            tx_hash=outcome.get("tx_hash"),
-            terminal_state=outcome.get("terminal_state"),
+            source=SOURCE_LENS,
+            duration_ms=duration_ms,
+            ok=ok,
+            error=error,
+            truncated=capped.truncated,
+            original_bytes=capped.original_bytes if capped.truncated else None,
             initiator=INITIATOR_SCAFFOLD,
+            lens_stale=stale,
+            lens_block=block,
         )
 
     # --- model calls (SPEC P8) ----------------------------------------------
@@ -320,6 +413,18 @@ class AgentLoop:
     def _call_model(self, messages: list[Message], continuation: bool) -> AdapterResponse | None:
         attempt = 0
         while True:
+            # Write-ahead (SPEC P9, I6). The provider is billed the instant
+            # the request leaves; the llm_call row is written only once it
+            # comes back. Everything in between — a process kill, an OOM,
+            # the host going away — used to leave a billed call with no
+            # record of ANY kind, which is unrecoverable after the fact
+            # because nothing local knows the request happened. This row
+            # says it happened, before it happens. Recovery pairs it with
+            # its llm_call by request_seq and synthesizes a phantom row for
+            # any that never got one (P3).
+            self._request_seq += 1
+            request_seq = self._request_seq
+            self._telemetry.emit("llm_request", session=self._session, request_seq=request_seq)
             start = time.perf_counter()
             try:
                 response = self._adapter.complete(
@@ -341,12 +446,42 @@ class AgentLoop:
                     retry_count=attempt,
                     usage_unknown=True,
                     continuation=continuation,
+                    request_seq=request_seq,
+                    provider_request_id=exc.request_id,
                 )
                 if not exc.retryable or attempt >= self._caps.retry_max_attempts:
                     return None
                 self._sleep(min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * 2**attempt))
                 attempt += 1
                 continue
+            except Exception:
+                # Anything the adapter did not normalize into an AdapterError
+                # — an SDK shape the adapter did not expect, a fault inside
+                # response parsing — after the provider has already been
+                # billed. Previously this escaped the loop entirely and the
+                # session died with NO llm_call row: a billed call invisible
+                # to accounting. It is emitted here on the same terms as any
+                # other failed attempt (cost 0, usage unknowable) and ends
+                # the session as `errors`, which is what a non-retryable
+                # model error already means (P5). Deliberately broad: the
+                # point is that no exception type can reintroduce the hole.
+                latency_ms = (time.perf_counter() - start) * 1000
+                self._llm_calls += 1
+                self._emit_llm_call(
+                    input_tokens=0,
+                    output_tokens=0,
+                    reasoning_tokens=None,
+                    cache_read_tokens=0,
+                    cache_write_tokens=0,
+                    cost=0.0,
+                    latency_ms=latency_ms,
+                    stop_reason="error",
+                    retry_count=attempt,
+                    usage_unknown=True,
+                    continuation=continuation,
+                    request_seq=request_seq,
+                )
+                return None
             latency_ms = (time.perf_counter() - start) * 1000
             usage = response.usage
             if (
@@ -373,6 +508,8 @@ class AgentLoop:
                     usage_unknown=False,
                     continuation=continuation,
                     empty_response=True,
+                    request_seq=request_seq,
+                    provider_request_id=response.request_id,
                 )
                 if attempt >= self._caps.retry_max_attempts:
                     return None
@@ -398,6 +535,10 @@ class AgentLoop:
                 retry_count=attempt,
                 usage_unknown=False,
                 continuation=continuation,
+                request_seq=request_seq,
+                provider_request_id=response.request_id,
+                cache_write_5m_tokens=usage.cache_write_5m_tokens,
+                cache_write_1h_tokens=usage.cache_write_1h_tokens,
             )
             return response
 
@@ -415,7 +556,11 @@ class AgentLoop:
         retry_count: int,
         usage_unknown: bool,
         continuation: bool,
+        request_seq: int,
         empty_response: bool = False,
+        provider_request_id: str | None = None,
+        cache_write_5m_tokens: int | None = None,
+        cache_write_1h_tokens: int | None = None,
     ) -> None:
         fields: dict[str, Any] = {
             "model": self._model,
@@ -432,6 +577,8 @@ class AgentLoop:
             "latency_ms": latency_ms,
             "stop_reason": stop_reason,
             "retry_count": retry_count,
+            # Pairs this row with its write-ahead llm_request (P3, P9).
+            "request_seq": request_seq,
         }
         if reasoning_tokens is not None:
             fields["reasoning_tokens"] = reasoning_tokens
@@ -441,6 +588,15 @@ class AgentLoop:
             fields["continuation"] = True
         if empty_response:
             fields["empty_response"] = True
+        if provider_request_id is not None:
+            fields["provider_request_id"] = provider_request_id
+        # Cache-TTL decomposition of cache_write_tokens, where the provider
+        # reports one (D2). Absent means the provider serves no split — not
+        # that the split is zero.
+        if cache_write_5m_tokens is not None:
+            fields["cache_write_5m_tokens"] = cache_write_5m_tokens
+        if cache_write_1h_tokens is not None:
+            fields["cache_write_1h_tokens"] = cache_write_1h_tokens
         self._telemetry.emit("llm_call", session=self._session, **fields)
 
     # --- tool execution (SPEC P2, I12, I16) -------------------------------
@@ -450,7 +606,16 @@ class AgentLoop:
 
         Returns the session_end reason if the session must end, else None.
         """
+        # Provider call ids are copied verbatim and are NOT trusted to be
+        # unique: the loop routes results positionally and cannot alias
+        # them, but anything downstream that joins a result to its call by
+        # id can, and a provider that reuses an id inside one turn makes
+        # that join silently wrong. Recorded, never enforced — a provider
+        # quirk must not end a session (X23).
+        counts = Counter(c.id for c in calls)
+        duplicates = {call_id for call_id, n in counts.items() if n > 1}
         for index, intent in enumerate(calls):
+            duplicate_id = intent.id in duplicates
             if self._scaffold.session_ended:
                 # end_session took effect earlier in this batch (I12).
                 self._emit_tool_call(
@@ -460,6 +625,8 @@ class AgentLoop:
                     ok=False,
                     initiator=INITIATOR_MODEL,
                     skipped=True,
+                    provider_call_id=intent.id,
+                    provider_call_id_duplicate=duplicate_id,
                 )
                 continue
             outcome = self._execute_intent(intent)
@@ -482,6 +649,10 @@ class AgentLoop:
                 original_bytes=outcome.get("original_bytes"),
                 tx_hash=outcome.get("tx_hash"),
                 terminal_state=outcome.get("terminal_state"),
+                txs=outcome.get("txs") or (),
+                error_shaped=outcome.get("error_shaped", False),
+                provider_call_id=intent.id,
+                provider_call_id_duplicate=duplicate_id,
             )
             if outcome["ok"]:
                 self._consecutive_errors = 0
@@ -525,6 +696,12 @@ class AgentLoop:
                 "truncated": capped.truncated,
                 "original_bytes": capped.original_bytes if capped.truncated else None,
                 "terminal_state": classify_error(message) if from_harness else None,
+                # A raised terminal state names its transaction in prose and
+                # nowhere else, so the hash used to survive only inside the
+                # error text — the one place P9 tells readers not to parse.
+                # Lifted onto the field the reverted and unconfirmed rows
+                # were always missing.
+                "tx_hash": tx_hash_from_error(message) if from_harness else None,
                 "error_or_revert": True,
             }
 
@@ -548,7 +725,7 @@ class AgentLoop:
         except Exception as exc:  # harness/executor failure (P2)
             return failure(f"tool execution failed: {exc}")
 
-        content, tx_hash, terminal_state = raw
+        content, tx_hash, terminal_state, txs = raw
         # Slice-hint only where re-readable via workspace_read (I16).
         reread_path = intent.args.get("path") if intent.name == "workspace_read" else None
         capped = cap_tool_result(
@@ -565,20 +742,29 @@ class AgentLoop:
             "original_bytes": capped.original_bytes if capped.truncated else None,
             "tx_hash": tx_hash,
             "terminal_state": terminal_state,
+            "txs": txs,
             # Classified on the raw (pre-truncation) content: success-shaped
             # harness results can still carry an on-chain revert.
             "error_or_revert": is_error_or_revert(True, content),
+            # A tool that RETURNS a payload whose body is an error rather
+            # than raising it. ok stays exception-keyed and true — that is
+            # the contract, and moving it would silently rewrite four
+            # versions of accounting — but the shape is now visible on its
+            # own field instead of only to a reader who parses the payload.
+            "error_shaped": error_shaped_payload(content),
         }
 
-    def _run_with_timeout(self, intent: ToolCall) -> tuple[str, str | None, str | None]:
+    def _run_with_timeout(
+        self, intent: ToolCall
+    ) -> tuple[str, str | None, str | None, tuple[dict[str, Any], ...]]:
         """Run one intent in a watchdog thread (tool_timeout_s, P2)."""
 
-        def dispatch() -> tuple[str, str | None, str | None]:
+        def dispatch() -> tuple[str, str | None, str | None, tuple[dict[str, Any], ...]]:
             if intent.name in SCAFFOLD_TOOL_NAMES:
-                return self._scaffold.execute(intent.name, intent.args), None, None
+                return self._scaffold.execute(intent.name, intent.args), None, None, ()
             assert self._game is not None  # _source_of guarantees this
             result = self._game.execute(intent.name, intent.args)
-            return result.content, result.tx_hash, result.terminal_state
+            return result.content, result.tx_hash, result.terminal_state, result.txs
 
         box: list[tuple[str, Any]] = []
 
@@ -600,10 +786,14 @@ class AgentLoop:
 
     def _source_of(self, name: str) -> str:
         if name in SCAFFOLD_TOOL_NAMES:
-            return "scaffold"
+            return SOURCE_SCAFFOLD
         if self._game is not None and name in {t.name for t in self._game.tool_defs}:
-            return "harness"
-        return "scaffold"  # unknown tools are rejected by the scaffold layer
+            return SOURCE_HARNESS
+        # Unknown tools are rejected by the scaffold layer (X15). This
+        # includes the brief's own name if the agent tries to call it: the
+        # roster is not on the surface, so the attempt fails like any other
+        # unknown tool and the failure is data (X22).
+        return SOURCE_SCAFFOLD
 
     def _emit_tool_call(
         self,
@@ -619,13 +809,23 @@ class AgentLoop:
         original_bytes: int | None = None,
         tx_hash: str | None = None,
         terminal_state: str | None = None,
+        txs: tuple[dict[str, Any], ...] = (),
+        error_shaped: bool = False,
+        provider_call_id: str | None = None,
+        provider_call_id_duplicate: bool = False,
+        lens_stale: bool | None = None,
+        lens_block: int | None = None,
     ) -> None:
+        self._call_seq += 1
         fields: dict[str, Any] = {
             "tool": intent.name,
             "source": source,
             # Provenance, not policy (SPEC P9): "source" names which layer
             # owns the tool, "initiator" names who asked for the call.
             "initiator": initiator,
+            # Scaffold-minted, session-monotonic, one per emitted row. The
+            # stream's own identity for this call, owned by no provider.
+            "call_seq": self._call_seq,
             "duration_ms": duration_ms,
             "ok": ok,
         }
@@ -644,6 +844,18 @@ class AgentLoop:
             fields["tx_hash"] = tx_hash
         if terminal_state is not None:
             fields["tx_terminal_state"] = terminal_state
+        if txs:
+            fields["txs"] = list(txs)
+        if error_shaped:
+            fields["result_error_shaped"] = True
+        if provider_call_id is not None:
+            fields["provider_call_id"] = provider_call_id
+        if provider_call_id_duplicate:
+            fields["provider_call_id_duplicate"] = True
+        if lens_stale is not None:
+            fields["lens_stale"] = lens_stale
+        if lens_block is not None:
+            fields["lens_block"] = lens_block
         self._tool_events += 1
         self._telemetry.emit("tool_call", session=self._session, **fields)
 

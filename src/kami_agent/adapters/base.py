@@ -99,6 +99,12 @@ class Usage:
     EXCLUDES cached tokens from the prompt count (Anthropic) fold them back
     in inside the adapter; providers whose count already includes them
     (OpenAI, Gemini) pass the total through unchanged.
+
+    ``cache_write_5m_tokens`` / ``cache_write_1h_tokens`` decompose
+    ``cache_write_tokens`` by cache lifetime where the provider reports
+    the split (Anthropic). None means the provider serves no such split —
+    which is not the same as a split of zero, and is why these are
+    None-defaulted rather than 0-defaulted.
     """
 
     input_tokens: int
@@ -106,6 +112,8 @@ class Usage:
     reasoning_tokens: int | None = None
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    cache_write_5m_tokens: int | None = None
+    cache_write_1h_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +136,11 @@ class AdapterResponse:
     ``provider_meta`` is logged raw and never parsed by the loop.
     ``provider_state`` (I17) is copied verbatim onto the assistant
     message for same-session replay by the emitting adapter.
+
+    ``request_id`` is the provider's own identifier for this call, where
+    it serves one — the join key for a support conversation or an
+    invoice line that telemetry alone cannot supply. None where the
+    provider exposes none; the adapter never mints one.
     """
 
     text_blocks: tuple[str, ...]
@@ -136,6 +149,7 @@ class AdapterResponse:
     usage: Usage
     provider_state: ProviderState | None = None
     provider_meta: dict[str, Any] = field(default_factory=dict)
+    request_id: str | None = None
 
 
 class AdapterError(Exception):
@@ -144,12 +158,24 @@ class AdapterError(Exception):
     ``retryable`` is True for the SPEC P8 backoff cases — rate limits
     (429), server errors (5xx), and timeouts/connection failures — and
     False for everything else (auth, bad request, unmappable response).
+
+    ``request_id`` carries the provider's identifier for the failed call
+    where the SDK exposes one on the error, so a failed-but-billed
+    attempt is as traceable as a successful one.
     """
 
-    def __init__(self, message: str, *, retryable: bool, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
+        self.request_id = request_id
 
 
 @runtime_checkable

@@ -284,3 +284,35 @@ def test_complete_wraps_sdk_errors_with_cause():
 def test_default_client_disables_sdk_retries():
     adapter = OpenAIAdapter("gpt-test", api_key="test-key")
     assert adapter._client.max_retries == 0
+
+
+# --- per-call provenance (SPEC D2, P9, 0.4.0) --------------------------------
+
+
+def test_the_request_id_is_taken_from_the_sdk_not_minted():
+    completion = load_fixture("text_stop")
+    completion._request_id = "req_id_abc123"
+    adapter, _ = make_adapter(completion)
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.request_id == "req_id_abc123"
+
+
+def test_a_response_without_a_request_id_carries_none():
+    adapter, _ = make_adapter(load_fixture("text_stop"))
+    assert adapter.complete("s", [UserMessage(text="hi")], [], PARAMS).request_id is None
+
+
+def test_a_failed_call_carries_its_request_id_too():
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    http_response = httpx.Response(429, headers={"x-request-id": "req_failed77"}, request=request)
+    exc = openai.RateLimitError("rate limited", response=http_response, body=None)
+    assert _classify_error(exc).request_id == "req_failed77"
+
+
+def test_automatic_caching_serves_no_lifetime_split():
+    """Absent, not zero: prompt_tokens_details carries no TTL classes at all."""
+    adapter, _ = make_adapter(load_fixture("cached_usage"))
+    usage = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS).usage
+    assert usage.cache_read_tokens > 0
+    assert usage.cache_write_5m_tokens is None
+    assert usage.cache_write_1h_tokens is None

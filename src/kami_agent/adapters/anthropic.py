@@ -261,6 +261,14 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
     # components are folded back in. Absent/None fields mean no caching.
     cache_read = getattr(response.usage, "cache_read_input_tokens", None) or 0
     cache_write = getattr(response.usage, "cache_creation_input_tokens", None) or 0
+    # Cache writes decomposed by entry lifetime, where the provider reports
+    # it. This adapter requests 5-minute entries only (no ttl key on
+    # _CACHE_CONTROL), so the 1-hour figure is expected to be zero — and
+    # recording both is what makes "no long-TTL caching" (N5) a measured
+    # fact for every run rather than a claim about the request we sent.
+    creation = getattr(response.usage, "cache_creation", None)
+    cache_write_5m = getattr(creation, "ephemeral_5m_input_tokens", None)
+    cache_write_1h = getattr(creation, "ephemeral_1h_input_tokens", None)
     usage = Usage(
         input_tokens=response.usage.input_tokens + cache_read + cache_write,
         # Anthropic's count already includes reasoning/thinking tokens (P7.1);
@@ -268,6 +276,8 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
         output_tokens=response.usage.output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        cache_write_5m_tokens=cache_write_5m,
+        cache_write_1h_tokens=cache_write_1h,
     )
     return AdapterResponse(
         text_blocks=text_blocks,
@@ -276,6 +286,8 @@ def _normalize(response: anthropic.types.Message) -> AdapterResponse:
         usage=usage,
         provider_state=provider_state,
         provider_meta=response.model_dump(mode="json"),
+        # Set by the SDK from the `request-id` response header.
+        request_id=getattr(response, "_request_id", None),
     )
 
 
@@ -298,5 +310,6 @@ def _classify_error(exc: anthropic.APIError) -> AdapterError:
             f"anthropic API error {status}: {exc.message}",
             retryable=retryable,
             status_code=status,
+            request_id=getattr(exc, "request_id", None),
         )
     return AdapterError(f"anthropic error: {exc}", retryable=False)

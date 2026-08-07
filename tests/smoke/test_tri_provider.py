@@ -12,13 +12,20 @@ Also reports the observed per-call fixed context floor (system prompt +
 file index + full tool schemas + the session-start brief), which SPEC
 D1's cap-arithmetic assumption needs for the manifests.
 
-The brief (SPEC P1.12) is part of call-1 context, so it is part of the
-floor. Against the recorded surface its result comes from a committed
-fixture — synthetic roster, real envelope shape — because the floor has
-to be reproducible run to run, and a live party report is neither. The
-fixture names its own roster size and per-kami byte cost, and the report
-below quotes both: the brief's contribution scales with roster size and
-nothing else, so a floor quoted without them is not interpretable.
+The brief (SPEC P1.12, D7) is part of call-1 context, so it is part of
+the floor. It is a compact roster read straight from the world-state
+daemon; against the recorded surface it comes from a committed fixture —
+synthetic roster, real envelope shape — because the floor has to be
+reproducible run to run, and a live answer is neither. The fixture names
+its own roster size and per-kami byte cost, and the report below quotes
+both: the brief's contribution scales with roster size and nothing else,
+so a floor quoted without them is not interpretable.
+
+FLOORS DO NOT COMPARE ACROSS 0.4.0. The brief changed from a full party
+report to a compact roster AND from the harness's pretty-printed
+serialization to the scaffold's compact one. Both cut it; together they
+cut it by roughly an order of magnitude at a given roster size, and they
+flatten its slope in roster size by about as much again.
 """
 
 import json
@@ -33,7 +40,8 @@ from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient, tools_hash
-from kami_agent.loop import BRIEF_TOOL, GameToolResult, LoopCaps
+from kami_agent.lens import LensClient, LensUnavailableError
+from kami_agent.loop import BRIEF_QUERY, BRIEF_TOOL, GameToolResult, LoopCaps
 from kami_agent.runner import SESSION_RAN, RunConfig, run_session
 from kami_agent.telemetry import read_events, validate_event
 from kami_agent.tools.errors import ToolError
@@ -41,7 +49,7 @@ from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS
 
 REPO_ROOT = Path(__file__).parents[2]
 FIXTURE = Path(__file__).parent / "fixtures" / "harness_tools.json"
-BRIEF_FIXTURE = Path(__file__).parent / "fixtures" / "party_brief.json"
+BRIEF_FIXTURE = Path(__file__).parent / "fixtures" / "roster_brief.json"
 
 # The read-only game tool the canned session calls, and with it the
 # measurement convention the reported context floor is quoted on.
@@ -172,11 +180,10 @@ def _brief_fixture(kami_count=0):
         for i in range(kami_count):
             kami = dict(roster[i % len(roster)])
             kami["index"] = 1041 + i * 13
-            kami["name"] = f"kami-{kami['index']}"
             resized.append(kami)
         brief["envelope"]["data"]["kamis"] = resized
         brief["kami_count"] = kami_count
-        brief["envelope_chars"] = len(json.dumps(brief["envelope"]))
+        brief["envelope_chars"] = len(json.dumps(brief["envelope"], ensure_ascii=False))
     return brief
 
 
@@ -205,14 +212,9 @@ class RecordedFakeHarness:
             for t in surface["tools"]
         ]
         self.recorded_hash = surface["tools_hash"]
-        self.brief = _brief_fixture(BRIEF_KAMIS)
+        self.harness_tools_hash = surface.get("harness_published_tools_hash")
 
     def execute(self, name, args):
-        # The party report is what the session-start brief calls; it has to
-        # answer with a real-shaped envelope or the floor it contributes to
-        # is a measurement of an error string.
-        if name == BRIEF_TOOL:
-            return GameToolResult(content=json.dumps(self.brief["envelope"]))
         if not name.startswith(("get_", "list_")):
             raise ToolError(f"{name} is not available")
         return GameToolResult(content=json.dumps({"ok": True, "simulated": True, "tool": name}))
@@ -221,24 +223,58 @@ class RecordedFakeHarness:
         pass
 
 
+class RecordedFakeLens:
+    """Answers the brief's roster query from the committed fixture.
+
+    The answer has to be a real-shaped envelope or the floor it
+    contributes to is a measurement of an error record instead.
+    """
+
+    def __init__(self):
+        self.brief = _brief_fixture(BRIEF_KAMIS)
+        self.queries = []
+
+    def query(self, name, args=None):
+        self.queries.append((name, args))
+        if name != BRIEF_QUERY:
+            raise LensUnavailableError(f"the fixture serves only {BRIEF_QUERY!r}")
+        return self.brief["envelope"]
+
+
+class LiveLens:
+    """The real daemon client, wrapped only to carry the fixture's sizes.
+
+    What it answers with — a live envelope where a daemon is running, its
+    own unavailability record where none is — is exactly what this tier
+    exists to observe, and the floor it reports moves with it.
+    """
+
+    def __init__(self, client):
+        self._client = client
+        self.brief = None
+        self.queries = []
+
+    def query(self, name, args=None):
+        self.queries.append((name, args))
+        return self._client.query(name, args)
+
+
 class ReadOnlyHarness:
     """Real harness client with a read-only execution allowlist.
 
     The model sees the full tool surface (so the measured context floor is
     real), but only reads execute — a stray write intent gets an error
-    result instead of a transaction. The brief's party report is a read,
-    so it goes through to the real harness: what it answers with (a live
-    envelope where a lens daemon is running, its own unavailability error
-    where none is) is exactly what this tier exists to observe, and the
-    floor it reports moves with it.
+    result instead of a transaction. The session-start brief no longer
+    goes through here at all: it reads the daemon directly (D7).
     """
 
     def __init__(self, client):
         self._client = client
         self.tool_defs = client.tool_defs
+        self.harness_tools_hash = client.harness_tools_hash
 
     def execute(self, name, args):
-        if name != BRIEF_TOOL and not name.startswith(("get_", "list_")):
+        if not name.startswith(("get_", "list_")):
             raise ToolError(f"{name} is not available")
         return self._client.execute(name, args)
 
@@ -271,6 +307,15 @@ def make_harness():
     return RecordedFakeHarness()
 
 
+def make_lens():
+    """The daemon behind the brief: the committed fixture, or a real socket."""
+    if os.environ.get("KAMI_SMOKE_HARNESS") == "real":
+        return LiveLens(LensClient(os.environ.get("KAMI_LENS_SOCKET")))
+    if not BRIEF_FIXTURE.exists():
+        pytest.skip("brief fixture missing")
+    return RecordedFakeLens()
+
+
 @pytest.fixture
 def run_dir(tmp_path):
     prompts = tmp_path / "prompts"
@@ -296,6 +341,7 @@ def test_canned_session(provider, run_dir):
     model = os.environ.get(spec["model_env"], spec["default_model"])
     adapter = spec["adapter"](model)
     harness = make_harness()
+    lens = make_lens()
     try:
         config = RunConfig(
             run_dir=run_dir,
@@ -307,13 +353,15 @@ def test_canned_session(provider, run_dir):
             caps=LoopCaps(session_token_cap=150_000, session_tool_cap=12, retry_max_attempts=8),
             budget_usd=5.0,
         )
-        outcome = run_session(config, adapter, harness_factory=lambda: harness)
+        outcome = run_session(
+            config, adapter, harness_factory=lambda: harness, lens_factory=lambda: lens
+        )
     finally:
         harness.close()
 
     events = list(read_events(run_dir / "telemetry.jsonl"))
     try:
-        _assert_canned_session(provider, model, run_dir, harness, outcome, events)
+        _assert_canned_session(provider, model, run_dir, harness, lens, outcome, events)
     except AssertionError:
         _dump_diagnostics(provider, run_dir, events)
         raise
@@ -348,7 +396,7 @@ def _dump_diagnostics(provider, run_dir, events):
                 print(f"assistant calls={calls} text={(message['text'] or '')[:100]!r}")
 
 
-def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
+def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, events):
     assert outcome == SESSION_RAN
 
     # Tier gate: telemetry events validate against the P9 schema.
@@ -358,10 +406,13 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     tool_events = [e for e in events if e["event"] == "tool_call"]
     model_events = [e for e in tool_events if e["initiator"] == "model"]
 
-    # Tier gate: the session-start brief (SPEC P1.12) ran exactly once, as a
-    # harness call, before the first model call — and every provider carried
-    # the synthesized call/result pair natively, which is the part that can
-    # only be proven against real APIs.
+    # Tier gate: the session-start brief (SPEC P1.12, D7) ran exactly once,
+    # as a daemon query, before the first model call — and every provider
+    # carried the synthesized call/result pair natively. That last part can
+    # only be proven against real APIs, and it is now the load-bearing one:
+    # the brief's name is NOT on the tool surface any more, so this tier is
+    # what proves three providers accept an assistant turn naming a function
+    # they were never given a definition for.
     #
     # Asserted BEFORE the canned sequence deliberately: the sequence depends
     # on the model following seven ordered instructions, which the cheapest
@@ -370,7 +421,8 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     briefs = [e for e in tool_events if e["initiator"] == "scaffold"]
     assert len(briefs) == 1, f"{provider}: expected one scaffold-initiated call, got {len(briefs)}"
     assert briefs[0]["tool"] == BRIEF_TOOL
-    assert briefs[0]["source"] == "harness"
+    assert briefs[0]["source"] == "lens"
+    assert BRIEF_TOOL not in {t.name for t in harness.tool_defs}
     assert tool_events[0] is briefs[0], f"{provider}: the brief was not the first tool call"
     kinds = [e["event"] for e in events]
     assert kinds.index("tool_call") < kinds.index("llm_call"), (
@@ -387,8 +439,8 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     assert [c["name"] for c in transcript[1]["tool_calls"]] == [BRIEF_TOOL]
     assert transcript[2]["role"] == "tool_result"
     brief_content = transcript[2]["content"]
-    if isinstance(harness, RecordedFakeHarness):
-        assert brief_content == json.dumps(harness.brief["envelope"])
+    if isinstance(lens, RecordedFakeLens):
+        assert brief_content == json.dumps(lens.brief["envelope"], ensure_ascii=False)
 
     # Tier gate: all tool calls parsed natively → each canned step executed ok.
     executed = [e["tool"] for e in model_events if e["ok"]]
@@ -452,12 +504,12 @@ def _assert_canned_session(provider, model, run_dir, harness, outcome, events):
     # The brief is part of call 1, so it is part of the floor. Its size is a
     # function of roster size and nothing else — quote both, so a floor
     # measured at one roster converts to any other.
-    kami_count = harness.brief["kami_count"] if isinstance(harness, RecordedFakeHarness) else "live"
+    kami_count = lens.brief["kami_count"] if isinstance(lens, RecordedFakeLens) else "live"
     print(
         f"\nSMOKE[{provider}] model={model} "
         f"fixed_floor_input_tokens={ok_llm[0]['input_tokens']} "
         f"surface_hash={tools_hash(list(harness.tool_defs))} "
-        f"brief_tool={BRIEF_TOOL} brief_ok={briefs[0]['ok']} "
+        f"brief_query={BRIEF_QUERY} brief_ok={briefs[0]['ok']} "
         f"brief_chars={len(brief_content)} brief_kamis={kami_count} "
         f"system_chars={system_chars} kickoff_chars={len(KICKOFF)} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
@@ -503,9 +555,13 @@ def test_brief_fixture_is_internally_consistent():
     envelope = brief["envelope"]
     empty = {**envelope, "data": {**envelope["data"], "kamis": []}}
     assert brief["kami_count"] == len(kamis)
-    assert brief["envelope_chars"] == len(json.dumps(envelope))
+    # Measured the way the SCAFFOLD serializes it: compactly. The pre-0.4.0
+    # fixture measured compact bytes for a path that pretty-printed, so its
+    # floors described a shape no model ever saw.
+    assert brief["envelope_chars"] == len(json.dumps(envelope, ensure_ascii=False))
     assert brief["kami_chars_each"] == round(
-        (len(json.dumps(envelope)) - len(json.dumps(empty))) / len(kamis)
+        (len(json.dumps(envelope, ensure_ascii=False)) - len(json.dumps(empty, ensure_ascii=False)))
+        / len(kamis)
     )
     # Resizing keeps the envelope schema-shaped and the per-kami cost linear.
     doubled = _brief_fixture(2 * len(kamis))
@@ -513,10 +569,15 @@ def test_brief_fixture_is_internally_consistent():
     assert doubled["envelope_chars"] > brief["envelope_chars"]
     # It must be the shape the brief actually asks for, and carry the
     # coverage the brief exists to deliver.
-    assert brief["tool"] == BRIEF_TOOL
+    assert brief["query"] == BRIEF_QUERY
     assert set(brief["envelope"]) == {"data", "untrusted", "meta"}
+    # The compact roster carries no authored strings at all, by design, so
+    # its untrusted path list is empty and stays empty in name-free mode.
+    assert brief["envelope"]["untrusted"] == []
+    assert set(brief["envelope"]["meta"]) == {"servedAt", "blockNumber", "stale", "mode"}
     for kami in kamis:
-        assert {"state", "hp", "hpRatePerHr", "cooldownSec"} <= set(kami)
+        assert set(kami) == {"index", "state", "hp"}
+        assert len(kami["hp"]) == 2
 
 
 def test_recorded_surface_matches_the_live_harness():

@@ -143,6 +143,9 @@ def test_full_session_lifecycle(run_dir):
     kinds = [e["event"] for e in events_of(run_dir)]
     assert kinds == [
         "session_start",
+        # Every model request is written ahead of being sent, so that a
+        # request billed but never completed leaves a record (P3, P9).
+        "llm_request",
         "llm_call",
         "tool_call",
         "tool_call",
@@ -473,3 +476,102 @@ def test_stale_lock_is_broken_and_run_proceeds(run_dir):
     adapter = ScriptedAdapter(response(end_call()))
     assert run_session(config_for(run_dir), adapter, clock=Clock()) == SESSION_RAN
     assert not lock.exists()
+
+
+# --- phantom model requests (SPEC P3, 0.4.0) ---------------------------------
+
+
+def billed_but_unrecorded_telemetry(run_dir):
+    """A session that died between sending a model request and recording it.
+
+    The write-ahead marker is on disk; the outcome row never got written.
+    That is the exact shape of a call the provider may have billed and
+    that nothing local knows the result of.
+    """
+    with TelemetryWriter(run_dir / "telemetry.jsonl", run_id="run-001", clock=Clock()) as w:
+        w.emit(
+            "session_start",
+            session=1,
+            trigger="scheduled",
+            budget_remaining_usd=10.0,
+            wallclock_elapsed_s=0,
+            tools_hash="sha256:seed",
+        )
+        w.emit("llm_request", session=1, request_seq=1)
+        w.emit(
+            "llm_call",
+            session=1,
+            model="test-model",
+            input_tokens=1000,
+            output_tokens=100,
+            cost_usd=0.0045,
+            cumulative_usd=0.0045,
+            cumulative_tokens=1100,
+            latency_ms=5.0,
+            stop_reason="tool_use",
+            retry_count=0,
+            request_seq=1,
+        )
+        # Sent, billed, never completed: the crash landed here.
+        w.emit("llm_request", session=1, request_seq=2)
+
+
+def test_a_request_that_never_completed_is_named_not_lost(run_dir):
+    billed_but_unrecorded_telemetry(run_dir)
+    outcome = run_session(
+        config_for(run_dir),
+        ScriptedAdapter(response(end_call())),
+        clock=Clock(T0 + timedelta(hours=2)),
+    )
+    assert outcome == SESSION_RAN
+
+    phantoms = [e for e in events_of(run_dir, "llm_call") if e.get("phantom")]
+    assert len(phantoms) == 1
+    phantom = phantoms[0]
+    assert phantom["session"] == 1
+    assert phantom["request_seq"] == 2
+    # Recorded on exactly the terms any other failed-but-billed attempt is:
+    # usage unknowable, cost 0, no invented tokens.
+    assert phantom["usage_unknown"] is True
+    assert phantom["cost_usd"] == 0.0
+    assert phantom["input_tokens"] == phantom["output_tokens"] == 0
+    assert phantom["stop_reason"] == "error"
+
+
+def test_the_phantom_is_counted_by_the_crash_session_end(run_dir):
+    """It is written before the synthetic session_end, so the totals see it."""
+    billed_but_unrecorded_telemetry(run_dir)
+    run_session(
+        config_for(run_dir),
+        ScriptedAdapter(response(end_call())),
+        clock=Clock(T0 + timedelta(hours=2)),
+    )
+    crash_end = next(e for e in events_of(run_dir, "session_end") if e["reason"] == "crash")
+    assert crash_end["llm_calls"] == 2  # the completed call and the phantom
+    # The phantom adds no spend: it is a name for a gap, not an estimate.
+    assert crash_end["session_tokens"] == 1100
+    assert crash_end["session_cost_usd"] == pytest.approx(0.0045)
+
+
+def test_phantom_recovery_is_idempotent(run_dir):
+    """A second recovery pass finds the request completed, by its own row."""
+    billed_but_unrecorded_telemetry(run_dir)
+    for _ in range(2):
+        run_session(
+            config_for(run_dir),
+            ScriptedAdapter(response(end_call())),
+            clock=Clock(T0 + timedelta(hours=2)),
+            trigger="manual",
+        )
+    assert len([e for e in events_of(run_dir, "llm_call") if e.get("phantom")]) == 1
+
+
+def test_a_completed_request_is_never_called_phantom(run_dir):
+    """The ordinary crash fixture has no write-ahead markers at all."""
+    crash_telemetry(run_dir)
+    run_session(
+        config_for(run_dir),
+        ScriptedAdapter(response(end_call())),
+        clock=Clock(T0 + timedelta(hours=2)),
+    )
+    assert not [e for e in events_of(run_dir, "llm_call") if e.get("phantom")]

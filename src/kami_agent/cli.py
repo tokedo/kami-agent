@@ -38,7 +38,8 @@ from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient
-from kami_agent.loop import LoopCaps
+from kami_agent.lens import LensClient, LensQueryError, LensUnavailableError
+from kami_agent.loop import BRIEF_QUERY, LoopCaps
 from kami_agent.runner import RunConfig, run_session
 from kami_agent.state import load_state
 from kami_agent.supervisor import uninstall_cron
@@ -151,6 +152,31 @@ def harness_factory(manifest: dict[str, Any]):
     return factory
 
 
+def lens_factory(manifest: dict[str, Any]):
+    """Build the world-state daemon client the session-start brief uses (D7).
+
+    Always returns a factory: the socket path resolves from the manifest,
+    then the environment, then the platform default, and a client opens no
+    connection until it is queried. A run that wants no brief at all omits
+    the key by setting ``lens.enabled: false``.
+    """
+    lens = manifest.get("lens") or {}
+    if lens.get("enabled") is False:
+        return None
+
+    def factory() -> LensClient:
+        return LensClient(
+            lens.get("socket_path"),
+            timeout_s=lens.get("timeout_s", 30.0),
+            # Mirrors what the harness sends under the same pinned mode, so
+            # the brief and the harness's world-state reads ask the daemon
+            # for the same composition.
+            no_authored=manifest.get("presentation_mode") == "name-free",
+        )
+
+    return factory
+
+
 def load_env_file(path: Path) -> None:
     """Minimal .env loader (KEY=VALUE lines); existing env vars win."""
     if not path.exists():
@@ -200,6 +226,41 @@ def check_provider(manifest: dict[str, Any]) -> str:
     )
     usage = response.usage
     return f"provider API ok ({usage.input_tokens} in / {usage.output_tokens} out)"
+
+
+def check_lens(manifest: dict[str, Any]) -> str:
+    """Bring-up check for the session-start brief's daemon (D7).
+
+    Runs the brief's own query, because the two things that can be wrong
+    are different and only this distinguishes them:
+
+    - **unreachable** — no daemon on that socket. Every session's brief
+      will degrade. Reported, not fatal: a run whose world-state reads
+      work through the harness can still proceed, and X21 says an
+      unavailable read-side daemon must not end sessions.
+    - **answered with an error** — the daemon is serving but cannot
+      resolve the account. Before the daemon's default operator is set
+      this is the EXPECTED shape, not a misconfiguration, so it is
+      reported as the normal early-run state rather than as a fault.
+    """
+    factory = lens_factory(manifest)
+    if factory is None:
+        return "lens: not configured (skipped)"
+    client = factory()
+    try:
+        envelope = client.query(BRIEF_QUERY)
+    except LensUnavailableError as exc:
+        return f"lens WARNING: {exc.message} — every session-start brief will degrade (D7)"
+    except LensQueryError as exc:
+        return (
+            f"lens ok (daemon serving at {client.socket_path}); "
+            f"the brief query answered {exc.code} — expected until the "
+            f"daemon's default operator is set (D7)"
+        )
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    kamis = data.get("kamis") if isinstance(data, dict) else None
+    count = len(kamis) if isinstance(kamis, list) else "?"
+    return f"lens ok ({client.socket_path}, brief roster of {count})"
 
 
 def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
@@ -264,6 +325,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(check_provider(manifest))
         harness_line, harness_tool_names = check_harness(manifest)
         print(harness_line)
+        print(check_lens(manifest))
 
     pins = manifest.get("pins", {})
     with TelemetryWriter(run_dir / "telemetry.jsonl", run_id=manifest["run_id"]) as writer:
@@ -292,6 +354,7 @@ def cmd_run_session(args: argparse.Namespace) -> int:
         config,
         adapter,
         harness_factory=harness_factory(manifest),
+        lens_factory=lens_factory(manifest),
         trigger="manual" if args.manual else "scheduled",
         disable_supervisor=uninstall_cron,
     )

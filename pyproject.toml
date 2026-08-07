@@ -1,6 +1,6 @@
 [project]
 name = "kami-agent"
-version = "0.3.2"
+version = "0.4.0"
 description = "Model-agnostic reference agent scaffold for KamiBench"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -11,7 +11,10 @@ dependencies = [
     "google-genai>=1.0",
     "httpx>=0.27",
     "openai>=1.60",
-    "mcp>=1.9",
+    # Upper bound, not tidiness: mcp 2.0.0 removed mcp.server.fastmcp, and a
+    # floor says what is too old while saying nothing about what is too new.
+    # The pinned harness was broken by exactly this class of resolution.
+    "mcp>=1.9,<2",
     "jsonschema>=4.18",
     "pyyaml>=6.0",
 ]
