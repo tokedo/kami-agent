@@ -25,6 +25,9 @@ def test_handshake_loads_tools(client):
     assert names == [
         "echo",
         "lens_party",
+        "multi_hop_tx",
+        "batch_rows_tx",
+        "error_payload",
         "do_tx",
         "boom",
         "confirmed_tx",
@@ -127,3 +130,51 @@ def test_close_is_idempotent():
     c.close()
     with pytest.raises(ToolError, match="not connected"):
         c.execute("echo", {"text": "after close"})
+
+
+# --- in-band per-transaction receipts (P9 txs, 0.4.0) -------------------------
+
+
+def test_per_hop_receipts_are_copied_from_a_top_level_array(client):
+    """One receipt array for the whole call: the multi-hop shape."""
+    result = client.execute("multi_hop_tx", {})
+    assert [t.get("tx_hash") for t in result.txs] == ["0xaa", None]
+    # Verbatim, including the hop that failed — it is a real transaction
+    # whether or not the call as a whole succeeded.
+    assert result.txs[0]["status"] == "success"
+    assert result.txs[1]["status"] == "error"
+
+
+def test_per_row_receipts_are_copied_from_inside_a_batch_result_list(client):
+    """One receipt array per result row: the batch shape. A single-location
+    extractor would silently miss exactly these."""
+    result = client.execute("batch_rows_tx", {})
+    assert [t["tx_hash"] for t in result.txs] == ["0xb1", "0xb2"]
+
+
+def test_a_result_with_no_receipts_carries_none(client):
+    assert client.execute("confirmed_tx", {}).txs == ()
+    assert client.execute("echo", {"text": "hi"}).txs == ()
+
+
+def test_the_harness_publishes_its_own_registry_hash_in_the_handshake(client):
+    """Recorded, never equated with the scaffold's own value (D1).
+
+    The fake server publishes no such hash, which is itself the contract:
+    absence is recorded as absence rather than guessed at.
+    """
+    assert client.harness_tools_hash is None
+    scaffold_side = tools_hash(list(client.tool_defs) + list(SCAFFOLD_TOOL_DEFS))
+    assert scaffold_side.startswith("sha256:")
+
+
+def test_the_published_hash_is_parsed_from_the_instructions_field():
+    """The harness states it as `tools_hash=<64 hex>` in the handshake."""
+    from kami_agent.harness import _HANDSHAKE_TOOLS_HASH
+
+    real = "7fc11fe95b85ebeed4f898e774c50833cd63314d56c3ed18b5afa56989f75262"
+    assert _HANDSHAKE_TOOLS_HASH.search(f"tools_hash={real}").group(1) == real
+    assert _HANDSHAKE_TOOLS_HASH.search("no hash here") is None
+    # Bare hex, no prefix — the scaffold's own value carries `sha256:` and
+    # is a different value over different bytes. Never equate.
+    assert not real.startswith("sha256:")

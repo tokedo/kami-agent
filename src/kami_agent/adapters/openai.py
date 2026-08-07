@@ -155,8 +155,13 @@ def _normalize(response: Any) -> AdapterResponse:
             output_tokens=usage.completion_tokens,
             reasoning_tokens=reasoning,
             cache_read_tokens=cached or 0,
+            # Automatic caching exposes no lifetime breakdown:
+            # prompt_tokens_details carries cached_tokens and audio_tokens
+            # and nothing else. Absent, not zero (D2).
         ),
         provider_meta=response.model_dump(mode="json"),
+        # Set by the SDK from the `x-request-id` response header.
+        request_id=getattr(response, "_request_id", None),
     )
 
 
@@ -194,6 +199,9 @@ def _classify_error(exc: openai.OpenAIError) -> AdapterError:
         status = exc.status_code
         retryable = status in (408, 429) or status >= 500
         return AdapterError(
-            f"openai API error {status}: {exc.message}", retryable=retryable, status_code=status
+            f"openai API error {status}: {exc.message}",
+            retryable=retryable,
+            status_code=status,
+            request_id=getattr(exc, "request_id", None),
         )
     return AdapterError(f"openai error: {exc}", retryable=False)

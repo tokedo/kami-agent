@@ -21,6 +21,11 @@ def manifest_path(tmp_path):
     manifest = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     manifest.pop("harness", None)  # no MCP child in unit tests
     manifest.pop("chain_rpc_url", None)
+    # Pin the daemon socket at a path inside the test's own tmp dir. Left
+    # unset it would resolve to the platform default, and the assertions
+    # below would then depend on whether the machine running the suite
+    # happens to have a lens daemon up.
+    manifest["lens"] = {"socket_path": str(tmp_path / "absent-lens.sock"), "timeout_s": 1}
     path = tmp_path / "manifest.yaml"
     path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
     return path
@@ -84,7 +89,7 @@ def test_init_creates_run_layout_and_run_start(tmp_path, manifest_path, capsys):
     assert [e["event"] for e in events] == ["run_start"]
     validate_event(events[0])
     assert events[0]["manifest_hash"] == cli.load_manifest(manifest_path)["_manifest_hash"]
-    assert events[0]["harness_sha"].startswith("48bd154")
+    assert events[0]["harness_sha"].startswith("ba62fc9")
     out = capsys.readouterr().out
     assert "initialized" in out
 
@@ -222,15 +227,25 @@ def test_run_session_command_end_to_end(tmp_path, manifest_path, monkeypatch, ca
     rc = cli.main(["run-session", "--run-dir", str(run_dir), "--manual"])
     assert rc == 0
     assert "session_ran" in capsys.readouterr().out
-    events = [e["event"] for e in read_events(run_dir / "telemetry.jsonl")]
-    assert events == [
+    records = list(read_events(run_dir / "telemetry.jsonl"))
+    assert [e["event"] for e in records] == [
         "run_start",
         "session_start",
+        # The session-start brief, attempted against a daemon that is not
+        # running here. It degrades visibly rather than vanishing (X21): a
+        # run that expected a brief and got none must say so.
+        "tool_call",
+        "llm_request",
         "llm_call",
         "tool_call",
         "session_end",
         "schedule_next",
     ]
+    brief = records[2]
+    assert brief["source"] == "lens"
+    assert brief["initiator"] == "scaffold"
+    assert brief["ok"] is False
+    assert json.loads(brief["error"])["error"]["code"] == "LENS_UNAVAILABLE"
 
 
 def test_status_prints_state(tmp_path, manifest_path, capsys):

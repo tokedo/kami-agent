@@ -53,7 +53,20 @@ harness: # spawned per session as a stdio child (SPEC D1)
   cwd: /opt/kami-harness
   handshake_timeout_s: 60
 
+# World-state daemon, read DIRECTLY by the session-start brief (SPEC D7).
+# The harness reads the same daemon over the same socket for every
+# world-state tool, so these must name the same one.
+# socket_path unset resolves KAMI_LENS_SOCKET, then the platform default.
+# The brief sends no account argument: the daemon fills it from its own
+# configured default operator, and until that is set the brief degrades
+# visibly every session, which is the expected early-run shape.
+lens:
+  socket_path: null
+  timeout_s: 30
+  enabled: true
+
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: 48bd154f1181b5d8157f06e4c3dec979944c937e
+  harness_sha: ba62fc9f81ee383056b03cf7c496a3e94921d99c # kami-harness 2.1.0
+  lens_sha: 0551b87d21ea446e9a85b1afca20f8c3e45da8d7 # kami-lens 0.3.0
   gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # repo cleanup only; game content byte-identical to c2c5a1b

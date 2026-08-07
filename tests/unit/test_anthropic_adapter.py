@@ -504,3 +504,49 @@ def test_default_client_disables_sdk_retries():
     # invisible internal retries would corrupt accounting.
     adapter = AnthropicAdapter("claude-haiku-4-5", api_key="test-key")
     assert adapter._client.max_retries == 0
+
+
+# --- per-call provenance (SPEC D2, P9, 0.4.0) --------------------------------
+
+
+def test_cache_writes_are_decomposed_by_entry_lifetime():
+    """The adapter requests 5-minute entries only, so the 1-hour figure being
+    zero is a MEASURED fact per call, not an assumption about the request."""
+    adapter, _ = make_adapter(load_fixture("cached_usage"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    usage = response.usage
+    assert usage.cache_write_tokens == 928
+    assert usage.cache_write_5m_tokens == 928
+    assert usage.cache_write_1h_tokens == 0
+    # Still components of the total, never additions to it (I10).
+    assert usage.cache_write_5m_tokens + usage.cache_write_1h_tokens == usage.cache_write_tokens
+
+
+def test_a_provider_without_the_split_reports_absence_not_zero():
+    """Absent means 'no split served'; zero would be a claim about caching."""
+    adapter, _ = make_adapter(load_fixture("text_end_turn"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.usage.cache_write_5m_tokens is None
+    assert response.usage.cache_write_1h_tokens is None
+
+
+def test_the_request_id_is_taken_from_the_sdk_not_minted():
+    message = load_fixture("text_end_turn")
+    message._request_id = "req_011CabcDEF"
+    adapter, _ = make_adapter(message)
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.request_id == "req_011CabcDEF"
+
+
+def test_a_response_without_a_request_id_carries_none():
+    adapter, _ = make_adapter(load_fixture("text_end_turn"))
+    response = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS)
+    assert response.request_id is None
+
+
+def test_a_failed_call_carries_its_request_id_too():
+    """A failed-but-billed attempt must be as traceable as a successful one."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    http_response = httpx.Response(429, headers={"request-id": "req_failed99"}, request=request)
+    exc = anthropic.RateLimitError("rate limited", response=http_response, body=None)
+    assert _classify_error(exc).request_id == "req_failed99"

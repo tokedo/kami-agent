@@ -28,6 +28,30 @@ KICKOFF = "Session start.\n"
 
 CONTINUE = "Continue. To end this session, call end_session.\n"
 
+# I1: no budget, cost, tokens, compute limits, run duration, session caps,
+# forced truncation, or study existence. I3: no strategy hints, no vendor
+# idioms, no XML-tag formatting. Applied to every agent-visible string the
+# scaffold composes, not only the three prompts.
+FORBIDDEN = [
+    "budget",
+    "cost",
+    "token",
+    "spend",
+    "usd",
+    "horizon",
+    "limit",
+    "cap",
+    "truncat",
+    "study",
+    "experiment",
+    "benchmark",
+    "measure",
+    "step by step",
+    "think carefully",
+    "<",
+    ">",
+]
+
 
 def test_frozen_strings_are_exactly_as_reviewed():
     assert (PROMPTS / "system.txt").read_text(encoding="utf-8") == SYSTEM
@@ -44,26 +68,7 @@ def test_no_apparatus_or_policy_leaks(name):
     # are outside budget_usd): the transaction-cost item's "cost gas" is
     # the one allowed use of "cost"; any other occurrence still fails.
     text = (PROMPTS / name).read_text(encoding="utf-8").lower().replace("cost gas", "")
-    forbidden = [
-        "budget",
-        "cost",
-        "token",
-        "spend",
-        "usd",
-        "horizon",
-        "limit",
-        "cap",
-        "truncat",
-        "study",
-        "experiment",
-        "benchmark",
-        "measure",
-        "step by step",
-        "think carefully",
-        "<",
-        ">",
-    ]
-    for word in forbidden:
+    for word in FORBIDDEN:
         assert word not in text, f"{name} contains {word!r}"
 
 
@@ -101,3 +106,47 @@ def test_kickoff_and_continue_carry_no_dynamic_content():
     for name in ("kickoff.txt", "continue.txt"):
         text = (PROMPTS / name).read_text(encoding="utf-8")
         assert not any(ch.isdigit() for ch in text), f"{name} contains digits"
+
+
+# --- the one other agent-visible string the scaffold authors ------------------
+#
+# A daemon that cannot be reached has no words of its own to quote, so the
+# session-start brief injects this record instead (SPEC X21, D7). It is the
+# only agent-visible text the scaffold composes outside the three prompts
+# above, so it is frozen on the same terms: reviewed wording, changed only
+# deliberately, in the commit that re-freezes it.
+
+
+def test_the_unavailable_lens_record_is_exactly_as_reviewed():
+    import json
+
+    from kami_agent.lens import LensUnavailableError
+
+    record = LensUnavailableError("cannot connect to /run/lens.sock: [Errno 2]").as_record()
+    assert record == (
+        '{"error": {"code": "LENS_UNAVAILABLE", '
+        '"message": "cannot connect to /run/lens.sock: [Errno 2]"}}'
+    )
+    # Machine-shaped, not prose: no advice, no judgement, no instruction to
+    # the agent about what to do next.
+    parsed = json.loads(record)
+    assert set(parsed) == {"error"}
+    assert set(parsed["error"]) == {"code", "message"}
+
+
+def test_the_scaffold_authors_only_the_code_of_that_record():
+    """The message half is the operating system's, verbatim."""
+    from kami_agent.lens import CODE_UNAVAILABLE, LensUnavailableError
+
+    os_text = "[Errno 111] Connection refused"
+    assert LensUnavailableError(os_text).message == os_text
+    assert CODE_UNAVAILABLE == "LENS_UNAVAILABLE"
+
+
+def test_the_unavailable_record_leaks_no_apparatus_vocabulary():
+    """I1 applies to it exactly as it does to the three prompts."""
+    from kami_agent.lens import LensUnavailableError
+
+    text = LensUnavailableError("socket error: broken pipe").as_record().lower()
+    for word in FORBIDDEN:
+        assert word not in text

@@ -31,11 +31,19 @@ from kami_agent.adapters.base import (
 )
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
 from kami_agent.harness import HarnessError, tools_hash
-from kami_agent.loop import CARRIED_APPLIED, CARRIED_INVALID, AgentLoop, GameTools, LoopCaps
+from kami_agent.loop import (
+    CARRIED_APPLIED,
+    CARRIED_INVALID,
+    AgentLoop,
+    GameTools,
+    LensQuery,
+    LoopCaps,
+)
 from kami_agent.state import (
     RUN_COMPLETE,
     crashed_session,
     fold_telemetry,
+    phantom_requests,
     save_state,
     session_totals,
 )
@@ -87,6 +95,7 @@ def run_session(
     adapter: ModelAdapter,
     *,
     harness_factory: Callable[[], GameTools] | None = None,
+    lens_factory: Callable[[], LensQuery] | None = None,
     trigger: str = TRIGGER_SCHEDULED,
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], None] | None = None,
@@ -119,6 +128,34 @@ def run_session(
             # 2. Recover: unmatched session_start → synthetic crash end (P3).
             crashed = crashed_session(events)
             if crashed is not None:
+                # Phantom model requests first, so the crash session_end
+                # totals below count them. A request written ahead but never
+                # completed may have been billed; its usage is unknowable, so
+                # it is recorded on exactly the terms any other
+                # failed-but-billed attempt is (cost 0, usage_unknown) and
+                # flagged as synthetic. Idempotent: the row it writes carries
+                # the same request_seq, so a second pass finds it completed.
+                for seq in phantom_requests(events, crashed):
+                    events.append(
+                        writer.emit(
+                            "llm_call",
+                            session=crashed,
+                            model=config.model,
+                            input_tokens=0,
+                            output_tokens=0,
+                            cache_read_tokens=0,
+                            cache_write_tokens=0,
+                            cost_usd=0.0,
+                            cumulative_usd=state.cumulative_usd,
+                            cumulative_tokens=state.cumulative_tokens,
+                            latency_ms=0.0,
+                            stop_reason="error",
+                            retry_count=0,
+                            usage_unknown=True,
+                            request_seq=seq,
+                            phantom=True,
+                        )
+                    )
                 record = writer.emit(
                     "session_end",
                     session=crashed,
@@ -168,6 +205,7 @@ def run_session(
                 config=config,
                 adapter=adapter,
                 harness_factory=harness_factory,
+                lens_factory=lens_factory,
                 trigger=trigger,
                 clock=clock,
                 sleep=sleep,
@@ -186,6 +224,7 @@ def _run_one_session(
     config: RunConfig,
     adapter: ModelAdapter,
     harness_factory: Callable[[], GameTools] | None,
+    lens_factory: Callable[[], LensQuery] | None,
     trigger: str,
     clock: Callable[[], datetime],
     sleep: Callable[[float], None] | None,
@@ -205,7 +244,7 @@ def _run_one_session(
         emit=lambda event, fields: writer.emit(event, session=session, **fields),
     )
 
-    def emit_session_start(hash_value: str) -> dict[str, Any]:
+    def emit_session_start(hash_value: str, published: str | None = None) -> dict[str, Any]:
         elapsed = 0.0
         if state.first_session_at is not None:
             elapsed = (clock() - datetime.fromisoformat(state.first_session_at)).total_seconds()
@@ -217,6 +256,11 @@ def _run_one_session(
         }
         if config.presentation_mode is not None:
             fields["presentation_mode"] = config.presentation_mode
+        # The harness's hash of its OWN registry, as published in the
+        # handshake. Recorded next to ours, never against it: the two are
+        # different by construction (D1).
+        if published is not None:
+            fields["harness_tools_hash"] = published
         return writer.emit("session_start", session=session, **fields)
 
     def emit_schedule(scaffold_tools: ScaffoldTools, carried_wake: str | None = None) -> None:
@@ -271,9 +315,18 @@ def _run_one_session(
         save_state(state, state_path)
         return SESSION_ABORTED
 
+    # The world-state daemon the session-start brief reads (D7). Constructed
+    # after the harness on purpose: a lens client opens no connection until
+    # it is queried, so it cannot fail here and can never abort a session —
+    # an unreachable daemon is discovered by the brief and degrades there.
+    lens = lens_factory() if lens_factory is not None else None
+
     try:
         game_defs = list(game.tool_defs) if game is not None else []
-        start_record = emit_session_start(tools_hash(game_defs + list(SCAFFOLD_TOOL_DEFS)))
+        start_record = emit_session_start(
+            tools_hash(game_defs + list(SCAFFOLD_TOOL_DEFS)),
+            getattr(game, "harness_tools_hash", None),
+        )
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
 
@@ -291,6 +344,7 @@ def _run_one_session(
             continuation_text=prompts["continue"],
             scaffold=scaffold,
             game=game,
+            lens=lens,
             telemetry=writer,
             session=session,
             params=config.params,
@@ -324,8 +378,10 @@ def _run_one_session(
         save_state(state, state_path)
         return SESSION_RAN
     finally:
-        if game is not None:
-            close = getattr(game, "close", None)
+        for component in (game, lens):
+            if component is None:
+                continue
+            close = getattr(component, "close", None)
             if callable(close):
                 close()
 

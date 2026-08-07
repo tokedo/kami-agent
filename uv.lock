@@ -604,7 +604,7 @@ wheels = [
 
 [[package]]
 name = "kami-agent"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -629,7 +629,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.18" },
-    { name = "mcp", specifier = ">=1.9" },
+    { name = "mcp", specifier = ">=1.9,<2" },
     { name = "openai", specifier = ">=1.60" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]

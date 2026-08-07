@@ -31,6 +31,7 @@ state for them would be worse than recording nothing.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # Confirmed on-chain success of a submitted transaction. Derived from the
@@ -66,12 +67,65 @@ _ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+# The transaction hash a raised terminal state names in its first clause.
+# Both raised single-transaction states open with "transaction <hash> ",
+# which is the harness's own contract phrasing (the same phrasing the
+# markers above match on), so the hash is recoverable without parsing the
+# rest of the prose. Anchored at the start of the clause rather than
+# matched anywhere, so a hash quoted later in a message — a batch message
+# itemizing several — is never mistaken for THE transaction: a batch has
+# no single hash, and inventing one would be worse than reporting none.
+_RAISED_TX_HASH = re.compile(r"transaction (0x[0-9a-fA-F]+) (?:landed on-chain|is UNCONFIRMED)")
+
+
 def classify_error(message: str) -> str | None:
     """Terminal state of a failed harness tool call, or None if not a tx outcome."""
     for state, markers in _ERROR_MARKERS:
         if all(marker in message for marker in markers):
             return state
     return None
+
+
+def tx_hash_from_error(message: str) -> str | None:
+    """The transaction hash a raised revert/unconfirmed error names, if any.
+
+    A harness that RAISES its terminal states reports the transaction in
+    prose, so the hash reaches the scaffold only inside the error text —
+    the one field P9 tells readers never to parse. This lifts it onto
+    ``tool_call.tx_hash`` at ingestion, on the same terms as the success
+    path: recovered once, here, or recorded as absent.
+
+    Returns None for batch errors (no single transaction), for
+    validation rejections (nothing was ever broadcast, so there is no
+    hash to report), and for anything unrecognized.
+    """
+    if classify_error(message) == BATCH_ERROR:
+        return None
+    match = _RAISED_TX_HASH.search(message)
+    return match.group(1) if match else None
+
+
+def error_shaped_payload(content: str) -> bool:
+    """True when a RETURNED result's body carries a non-empty error field.
+
+    A tool that reports failure by returning ``{"error": ...}`` instead of
+    raising produces ``ok=true`` — ``ok`` is exception-keyed by contract
+    (P9) and that is not changed here. This is the honest flag for the
+    shape, so a reader can separate "the call raised" from "the call
+    returned a failure" without parsing payloads or moving ``ok``.
+
+    Checked at the top level and one ``result`` level down, the same
+    nesting the tx_hash extractor and the repetition classifier tolerate.
+    Non-JSON content is never error-shaped.
+    """
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    candidates: list[Any] = [parsed]
+    if isinstance(parsed, dict) and isinstance(parsed.get("result"), dict):
+        candidates.append(parsed["result"])
+    return any(isinstance(c, dict) and c.get("error") for c in candidates)
 
 
 def classify_success(content: str, structured: Any = None) -> str | None:

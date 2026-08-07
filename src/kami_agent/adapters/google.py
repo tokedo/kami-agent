@@ -204,8 +204,16 @@ def _normalize(response: Any) -> AdapterResponse:
             output_tokens=candidates_tokens + (thoughts or 0),
             reasoning_tokens=thoughts,
             cache_read_tokens=cached or 0,
+            # cache_tokens_details is a per-MODALITY breakdown, not a
+            # lifetime one: implicit caching exposes no TTL classes.
+            # Absent, not zero (D2).
         ),
         provider_meta=response.model_dump(mode="json"),
+        # The closest per-call identifier the SDK serves without changing
+        # the request: a model response id, not a transport request id.
+        # The raw headers would need include_sdk_http_response, which
+        # alters the pinned request config and is deliberately not set.
+        request_id=getattr(response, "response_id", None),
     )
 
 

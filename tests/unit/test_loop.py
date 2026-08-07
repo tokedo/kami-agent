@@ -867,3 +867,196 @@ def test_set_next_wake_state_survives_loop(run_dir):
     loop.run()
     assert scaffold.requested_wake_min == 90
     assert scaffold.clamped_wake_min == 90.0
+
+
+# --- per-call identity in the stream (P9 call_seq, 0.4.0) --------------------
+
+
+def test_every_emitted_row_carries_a_monotonic_call_identity(run_dir):
+    """Telemetry carried no call identity at all before 0.4.0, so two rows of
+    the same tool in one turn could not be told apart without the transcript."""
+    calls = [call("get_state", id_="a"), call("get_state", id_="b"), end_call()]
+    loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*calls)), game=FakeGame())
+    loop.run()
+    rows = events_of(run_dir, "tool_call")
+    assert [r["call_seq"] for r in rows] == list(range(1, len(rows) + 1))
+
+
+def test_skipped_intents_also_get_an_identity(run_dir):
+    """One row, one number — including rows for intents that never executed."""
+    calls = [end_call(), call("get_state", id_="after")]
+    loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*calls)), game=FakeGame())
+    loop.run()
+    rows = events_of(run_dir, "tool_call")
+    assert [r["call_seq"] for r in rows] == [1, 2]
+    assert rows[1]["skipped"] is True
+
+
+def test_provider_call_ids_are_recorded_verbatim(run_dir):
+    calls = [call("get_state", id_="call_AAA111"), end_call(id_="call_BBB222")]
+    loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*calls)), game=FakeGame())
+    loop.run()
+    rows = events_of(run_dir, "tool_call")
+    assert [r["provider_call_id"] for r in rows] == ["call_AAA111", "call_BBB222"]
+    assert not any(r.get("provider_call_id_duplicate") for r in rows)
+
+
+def test_a_reused_provider_call_id_is_flagged_and_both_calls_still_execute(run_dir):
+    """The loop routes positionally and cannot alias results, so execution is
+    unaffected. What breaks is any downstream join that pairs a result to its
+    call BY ID — so the rows say so, and nothing raises (X23)."""
+    game = FakeGame()
+    duplicated = [
+        call("get_state", {"room": 8}, id_="call_SAME"),
+        call("get_state", {"room": 17}, id_="call_SAME"),
+        end_call(),
+    ]
+    loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*duplicated)), game=game)
+    result = loop.run()
+
+    # Both executed, in order, with their own arguments: no deduplication.
+    assert game.calls == [("get_state", {"room": 8}), ("get_state", {"room": 17})]
+    assert result.reason == "agent"
+    rows = [e for e in events_of(run_dir, "tool_call") if e["tool"] == "get_state"]
+    assert [r["provider_call_id_duplicate"] for r in rows] == [True, True]
+    # The scaffold's own identity still separates them, which is the point.
+    assert rows[0]["call_seq"] != rows[1]["call_seq"]
+
+
+# --- transaction evidence on the raised path (P9 tx_hash, txs, 0.4.0) --------
+
+
+def test_a_reverted_transaction_records_its_hash_on_the_field(run_dir):
+    """It used to live only in the error text — the one field P9 says not to parse."""
+
+    class RevertingGame(FakeGame):
+        def execute(self, name, args):
+            raise ToolError(
+                "transaction 0xbadbeef landed on-chain in block 77 and REVERTED: "
+                "gas was spent (91234 gas) and no state change was applied."
+            )
+
+    loop, _, _ = make_loop(
+        run_dir, ScriptedAdapter(response(call("get_state"), end_call())), game=RevertingGame()
+    )
+    loop.run()
+    row = next(e for e in events_of(run_dir, "tool_call") if e["tool"] == "get_state")
+    assert row["ok"] is False
+    assert row["tx_terminal_state"] == "reverted"
+    assert row["tx_hash"] == "0xbadbeef"
+
+
+def test_a_scaffold_failure_carries_no_transaction_hash(run_dir):
+    loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(call("nope"), end_call())))
+    loop.run()
+    row = next(e for e in events_of(run_dir, "tool_call") if e["tool"] == "nope")
+    assert "tx_hash" not in row
+
+
+def test_in_band_receipts_and_error_shaped_results_reach_telemetry(run_dir):
+    class MultiTxGame(FakeGame):
+        def execute(self, name, args):
+            return GameToolResult(
+                content='{"error": "step failed", "txs": [{"tx_hash": "0xaa"}]}',
+                txs=({"tx_hash": "0xaa", "status": "success"},),
+            )
+
+    loop, _, _ = make_loop(
+        run_dir, ScriptedAdapter(response(call("get_state"), end_call())), game=MultiTxGame()
+    )
+    loop.run()
+    row = next(e for e in events_of(run_dir, "tool_call") if e["tool"] == "get_state")
+    assert row["txs"] == [{"tx_hash": "0xaa", "status": "success"}]
+    # The tool RETURNED its failure rather than raising it: ok stays
+    # exception-keyed and true, and the shape is named on its own field.
+    assert row["ok"] is True
+    assert row["result_error_shaped"] is True
+
+
+def test_an_ordinary_result_carries_neither_field(run_dir):
+    loop, _, _ = make_loop(
+        run_dir, ScriptedAdapter(response(call("get_state"), end_call())), game=FakeGame()
+    )
+    loop.run()
+    row = next(e for e in events_of(run_dir, "tool_call") if e["tool"] == "get_state")
+    assert "txs" not in row
+    assert "result_error_shaped" not in row
+
+
+# --- write-ahead model requests (P3, P9 llm_request, 0.4.0) ------------------
+
+
+def test_every_model_request_is_written_before_it_is_sent(run_dir):
+    """The provider is billed when the request leaves; the outcome row is
+    written when it comes back. This is what makes the gap between them
+    recoverable rather than invisible."""
+    seen = []
+
+    class WatchingAdapter(ScriptedAdapter):
+        def complete(self, system, messages, tools, params):
+            seen.append([e["event"] for e in read_events(run_dir / "telemetry.jsonl")])
+            return super().complete(system, messages, tools, params)
+
+    loop, _, _ = make_loop(run_dir, WatchingAdapter(response(end_call())))
+    loop.run()
+    # At the moment the request went out, its marker was already on disk.
+    assert seen[0][-1] == "llm_request"
+    events = events_of(run_dir)
+    requests = [e for e in events if e["event"] == "llm_request"]
+    calls = [e for e in events if e["event"] == "llm_call"]
+    assert [r["request_seq"] for r in requests] == [1]
+    assert [c["request_seq"] for c in calls] == [1]
+
+
+def test_each_retry_is_its_own_request(run_dir):
+    """A retried call is a second billable request, so it gets its own marker."""
+    adapter = ScriptedAdapter(
+        AdapterError("429", retryable=True),
+        AdapterError("429", retryable=True),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter)
+    loop.run()
+    events = events_of(run_dir)
+    assert [e["request_seq"] for e in events if e["event"] == "llm_request"] == [1, 2, 3]
+    assert [e["request_seq"] for e in events if e["event"] == "llm_call"] == [1, 2, 3]
+
+
+def test_write_ahead_markers_never_contribute_to_accounting(run_dir):
+    """One exists per model call, so folding them would double every total."""
+    from kami_agent.state import fold_telemetry
+
+    loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(end_call())))
+    result = loop.run()
+    state = fold_telemetry(events_of(run_dir))
+    assert state.cumulative_tokens == result.cumulative_tokens == 1100
+    assert state.cumulative_usd == pytest.approx(result.cumulative_usd)
+
+
+def test_an_unnormalizable_response_is_recorded_instead_of_escaping(run_dir):
+    """A fault the adapter did not turn into an AdapterError used to escape the
+    loop entirely, leaving a billed call with no row of any kind."""
+
+    class BrokenAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, system, messages, tools, params):
+            self.calls += 1
+            raise AttributeError("'NoneType' object has no attribute 'prompt_tokens'")
+
+    adapter = BrokenAdapter()
+    loop, _, _ = make_loop(run_dir, adapter)
+    result = loop.run()
+
+    assert result.reason == "errors"
+    # Not retried: an unnormalizable response is not a transient fault.
+    assert adapter.calls == 1
+    events = events_of(run_dir)
+    llm = [e for e in events if e["event"] == "llm_call"]
+    assert len(llm) == 1
+    assert llm[0]["usage_unknown"] is True
+    assert llm[0]["stop_reason"] == "error"
+    assert llm[0]["cost_usd"] == 0.0
+    # And it is paired with its write-ahead marker, so nothing looks phantom.
+    assert llm[0]["request_seq"] == 1

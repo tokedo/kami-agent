@@ -1,0 +1,135 @@
+{
+  "_provenance": [
+    "Synthetic, NOT a recording: the roster is invented, its shape is not.",
+    "Every field and nesting level matches the compact roster schema the",
+    "kami-lens daemon validates its own answers against, and envelope_chars",
+    "is measured the way the scaffold serializes it — compactly, since the",
+    "scaffold owns that serialization on the direct-lens path.",
+    "Roster size is the one free parameter and the brief's context cost is",
+    "linear in it: envelope_chars and kami_chars_each convert a floor",
+    "measured here to any other roster, and KAMI_SMOKE_BRIEF_KAMIS",
+    "re-measures it directly. Re-record from a live daemon when one is available.",
+    "PRE-0.4.0 NOTE: the fixture this replaces measured a party report as",
+    "compact JSON, while the live path pretty-printed it at indent=2, and",
+    "carried a meta block the daemon never serves. Floors quoted from it",
+    "measured a shape that never reached a model; they do not compare."
+  ],
+  "query": "roster",
+  "args": [],
+  "kami_count": 12,
+  "envelope_chars": 853,
+  "kami_chars_each": 55,
+  "envelope": {
+    "data": {
+      "account": {
+        "index": 4271,
+        "roomIndex": 11
+      },
+      "kamis": [
+        {
+          "index": 1041,
+          "state": "HARVESTING",
+          "hp": [
+            48,
+            60
+          ]
+        },
+        {
+          "index": 1054,
+          "state": "HARVESTING",
+          "hp": [
+            50,
+            67
+          ]
+        },
+        {
+          "index": 1067,
+          "state": "HARVESTING",
+          "hp": [
+            52,
+            74
+          ]
+        },
+        {
+          "index": 1080,
+          "state": "RESTING",
+          "hp": [
+            33,
+            81
+          ]
+        },
+        {
+          "index": 1093,
+          "state": "HARVESTING",
+          "hp": [
+            56,
+            88
+          ]
+        },
+        {
+          "index": 1106,
+          "state": "DEAD",
+          "hp": [
+            0,
+            95
+          ]
+        },
+        {
+          "index": 1119,
+          "state": "RESTING",
+          "hp": [
+            61,
+            102
+          ]
+        },
+        {
+          "index": 1132,
+          "state": "HARVESTING",
+          "hp": [
+            64,
+            109
+          ]
+        },
+        {
+          "index": 1145,
+          "state": "HARVESTING",
+          "hp": [
+            66,
+            116
+          ]
+        },
+        {
+          "index": 1158,
+          "state": "RESTING",
+          "hp": [
+            45,
+            123
+          ]
+        },
+        {
+          "index": 1171,
+          "state": "HARVESTING",
+          "hp": [
+            71,
+            130
+          ]
+        },
+        {
+          "index": 1184,
+          "state": "HARVESTING",
+          "hp": [
+            74,
+            137
+          ]
+        }
+      ]
+    },
+    "untrusted": [],
+    "meta": {
+      "servedAt": "2026-08-07T12:00:00.000Z",
+      "blockNumber": 8814052,
+      "stale": false,
+      "mode": "daemon"
+    }
+  }
+}

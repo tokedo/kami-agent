@@ -80,3 +80,57 @@ def test_in_band_partial_and_skip_results_are_not_a_terminal_state():
     skipped = json.dumps({"status": "skipped", "reason": "dry-run reverted"})
     assert receipts.classify_success(skipped) is None
     assert receipts.classify_success("plain text, not json") is None
+
+
+# --- the hash a raised terminal state names in its prose (P9, 0.4.0) ----------
+
+
+def test_raised_revert_and_unconfirmed_yield_their_transaction_hash():
+    """The hash used to survive only inside the error text, which P9 tells
+    readers never to parse. It is lifted onto the field at ingestion."""
+    assert receipts.tx_hash_from_error(REVERT) == "0xbadbeef"
+    assert receipts.tx_hash_from_error(UNCONFIRMED) == "0xfeed"
+    # And through the MCP server's own error wrapping.
+    assert receipts.tx_hash_from_error(WRAPPED + REVERT) == "0xbadbeef"
+
+
+def test_a_batch_error_yields_no_single_hash():
+    """A batch has no single transaction; inventing one would be worse than none."""
+    assert receipts.tx_hash_from_error(BATCH) is None
+    # Even when the batch message quotes single-transaction outcomes inside it.
+    assert receipts.tx_hash_from_error(BATCH + " " + REVERT) is None
+
+
+def test_a_pre_signing_rejection_has_no_hash_to_report():
+    assert receipts.tx_hash_from_error(REJECTED) is None
+
+
+def test_non_transaction_errors_yield_no_hash():
+    for message in ("boom", "tool call timed out after 120 seconds", ""):
+        assert receipts.tx_hash_from_error(message) is None
+
+
+def test_a_hash_quoted_outside_the_contract_clause_is_not_read_as_the_transaction():
+    """Only the harness's own opening phrasing counts as naming THE transaction."""
+    assert receipts.tx_hash_from_error("see transaction 0xdead for context") is None
+
+
+# --- results that RETURN their failure (P9 result_error_shaped, 0.4.0) --------
+
+
+def test_error_shaped_payloads_are_detected_at_both_nesting_levels():
+    assert receipts.error_shaped_payload(json.dumps({"error": "could not read state"}))
+    assert receipts.error_shaped_payload(json.dumps({"result": {"error": "nope"}}))
+    assert receipts.error_shaped_payload(
+        json.dumps({"reached_target": False, "error": "step failed", "txs": []})
+    )
+
+
+def test_ordinary_success_payloads_are_not_error_shaped():
+    assert not receipts.error_shaped_payload(json.dumps({"ok": True, "tx_hash": "0xc0ffee"}))
+    # An empty or null error field is not a reported failure.
+    assert not receipts.error_shaped_payload(json.dumps({"error": ""}))
+    assert not receipts.error_shaped_payload(json.dumps({"error": None}))
+    # Non-JSON content can never be error-shaped.
+    assert not receipts.error_shaped_payload("plain text, not json")
+    assert not receipts.error_shaped_payload("")

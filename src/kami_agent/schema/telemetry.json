@@ -3,10 +3,11 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
+    { "$ref": "#/$defs/llm_request" },
     { "$ref": "#/$defs/llm_call" },
     { "$ref": "#/$defs/tool_call" },
     { "$ref": "#/$defs/workspace_write" },
@@ -68,9 +69,27 @@
         "presentation_mode": {
           "type": "string",
           "description": "The harness presentation mode this run pinned in the manifest, passed to the harness child unvalidated (SPEC D1). Absent when the manifest pinned no mode, in which case the harness applied its own default — absence is recorded rather than guessed at. Not constrained to an enum here: the set of modes is the harness's to define, and an unsupported one fails at the harness rather than being normalized by the scaffold"
+        },
+        "harness_tools_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "The hash the HARNESS published of its OWN registry, taken verbatim from the MCP initialize handshake's instructions field (bare hex, no prefix). Recorded for drift detection against the harness's own SPEC. It answers a different question over different bytes than tools_hash above — what the harness registered, versus what the model was shown — and the two are different BY CONSTRUCTION: never equate, reconcile, or assert them against each other (SPEC D1). Absent when the pinned harness publishes no such value"
         }
       },
       "required": ["trigger", "budget_remaining_usd", "wallclock_elapsed_s", "tools_hash"],
+      "unevaluatedProperties": false
+    },
+    "llm_request": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "properties": {
+        "event": { "const": "llm_request" },
+        "request_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Session-monotonic identifier for one model request, written BEFORE the request is sent (SPEC P9, I6). Pairs with the request_seq of the llm_call that completed it. An llm_request with no matching llm_call is a request the provider may have billed and that nothing completed — recovery synthesizes a phantom llm_call for it (SPEC P3). Carries no usage and NEVER contributes to accounting: folding this event into cumulative totals would double-count every model call"
+        }
+      },
+      "required": ["request_seq"],
       "unevaluatedProperties": false
     },
     "llm_call": {
@@ -123,6 +142,29 @@
         "empty_response": {
           "type": "boolean",
           "description": "True for a provider response with no text, no tool calls, and zero usage — treated as a retryable provider error under the SPEC P8 backoff, logged at cost 0"
+        },
+        "request_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The session-monotonic request identifier this call completes, pairing it with its write-ahead llm_request (SPEC P3, P9). Optional here so streams written under schema 0.3.1 and earlier still validate; emitted on every llm_call from 0.4.0 on, so absence in a 0.4.0+ stream would itself be a defect"
+        },
+        "phantom": {
+          "type": "boolean",
+          "description": "True on a SYNTHETIC row written by crash recovery for an llm_request that never got an llm_call (SPEC P3). The provider may have been billed for it; the usage is unknowable and it is recorded at cost 0 with usage_unknown, exactly like any other failed-but-billed attempt. Its presence means a billed call was NAMED rather than lost — the alternative, before 0.4.0, was that it left no trace of any kind"
+        },
+        "provider_request_id": {
+          "type": "string",
+          "description": "The provider's own identifier for this call, verbatim, where the SDK serves one: Anthropic and OpenAI expose it on both successful responses and API errors (from the request-id / x-request-id response headers); Google exposes a model response id, which is NOT a transport request id, and no header without changing the pinned request configuration. Absent means the provider served none — never that the call did not happen"
+        },
+        "cache_write_5m_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Component of cache_write_tokens written to 5-minute-lifetime cache entries, where the provider reports the split (Anthropic only). ABSENT where the provider serves no lifetime breakdown (OpenAI, Google) — absence means 'no split served', never 'split is zero'"
+        },
+        "cache_write_1h_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Component of cache_write_tokens written to 1-hour-lifetime cache entries, on the same terms as cache_write_5m_tokens. The scaffold requests 5-minute entries only (SPEC D2, N5), so a non-zero value here is a finding, not a routine reading"
         }
       },
       "required": [
@@ -143,10 +185,44 @@
       "properties": {
         "event": { "const": "tool_call" },
         "tool": { "type": "string" },
-        "source": { "enum": ["harness", "scaffold"] },
+        "source": {
+          "enum": ["harness", "scaffold", "lens"],
+          "description": "Which layer owns the thing that was called. harness: a tool on the pinned MCP surface. scaffold: a tool this scaffold implements, and also any unknown tool name, since the scaffold layer is what rejects those (SPEC X15). lens: the world-state daemon, queried directly by the scaffold over its own socket — neither of the other two, because the harness does not own the call and the scaffold does not own the answer. The lens value exists from schema 0.4.0; a stream written before it can only carry the first two"
+        },
         "initiator": {
           "enum": ["model", "scaffold"],
-          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — currently only the once-per-session status brief (SPEC P1.12), issued before the first model call and injected as a normal tool result. Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
+          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — only the once-per-session status brief (SPEC P1.12), issued before the first model call and injected as a tool result. Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
+        },
+        "call_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Session-monotonic identity for this row, minted by the scaffold, one per EMITTED tool_call (skipped intents included). It is the stream's own key, owned by no provider, and it is what makes the row-to-intent correspondence 1:1 on the face of the telemetry. Before 0.4.0 telemetry carried no call identity at all, so two rows of the same tool in one turn could not be told apart without reading the transcript. Optional here so earlier streams still validate; emitted on every tool_call from 0.4.0 on"
+        },
+        "provider_call_id": {
+          "type": "string",
+          "description": "The call id the PROVIDER supplied for a model-initiated intent, copied verbatim and never trusted to be unique (see provider_call_id_duplicate). Absent on scaffold-initiated calls, whose id is scaffold-minted and therefore not a provider fact. Present so a telemetry row can be joined to its transcript entry without re-deriving the pairing"
+        },
+        "provider_call_id_duplicate": {
+          "type": "boolean",
+          "description": "True when the provider issued this same call id more than once inside ONE assistant turn. The loop routes results positionally and cannot alias them, so execution is unaffected — but any downstream join that pairs a result to its call BY ID is silently wrong for these rows, which is exactly the class that once looked like a scaffold routing defect and was in fact an analysis mis-join. Recorded, never enforced: a provider quirk must not end a session (SPEC X23). JOIN RULE: pair results to calls by ORDER, on every provider, never by id"
+        },
+        "result_error_shaped": {
+          "type": "boolean",
+          "description": "True when a RETURNED result's body carries a non-empty error field (top level or one result level down) — a tool reporting failure by returning it rather than raising it. ok stays exception-keyed and true for these rows by contract: this field makes the shape visible WITHOUT moving ok, which would silently rewrite the meaning of every stream written before 0.4.0. Read ok, tx_terminal_state, and this field together"
+        },
+        "txs": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Per-transaction receipt evidence a multi-transaction result carried in band, verbatim and in document order — one entry per hop or per item, each with whatever of tx_hash / status / block / gas_used the harness reported, INCLUDING the step that failed. Those transactions are final on-chain whether or not the call as a whole succeeded, so a transaction-keyed reconciliation that ignores them comes up short. Absent when the payload carried none. Entries are copied, never normalized or summed"
+        },
+        "lens_stale": {
+          "type": "boolean",
+          "description": "Session-start brief only: the meta.stale flag of the daemon envelope that was injected — true when the answer was served from last-synced state while the daemon was degraded or catching up. Operator-side convenience only; the same value is already inside the injected envelope the agent saw, so this is not a separate channel (SPEC I1)"
+        },
+        "lens_block": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Session-start brief only: the meta.blockNumber of the injected daemon envelope, on the same terms as lens_stale"
         },
         "path": {
           "type": "string",
@@ -167,7 +243,10 @@
           "type": "boolean",
           "description": "True for intents skipped because end_session took effect earlier in the same batch (SPEC I12)"
         },
-        "tx_hash": { "type": "string" },
+        "tx_hash": {
+          "type": "string",
+          "description": "The transaction this call submitted, where it submitted exactly one. Recovered from the returned payload on the success path, and from the harness's own contract phrasing on the raised path — so from 0.4.0 the reverted and unconfirmed rows carry it too, instead of leaving it only inside the error text that P9 tells readers not to parse. Absent for batch errors (no single transaction), for validation rejections (nothing was broadcast), and for every call that is not a transaction"
+        },
         "tx_terminal_state": {
           "enum": [
             "confirmed_success",

@@ -11,7 +11,7 @@ background thread and exposes the synchronous surface the loop needs
 transport's context managers are entered and exited inside a single
 manager task, as anyio requires.
 
-Dev pin: kami-harness v2 surface (``48bd154``) — the run manifest
+Dev pin: kami-harness 2.1.0 surface (``ba62fc9``) — the run manifest
 re-pins at launch; the SHA is manifest metadata, recorded on run_start.
 """
 
@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import hashlib
 import json
+import re
 import threading
 from typing import Any
 
@@ -32,9 +33,21 @@ from kami_agent.loop import GameToolResult
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.receipts import classify_success
 
-HARNESS_DEV_PIN_SHA = "48bd154"
+HARNESS_DEV_PIN_SHA = "ba62fc9"
 
 DEFAULT_HANDSHAKE_TIMEOUT_S = 60.0
+
+# The harness publishes a hash of its OWN registry in the initialize
+# handshake's ``instructions`` field, as ``tools_hash=<64 hex chars>``.
+# Recorded verbatim for drift detection; see the never-equate note on
+# ``tools_hash`` below.
+_HANDSHAKE_TOOLS_HASH = re.compile(r"tools_hash=([0-9a-f]{64})")
+
+# How deep to look for in-band per-transaction receipt arrays. Multi-tx
+# results carry them either at the top level (one array for the whole
+# call) or one per result row inside a batch's ``results`` list; three
+# levels covers both with margin and bounds the walk on a hostile payload.
+_TXS_MAX_DEPTH = 3
 
 
 class HarnessError(Exception):
@@ -79,6 +92,9 @@ class HarnessClient:
         self.tool_defs: list[ToolDef] = []
         self.server_name: str | None = None
         self.server_version: str | None = None
+        # The harness's own registry hash, as it published it in the
+        # handshake. NEVER equated with ``tools_hash`` below.
+        self.harness_tools_hash: str | None = None
         self._session: ClientSession | None = None
 
         self._loop = asyncio.new_event_loop()
@@ -107,6 +123,8 @@ class HarnessClient:
                     self._session = session
                     self.server_name = init.serverInfo.name
                     self.server_version = init.serverInfo.version
+                    published = _HANDSHAKE_TOOLS_HASH.search(init.instructions or "")
+                    self.harness_tools_hash = published.group(1) if published else None
                     self.tool_defs = [
                         ToolDef(
                             name=t.name,
@@ -143,10 +161,12 @@ class HarnessClient:
         )
         if result.isError:
             raise ToolError(text or f"{name} failed")
+        structured = getattr(result, "structuredContent", None)
         return GameToolResult(
             content=text,
             tx_hash=_extract_tx_hash(result, text),
-            terminal_state=classify_success(text, getattr(result, "structuredContent", None)),
+            terminal_state=classify_success(text, structured),
+            txs=_extract_txs(structured, text),
         )
 
     # --- lifecycle --------------------------------------------------------------
@@ -184,6 +204,44 @@ def _extract_tx_hash(result: Any, text: str) -> str | None:
             if isinstance(inner, dict) and isinstance(inner.get("tx_hash"), str):
                 return inner["tx_hash"]
     return None
+
+
+def _extract_txs(structured: Any, text: str) -> tuple[dict[str, Any], ...]:
+    """Per-transaction receipt evidence a multi-tx result carries in band.
+
+    A tool that submits more than one transaction reports each of them —
+    hop by hop, or item by item — with whatever of ``tx_hash`` /
+    ``status`` / ``block`` / ``gas_used`` it has, including for the step
+    that failed. Those transactions are real and final on-chain whether
+    or not the call as a whole succeeded, so losing them from telemetry
+    makes any transaction-keyed reconciliation come up short.
+
+    The arrays appear at two nesting levels — one for the whole call, or
+    one per row inside a batch's result list — so this walks rather than
+    reading a fixed path, in document order, bounded depth. Entries are
+    copied verbatim; nothing is normalized or summed.
+    """
+    for candidate in (structured, _maybe_json(text)):
+        found: list[dict[str, Any]] = []
+        _collect_txs(candidate, found, 0)
+        if found:
+            return tuple(found)
+    return ()
+
+
+def _collect_txs(node: Any, out: list[dict[str, Any]], depth: int) -> None:
+    if depth > _TXS_MAX_DEPTH:
+        return
+    if isinstance(node, dict):
+        entries = node.get("txs")
+        if isinstance(entries, list):
+            out.extend(e for e in entries if isinstance(e, dict))
+        for key, value in node.items():
+            if key != "txs":
+                _collect_txs(value, out, depth + 1)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_txs(item, out, depth + 1)
 
 
 def _maybe_json(text: str) -> Any:

@@ -23,6 +23,7 @@ from kami_agent.telemetry import (
 SPEC_EVENT_TYPES = {
     "run_start",
     "session_start",
+    "llm_request",
     "llm_call",
     "tool_call",
     "workspace_write",
@@ -48,7 +49,9 @@ EXAMPLE_PAYLOADS = {
         "budget_remaining_usd": 9.5,
         "wallclock_elapsed_s": 0,
         "tools_hash": "sha256:aa",
+        "harness_tools_hash": "7fc11fe95b85ebeed4f898e774c50833cd63314d56c3ed18b5afa56989f75262",
     },
+    "llm_request": {"request_seq": 4},
     "llm_call": {
         "model": "provider-model-1",
         "input_tokens": 1200,
@@ -56,6 +59,8 @@ EXAMPLE_PAYLOADS = {
         "reasoning_tokens": 120,
         "cache_read_tokens": 800,
         "cache_write_tokens": 100,
+        "cache_write_5m_tokens": 100,
+        "cache_write_1h_tokens": 0,
         "cost_usd": 0.0087,
         "cumulative_usd": 0.0512,
         "cumulative_tokens": 15400,
@@ -64,15 +69,25 @@ EXAMPLE_PAYLOADS = {
         "retry_count": 0,
         "usage_unknown": False,
         "continuation": True,
+        "request_seq": 4,
+        "phantom": False,
+        "provider_request_id": "req_011CabcDEF",
     },
     "tool_call": {
         "tool": "workspace_read",
         "source": "scaffold",
+        "call_seq": 3,
         "path": "workspace/notes.md",
         "duration_ms": 1.7,
         "ok": True,
         "truncated": True,
         "original_bytes": 120000,
+        "provider_call_id": "call_AAA111",
+        "provider_call_id_duplicate": False,
+        "result_error_shaped": False,
+        "txs": [{"tx_hash": "0xabc", "status": "success", "block": 77, "gas_used": 21000}],
+        "lens_stale": False,
+        "lens_block": 8814052,
     },
     "workspace_write": {
         "path": "workspace/notes.md",
@@ -308,7 +323,7 @@ def test_optional_fields_can_be_omitted(writer):
 
 def test_schema_version_is_pinned():
     """Additive changes require a version bump (unevaluatedProperties: false)."""
-    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.3.1"
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.4.0"
 
 
 @pytest.mark.parametrize(
