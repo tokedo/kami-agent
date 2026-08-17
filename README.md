@@ -5,7 +5,7 @@ The model-agnostic reference agent scaffold for
 frontier models into Kamigotchi, a live on-chain world, and measures what
 they do under controlled conditions.
 
-**Status: v0.3.2.** [SPEC.md](SPEC.md) is the contract registry — what the
+**Status: v0.5.0.** [SPEC.md](SPEC.md) is the contract registry — what the
 scaffold provides, what it depends on, the invariants and how each one is
 enforced, and the behaviors that are accepted by design.
 
@@ -38,14 +38,32 @@ Design principles behind the contract:
 7. **Closed world.** The agent's only channels are the harness tools, the
    bundled read-only `reference/` tree, and its own `workspace/`.
 
-Every session opens with a status brief (SPEC P1.12): before the first
-model call the scaffold makes one harness call — the general party report
-for the account's own operator — and injects the result verbatim as a
-normal tool result, so a session starts already knowing what the account
-owns and what state it is in. It is state, not advice, and it is not a
-special channel: the same tool stays available for the agent to call
-itself, for any account, and telemetry separates the two on
-`tool_call.initiator`.
+Every session opens with **session-start injections** (SPEC P1.12):
+before the first model call the scaffold performs a few reads and puts
+each into context as a completed tool call and its result, so a session
+starts already knowing where it stands rather than spending turns
+rediscovering it. In order: the compact **roster** of the account's kamis,
+read straight from the world-state daemon; the wallets' **gas balances**,
+read from the harness's own balance tool, because gas is the resource
+every action spends; and, on the profile that carries it, the agent's own
+**plan file**. They are state, not advice — passed through verbatim, one
+attempt each, degrading visibly rather than silently — and they bound
+nothing the agent does: no cap, no error counter, no breaker. Telemetry
+marks each with `initiator: scaffold`, so any measure of what the *agent*
+chose excludes them.
+
+**The scaffold itself is configurable as an experimental variable.** A
+manifest `scaffold_profile` selects one of five cumulative rungs —
+`control`, `orientation`, `search`, `pushed`, `planning` — which decide
+whether the system prompt carries a pinned paragraph about the world's
+core loop, whether a deterministic `search_reference` tool over the
+documentation snapshot is on the surface, and whether the agent has a
+plan file re-read to it each session. One version serves every rung
+(variants are flags, never branches), the rung is recorded on every
+`session_start`, and because a rung can add a tool, `tools_hash` differs
+between rungs by design while the harness surface stays identical. What
+does *not* vary: the objective, the world, the harness, and the absence of
+strategy content anywhere the model can see.
 
 ## The four-layer stack
 
@@ -89,11 +107,19 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
 2. **Cron-env smoke** (per PR) — one full `init` + `run-session` under a
    cron-like environment (minimal `PATH`, explicit `HOME`, no provider
    keys), judged by real exit codes and explicit telemetry assertions.
+   Runs once per **end of the scaffold ladder** (`control` and
+   `planning`), which between them exercise every session-start injection
+   and every prompt asset under cron conditions.
 3. **Tri-provider recorded-surface** (`uv run pytest tests/smoke`, per PR)
    — one canned session per adapter against real provider APIs with a fake
    harness serving the *recorded* tool surface of the pinned kami-harness
    and a fixture daemon serving the brief. **It bills real provider
-   calls**, so it is run deliberately, not as part of a local test sweep.
+   calls**, so it is run deliberately, not as part of a local test sweep —
+   and note that `tests/smoke/conftest.py` loads the repo-root `.env`, so
+   `pytest tests/smoke` bills even when the shell has no keys exported.
+   It is also the only tier that proves three provider APIs accept the two
+   or three consecutive synthesized assistant turns the session-start
+   injections put in front of the model.
    Fork PRs skip cleanly, since repo secrets are not exposed to them.
    This tier also reports the observed per-call fixed context floor that
    the SPEC D1 cap-arithmetic assumption needs, on a fixed measurement
@@ -134,6 +160,17 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    wrongly — compact bytes for a path that pretty-printed, and an
    envelope `meta` block the daemon never served — so pre-0.4.0 floors
    describe a shape no model ever saw.
+
+   **Floors do not compare across profiles either, from 0.5.0.** Call-1
+   context now depends on the rung: every profile adds the gas-balance
+   injection, rungs at or above `orientation` add a pinned prompt
+   appendix, and `planning` adds a second appendix plus the plan file —
+   whose size the *agent* decides, bounded only by
+   `tool_result_max_bytes`. The report prints each term separately
+   (`system_chars`, `orientation_chars`, `planning_chars`,
+   `balance_chars`, `plan_file_chars`) and names the profile, because a
+   floor without its profile is not a floor. `KAMI_SMOKE_PROFILE=<rung>`
+   measures any of them.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must

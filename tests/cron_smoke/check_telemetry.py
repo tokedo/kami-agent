@@ -1,12 +1,12 @@
 """Cron-smoke telemetry assertions: one clean session, expected end reason.
 
-Run after stub_session.py against the same run directory. Fails (nonzero
-exit) unless the telemetry stream holds exactly one session_start /
-session_end pair, the session_end reason is an expected value, the
-session-start brief was issued exactly once against the stand-in
-world-state daemon, every model request is paired with its outcome, and
-the agent-set wake was scheduled. Every event is re-validated against the
-telemetry schema.
+Run after stub_session.py against the same run directory, with the same
+scaffold profile as its second argument. Fails (nonzero exit) unless the
+telemetry stream holds exactly one session_start / session_end pair, the
+session_end reason is an expected value, the profile's session-start
+injections all ran exactly once and in order before the first model call,
+every model request is paired with its outcome, and the agent-set wake was
+scheduled. Every event is re-validated against the telemetry schema.
 """
 
 from __future__ import annotations
@@ -14,14 +14,31 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from kami_agent.loop import BRIEF_TOOL
+from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, PLAN_PATH, PLAN_TOOL
 from kami_agent.telemetry import read_events, validate_event
 
 EXPECTED_END_REASONS = {"agent"}
 
+# The session-start injections each profile performs, in order (SPEC
+# P1.12): the roster from the daemon and the wallets' gas balances from the
+# harness on every profile, plus the plan file on `planning`.
+INJECTIONS = {
+    "control": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
+    "orientation": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
+    "search": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
+    "pushed": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
+    "planning": [
+        (BRIEF_TOOL, "lens"),
+        (BALANCE_TOOL, "harness"),
+        (PLAN_TOOL, "scaffold"),
+    ],
+}
+
 
 def main() -> int:
     run_dir = Path(sys.argv[1])
+    profile = sys.argv[2] if len(sys.argv) > 2 else "control"
+    expected = INJECTIONS[profile]
     events = list(read_events(run_dir / "telemetry.jsonl"))
     for event in events:
         validate_event(event)
@@ -37,25 +54,34 @@ def main() -> int:
     )
     assert any(e["event"] == "llm_call" for e in events), "no llm_call recorded"
 
-    # The session-start brief (SPEC P1.12, D7): one scaffold-initiated query
-    # to the world-state daemon, issued before the first model call, which
-    # succeeded over the real socket protocol. Ordering is the claim under
-    # test — a brief emitted after the first llm_call would have missed the
-    # context it exists to seed.
+    # The recorded rung must be the one that was asked for: the profile
+    # decides the surface, the prompt and the injections below (SPEC D3).
+    assert starts[0]["scaffold_profile"] == profile, (
+        f"session_start recorded profile {starts[0]['scaffold_profile']!r}, ran {profile!r}"
+    )
+
+    # The session-start injections (SPEC P1.12, D1, D7): scaffold-initiated
+    # reads issued before the first model call — the roster over the daemon's
+    # real socket, the wallets' gas balances through the harness child, and on
+    # the planning profile the agent's own plan file. Ordering is the claim
+    # under test: an injection emitted after the first llm_call would have
+    # missed the context it exists to seed.
     tool_calls = [e for e in events if e["event"] == "tool_call"]
     assert all("initiator" in e for e in tool_calls), "tool_call without initiator"
     assert all("call_seq" in e for e in tool_calls), "tool_call without call_seq"
     seqs = [e["call_seq"] for e in tool_calls]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), f"call_seq not 1:1: {seqs}"
-    briefs = [e for e in tool_calls if e["initiator"] == "scaffold"]
-    assert len(briefs) == 1, f"expected exactly one scaffold-initiated call, got {len(briefs)}"
-    assert briefs[0]["tool"] == BRIEF_TOOL, f"brief called {briefs[0]['tool']!r}"
-    assert briefs[0]["source"] == "lens", "the brief must be a daemon query, not a harness call"
-    assert briefs[0]["ok"] is True, f"brief failed: {briefs[0].get('error')}"
+    injections = [e for e in tool_calls if e["initiator"] == "scaffold"]
+    got = [(e["tool"], e["source"]) for e in injections]
+    assert got == expected, f"{profile}: injections {got}, expected {expected}"
+    for event in injections:
+        assert event["ok"] is True, f"{event['tool']} failed: {event.get('error')}"
+    plan_rows = [e for e in injections if e["tool"] == PLAN_TOOL]
+    assert all(e.get("path") == PLAN_PATH for e in plan_rows), "plan injection lost its path"
     kinds_before_first_llm = kinds[: kinds.index("llm_call")]
-    assert kinds_before_first_llm.count("tool_call") == 1, (
-        f"expected the brief as the only tool_call before the first model call, "
-        f"got {kinds_before_first_llm}"
+    assert kinds_before_first_llm.count("tool_call") == len(expected), (
+        f"expected the {len(expected)} injections as the only tool_calls before the "
+        f"first model call, got {kinds_before_first_llm}"
     )
 
     # Write-ahead pairing (SPEC P3): every model request that was sent has an
@@ -74,8 +100,9 @@ def main() -> int:
 
     print(
         "cron-smoke telemetry OK: "
-        f"{len(events)} events, session_end reason={ends[0]['reason']}, "
-        f"brief={briefs[0]['tool']} ok, "
+        f"{len(events)} events, profile={profile}, "
+        f"session_end reason={ends[0]['reason']}, "
+        f"injections={[e['tool'] for e in injections]} all ok, "
         f"next wake in {schedules[0]['clamped_min']:g} min"
     )
     return 0

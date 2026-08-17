@@ -109,7 +109,17 @@ def run_loop(run_dir, adapter, game, **cap_overrides):
 
 
 def tool_events(run_dir):
-    return [e for e in read_events(run_dir / "telemetry.jsonl") if e["event"] == "tool_call"]
+    """tool_call rows for the AGENT's own intents.
+
+    The breaker counts executed agent calls only (X20), so the
+    session-start injections — which this stand-in harness answers with
+    the unknown-tool record, having no balance tool — are excluded here.
+    """
+    return [
+        e
+        for e in read_events(run_dir / "telemetry.jsonl")
+        if e["event"] == "tool_call" and e["initiator"] == "model"
+    ]
 
 
 # --- pathology 1: identical reverted retries (observed 45x in one session) -------------------

@@ -28,6 +28,18 @@ caps: # SPEC D3 (session_token_cap sized per model — no default)
   repetition_min_distinct: 4 # repetition breaker: distinct-signature floor in a full window
   repetition_same_tool_error_cap: 8 # repetition breaker: consecutive same-tool error/revert run
 
+# Knowledge-delivery rung (SPEC D3, P10, P13). Cumulative, in order:
+#   control     — base scaffold + session-start gas balances
+#   orientation — + the pinned core-loop paragraph (prompts/orientation.txt)
+#   search      — + the search_reference tool over reference/
+#   pushed      — + lens/harness result enrichment (THEIR runtime flags:
+#                 nothing changes agent-side beyond the recorded value)
+#   planning    — + prompts/planning.txt and the plan-file injection
+# Absent = control. An unknown value fails at build_run_config. A profile
+# at or above `search` carries one more scaffold tool, so its
+# session_start.tools_hash differs from a lower profile's BY DESIGN.
+scaffold_profile: control
+
 budget_usd: 10.0
 t_max_days: 30
 workspace_quota_bytes: 10485760

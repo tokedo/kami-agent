@@ -21,6 +21,7 @@ from kami_agent.adapters.base import (
 from kami_agent.governor import PriceTable
 from kami_agent.lens import CODE_UNAVAILABLE, LensQueryError, LensUnavailableError
 from kami_agent.loop import (
+    BALANCE_TOOL,
     BRIEF_ARGS,
     BRIEF_QUERY,
     BRIEF_TOOL,
@@ -264,7 +265,17 @@ def test_brief_is_telemetered_and_marked_scaffold_initiated_from_the_lens(run_di
     # recorded as one.
     assert "provider_call_id" not in events[0]
     assert all("initiator" in e for e in events)
-    assert [e["initiator"] for e in events[1:]] == ["model"] * (len(events) - 1)
+    # From 0.5.0 a session carries more than one scaffold-initiated row
+    # (P1.12: brief, balances, and on the planning profile the plan file),
+    # so the brief is identified by tool and source rather than by being
+    # the only one — and it is the FIRST of them.
+    scaffold_rows = [e for e in events if e["initiator"] == "scaffold"]
+    assert scaffold_rows[0]["tool"] == BRIEF_TOOL
+    assert [e["tool"] for e in scaffold_rows] == [BRIEF_TOOL, BALANCE_TOOL]
+    # Everything after the injections is the agent's own.
+    assert [e["initiator"] for e in events[len(scaffold_rows) :]] == ["model"] * (
+        len(events) - len(scaffold_rows)
+    )
 
 
 def test_brief_records_the_freshness_of_what_it_injected(run_dir):
@@ -286,7 +297,8 @@ def test_brief_records_the_freshness_of_what_it_injected(run_dir):
 def test_brief_counts_toward_emitted_tool_calls(run_dir):
     loop = make_loop(run_dir, ScriptedAdapter(response(end_call())), lens=FakeLens())
     result = loop.run()
-    assert result.tool_calls == len(tool_events(run_dir)) == 2
+    # brief + gas balances + the agent's end_session.
+    assert result.tool_calls == len(tool_events(run_dir)) == 3
 
 
 # --- the brief bounds nothing the agent does (X20) ---------------------------
@@ -375,11 +387,18 @@ def test_a_failing_brief_is_attempted_exactly_once(run_dir):
 def test_no_brief_when_no_daemon_is_configured(run_dir):
     loop = make_loop(run_dir, ScriptedAdapter(response(end_call())), lens=None)
     result = loop.run()
-    assert not [e for e in tool_events(run_dir) if e["initiator"] == "scaffold"]
-    # The session opens on the kickoff and the model's own first turn — no
-    # injected pair in between.
+    # No lens, no brief and no brief telemetry. The gas-balance injection is
+    # a separate read on a separate source, and it still happens — its
+    # absence would be a different skip with a different reason (P1.12).
+    assert not [e for e in tool_events(run_dir) if e["tool"] == BRIEF_TOOL]
+    assert [e["tool"] for e in tool_events(run_dir) if e["initiator"] == "scaffold"] == [
+        BALANCE_TOOL
+    ]
+    # The session opens on the kickoff, then the balance pair, then the
+    # model's own first turn — no roster pair in between.
     assert isinstance(result.messages[0], UserMessage)
-    assert [c.name for c in result.messages[1].tool_calls] == ["end_session"]
+    assert [c.name for c in result.messages[1].tool_calls] == [BALANCE_TOOL]
+    assert [c.name for c in result.messages[3].tool_calls] == ["end_session"]
 
 
 def test_an_oversized_brief_is_capped_like_any_tool_result(run_dir):

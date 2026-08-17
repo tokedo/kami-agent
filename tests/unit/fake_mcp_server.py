@@ -82,6 +82,33 @@ def lens_party(account_index: int = -1) -> dict:
 
 
 @mcp.tool()
+def get_gas_balance(account: str = "") -> dict:
+    """Check native ETH gas balances for the account's wallets on Yominet
+    (and the owner's Ethereum mainnet balance when configured).
+
+    The one tool the scaffold depends on by name (SPEC D1): the
+    session-start gas-balance injection calls it with no arguments, which
+    the real harness reads as "every account". Signature and payload shape
+    are copied from the pinned harness, not recorded, so this fails when
+    the harness's shape drifts.
+
+    Args:
+        account: Account label; empty reports every account.
+    """
+    return {
+        "balances": {
+            "main": {
+                "operator_address": "0x000000000000000000000000000000000000ope1",
+                "operator_eth": "0.019428",
+                "owner_address": "0x000000000000000000000000000000000000own1",
+                "owner_eth": "0.008112",
+                "owner_mainnet_eth": "0",
+            }
+        }
+    }
+
+
+@mcp.tool()
 def multi_hop_tx() -> dict:
     """A multi-hop call reporting one receipt array for the whole call."""
     return {

@@ -323,7 +323,7 @@ def test_optional_fields_can_be_omitted(writer):
 
 def test_schema_version_is_pinned():
     """Additive changes require a version bump (unevaluatedProperties: false)."""
-    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.4.0"
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.5.0"
 
 
 @pytest.mark.parametrize(

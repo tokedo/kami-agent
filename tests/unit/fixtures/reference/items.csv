@@ -1,0 +1,6 @@
+index,name,kind,effect
+1,Maple Candy,food,restores 25 health
+2,Pine Nut,food,restores 10 health
+3,Gum Ball,food,restores 50 health
+4,Stone,material,crafting input
+5,Ribbon,revive,returns a kami from liquidation

@@ -1,7 +1,7 @@
 ---
 module: kami-agent
-version: 1.9
-describes: v0.4.0
+version: 2.0
+describes: v0.5.0
 ---
 
 # kami-agent — Contract Registry
@@ -46,30 +46,69 @@ Ordered steps, as implemented:
    disabled, `run_complete`.
 7. **Claim the session number**: `session_counter += 1`, persisted
    before any model call, so a crash never reuses a number.
-8. **Spawn the harness child** and handshake (D1). Failure → a
+8. **Read the profile's prompt assets** (P13): the base string plus the
+   appendices this `scaffold_profile` pins. A pure filesystem read, done
+   before the spawn below on purpose — a run directory that cannot
+   deliver its profile's asset raises here, naming the missing file,
+   before any child, any telemetry, or any `session_start` exists. The
+   claimed session number (step 7) is spent; nothing else is.
+9. **Spawn the harness child** and handshake (D1). Failure → a
    `session_start` / `session_end reason=errors` pair with zero model
    calls, a default-source `schedule_next`, and `session_aborted`.
-9. **Emit `session_start`** carrying `tools_hash` of the loaded surface
-   and, when the manifest pins one, the harness `presentation_mode`
-   (D1).
-10. **Build context**: frozen system prompt + `\n\n` + the file index
-    (full `workspace/` tree with byte sizes, `reference/` collapsed to
-    one `N files, N bytes, read-only` line).
-11. **Kickoff**: the first user message is the frozen constant
+10. **Emit `session_start`** carrying `tools_hash` of the loaded surface,
+    the `scaffold_profile` this run pins, and, when the manifest pins
+    one, the harness `presentation_mode` (D1).
+11. **Build context**: system prompt = the base string + the profile's
+    appendices + `\n\n` + the file index (full `workspace/` tree with
+    byte sizes, `reference/` collapsed to one `N files, N bytes,
+    read-only` line).
+12. **Kickoff**: the first user message is the frozen constant
     `prompts/kickoff.txt`. No dynamic content, no digits.
-12. **Session-start brief** (P1.12, below): one compact roster query to
-    the world-state daemon (D7), injected as a tool result.
-13. **Agent loop** (P2) until a stop reason (P5).
-14. **Persist**: `session_end`, transcript file, state cache.
-15. **Schedule** (P6): exactly one `schedule_next`.
-16. **Release lock** → `session_ran`.
+13. **Session-start injections** (P1.12, below): the roster, the wallets'
+    gas balances, and — on the `planning` profile — the plan file, each
+    injected as a completed call/result pair.
+14. **Agent loop** (P2) until a stop reason (P5).
+15. **Persist**: `session_end`, transcript file, state cache.
+16. **Schedule** (P6): exactly one `schedule_next`.
+17. **Release lock** → `session_ran`.
 
-#### P1.12 Session-start status brief
+#### P1.12 Session-start injections
 
 Before the first model call — the same point at which the file index is
-built into the system prompt (P1.10) — the scaffold issues **one compact
-roster query to the world-state daemon** (D7) and injects the answer into
-the session context.
+built into the system prompt (P1.11) — the scaffold performs the reads
+below and injects each as a **completed call/result pair**: an assistant
+turn carrying the call, then its result. In this order, always:
+
+| # | injection | source | profiles | owner of the answer |
+|---|---|---|---|---|
+| 1 | compact **roster** | `lens` | all (unless no daemon is configured) | the world-state daemon (D7) |
+| 2 | the wallets' **gas balances** | `harness` | all (unless no harness is configured) | the harness's own balance tool (D1) |
+| 3 | the **plan file** `workspace/plan.md` | `scaffold` | `planning` | the agent itself (P11) |
+
+What they share — and what makes them one contract rather than three
+special cases:
+
+- **Before the first model call**, so call 1 already carries them.
+- **Injected as a tool result**, passed through **verbatim**: the
+  scaffold owns the serialization and the P2 byte cap, which is the
+  transformation every tool result gets, and nothing else. Nothing is
+  summarized, reordered, filtered, or annotated.
+- **Exactly one attempt each, no retry, degrade visibly** (X21). A
+  failure is injected as the failure it is and the session proceeds.
+- **They bound nothing the agent does** (X20): no `session_tool_cap`, no
+  consecutive-error counter, no repetition breaker. They do emit
+  `tool_call` events and so count in `session_end.tool_calls`.
+- **`initiator: scaffold`** on every one of them, which is how analysis
+  excludes reads the agent did not choose. From 0.5.0 that field alone no
+  longer identifies the roster brief: split on `tool` (P9).
+
+Where they differ: only the roster is a **special path** (X22) — not a
+tool, not on the surface, not issuable by the agent. The balance call and
+the plan read name tools that **are** on the surface, so for those two the
+scaffold is pre-calling a call the agent could equally make, and does not
+own anything the agent cannot reach.
+
+##### P1.12.1 The roster brief
 
 - **The query is `roster`**, taken straight from the daemon over its own
   socket, not through the harness. One line per kami — on-chain `index`,
@@ -88,23 +127,16 @@ the session context.
   agent keeps is the **full** per-kami detail — names, HP rate, accrual,
   cooldown, node — on the harness's own `lens_party`, unchanged and
   callable for any account.
-- **Injected as a tool result**: an assistant turn carrying the call,
-  then its result. The answer is passed through **verbatim**: envelope
-  untouched, nothing summarized, reordered, filtered, or annotated. The
-  scaffold owns only the serialization (compact JSON) and the P2 byte
-  cap, which is the transformation every tool result gets.
-- **Degrade visibly, never block** (X21). Exactly one attempt. A failure
-  is injected as a minimal machine-shaped record — `{"error": {"code",
+- **Its serialization is compact JSON** of the daemon envelope, under
+  the P2 byte cap.
+- **Its failure record.** A failure is injected as a minimal
+  machine-shaped record — `{"error": {"code",
   "message"}}` — and the session continues; there is no retry, no
   fallback content, and no abort. A query error carries the daemon's own
   code and message. A transport failure has no daemon text to quote, so
   its code is the scaffold's (`LENS_UNAVAILABLE`) and its message is the
   operating system's; that record is frozen and leak-scanned exactly as
-  the three prompt strings are (P13, I1).
-- The brief consumes no `session_tool_cap`, never advances the
-  consecutive-error counter, and never feeds the repetition breaker
-  (X20). It emits a `tool_call` event with `source: lens` and so counts
-  in `session_end.tool_calls`.
+  the prompt assets are (P13, I1).
 - It is **skipped entirely** when no daemon is configured
   (`lens.enabled: false`), leaving no telemetry. It is *not* skipped when
   a configured daemon is unreachable: that degrades visibly instead, so a
@@ -116,6 +148,56 @@ the session context.
   replaced, which is most of why D1's ⅓-cap assumption is no longer
   under pressure from roster growth. The smoke tier reports both numbers
   together; floors do not compare across 0.4.0.
+
+##### P1.12.2 The wallets' gas balances
+
+- **Every profile.** Gas visibility is not a rung of the ladder: the
+  ladder varies how *documentation* reaches the agent, while how much ETH
+  its wallets hold is world state, on the same footing as its kamis'
+  health. The fixed system prompt states that the balances arrive each
+  session (P13), so their presence is a stated fact rather than a
+  surprise.
+- **The call is the harness's own balance tool, with no arguments.** The
+  tool's empty account label reports every account the harness holds, so
+  the scaffold never has to know which account the run is — the same
+  reasoning as the roster's argument-free query. The payload is whatever
+  the pinned harness serves (owner and operator ETH per account, plus the
+  owner's mainnet balance where one is configured), verbatim.
+- **It is the scaffold's one by-name dependency on the surface** (D1),
+  because only the harness knows the run's wallet addresses: the operator
+  keypair is generated inside the harness process and its key never
+  leaves it, and `init` has no key path at all (P12). The name is
+  asserted at bring-up by `init`'s harness check, which prints a warning
+  when the pinned surface does not carry it.
+- **Three degradations, all visible.** A harness that raises returns its
+  own words, verbatim (D1, I21). A surface without the tool yields the
+  loop's ordinary `unknown tool: <name>` result — what any absent name
+  yields — so a mis-pin is legible in the session record every session
+  instead of showing up as an absence. Neither aborts anything.
+- **Skipped entirely, with no telemetry, when no harness is configured:**
+  with no surface there is nothing to ask. This is the balance analogue
+  of the roster's no-daemon skip.
+- The agent may call the balance tool itself at any time. That is its
+  business, and it counts as its own behaviour, not the scaffold's.
+
+##### P1.12.3 The plan file
+
+- **Profile `planning` only.** `prompts/planning.txt` tells the agent
+  that `workspace/plan.md` is where its goals and plan live, that the
+  scaffold shows the file at the start of every session, and that keeping
+  it current is up to it (P13). Mechanism, not advice about what to plan.
+- **It is an ordinary workspace file.** The agent writes it with
+  `workspace_write`; the scaffold never creates, edits, or seeds it
+  (P11). The injection is a `workspace_read` of `plan.md` through the
+  same tool the agent uses, so the row carries `path` like any file call.
+- **A missing file is the normal not-found error result** — visible, and
+  the expected shape of session 1 on a fresh run.
+- **Contents pass through the normal truncation** at
+  `tool_result_max_bytes`, with the re-read hint every truncated
+  `workspace_read` gets. An agent that grows its plan to that cap spends
+  its own call-1 context on it, on every call of every session. That is
+  the agent's decision to make; D1's cap arithmetic names it as a term
+  the operator sizes the cap against.
 
 ### P2. Agent loop
 
@@ -129,9 +211,9 @@ the session context.
 - Each executed intent appends one `tool_result` message and emits one
   `tool_call` event.
 - The session opens on the kickoff message followed by the session-start
-  brief's call/result pair (P1.12) — which the loop synthesizes rather
-  than dispatches; from there the alternation is the agent's. Error
-  counting, the tool cap, and the repetition breaker all count
+  injections' call/result pairs (P1.12) — which the loop synthesizes
+  rather than dispatches; from there the alternation is the agent's.
+  Error counting, the tool cap, and the repetition breaker all count
   agent-executed intents only.
 - `end_session` takes effect immediately: every later intent in the same
   batch is skipped, emitted as `tool_call` with `ok=false, skipped=true`,
@@ -384,7 +466,7 @@ class ModelAdapter(Protocol):
 
 `run/telemetry.jsonl`, one JSON object per line, append-only. Machine
 contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
-`version: 0.4.0`, shipped inside the wheel as package data and kept
+`version: 0.5.0`, shipped inside the wheel as package data and kept
 byte-identical to the repo copy. Every event is validated **before** it
 is written; an invalid event raises and never lands. Unknown fields are
 rejected (`unevaluatedProperties: false`), so additive changes require a
@@ -396,10 +478,10 @@ enforced), `run_id`, `session`, `event`.
 | event | required | optional |
 |---|---|---|
 | `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
-| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `presentation_mode`, `harness_tools_hash` |
+| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `scaffold_profile`, `presentation_mode`, `harness_tools_hash` |
 | `llm_request` | `request_seq` | — |
 | `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response`, `request_seq`, `phantom`, `provider_request_id`, `cache_write_5m_tokens`, `cache_write_1h_tokens` |
-| `tool_call` | `tool`, `source` (`harness`\|`scaffold`\|`lens`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `call_seq`, `path` (file tools), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state`, `txs[]`, `result_error_shaped`, `provider_call_id`, `provider_call_id_duplicate`, `lens_stale`, `lens_block` |
+| `tool_call` | `tool`, `source` (`harness`\|`scaffold`\|`lens`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `call_seq`, `path` (file tools), `query` + `hits` (`search_reference`), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state`, `txs[]`, `result_error_shaped`, `provider_call_id`, `provider_call_id_duplicate`, `lens_stale`, `lens_block` |
 | `workspace_write` | `path`, `bytes`, `workspace_total_bytes` | — |
 | `workspace_delete` | `path`, `workspace_total_bytes` | — |
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
@@ -426,14 +508,28 @@ Reader notes (stable semantics):
 - `tool_call.initiator` names **who asked for the call**, which `source`
   does not: `source` names the layer that owns the thing called,
   `initiator` names the layer that wanted it run. `model` is every
-  intent the agent returned; `scaffold` is only the session-start brief
-  (P1.12) — a `lens`-source call with a `scaffold` initiator. **Any
-  measure of agent behavior must exclude scaffold-initiated calls**:
-  they are reads the agent did not choose, and they consume none of the
-  caps that bound what it does. The field is optional in the schema so
-  streams written under 0.3.0 and earlier still validate; from 0.3.1 on
-  it is emitted on every `tool_call`, so its absence in a 0.3.1+ stream
-  is a defect, not a default.
+  intent the agent returned; `scaffold` is the session-start injections
+  (P1.12). **Any measure of agent behavior must exclude
+  scaffold-initiated calls**: they are reads the agent did not choose,
+  and they consume none of the caps that bound what it does. The field is
+  optional in the schema so streams written under 0.3.0 and earlier still
+  validate; from 0.3.1 on it is emitted on every `tool_call`, so its
+  absence in a 0.3.1+ stream is a defect, not a default.
+- **`initiator: scaffold` is no longer one row.** Through 0.4.0 it meant
+  the roster brief and nothing else, and analysis could use it as that
+  filter. From 0.5.0 a session carries two such rows on every profile and
+  three on `planning`, so **split on `tool`**: the roster (`source:
+  lens`), the balance tool (`source: harness`), and the plan read
+  (`source: scaffold`, a `workspace_read` of `plan.md`). A query that
+  still reads `initiator=scaffold` as "the brief" silently counts up to
+  three different things.
+- **`session_end.tool_calls` does not compare across 0.5.0.** Every
+  session gained one or two rows no agent chose. Compare agent behaviour
+  on `initiator=model` counts, which are unaffected.
+- `session_start.scaffold_profile` is the rung the manifest pinned (D3),
+  and it is what explains a `tools_hash` that differs between arms of one
+  family: a profile at or above `search` carries one more scaffold tool by
+  design (P10).
 - **`tool_call.call_seq` is the stream's own call identity**, minted by
   the scaffold, one per emitted row, monotonic within a session, skipped
   intents included. Before 0.4.0 telemetry carried no call identity at
@@ -494,13 +590,28 @@ Reader notes (stable semantics):
 - Telemetry is not an agent-visible channel: budget fields recorded here
   never reach the agent.
 - Tool arguments and results live in transcripts, not telemetry — except
-  the `path` of file-tool calls, promoted so documentation- and
-  memory-access patterns are analyzable without transcript parsing.
+  the `path` of file-tool calls and the `query` / `hits` of
+  `search_reference`, promoted so documentation- and memory-access
+  patterns are analyzable without transcript parsing. `query` is the
+  agent's own text, verbatim; `hits` is how many passages came back (0 to
+  `k`). What an agent searched for, and whether the tree answered, is the
+  knowledge-delivery family's process observable, and seeing it should not
+  require a transcript read.
+- **The plan-file injection is a `workspace_read` row with `path:
+  plan.md` and `initiator: scaffold`.** A measure of the agent's own file
+  access must exclude it — it is one read per session the agent did not
+  choose. Plan *churn* is measured on `workspace_write` rows, which are
+  always the agent's.
 - Quest completions are not logged locally; they are read from chain
   state and joined by timestamp / `tx_hash` in analysis.
 - `provider_state` never appears in telemetry.
 
 ### P10. Scaffold tools (never part of the harness MCP surface)
+
+The surface is **profile-selected** (D3). The base tools below ship for
+every run; a profile at or above `search` adds `search_reference`.
+
+**Base surface (every profile):**
 
 | tool | signature | contract |
 |---|---|---|
@@ -512,12 +623,45 @@ Reader notes (stable semantics):
 | `get_status` | () | JSON with exactly `current_time_utc`, `session_number`, `workspace_bytes_used`, `workspace_quota_bytes` — nothing else |
 | `end_session` | (reason: free text) | immediate; reason logged (P2) |
 
-Game perception and action come exclusively from the harness MCP tools
-(D1), loaded per session. Tool order presented to the model is game
-tools first, scaffold tools second, deterministic so `tools_hash` is
-stable.
+**Profile-added (profiles ≥ `search`):**
 
-The list above is the whole scaffold surface. The session-start brief
+| tool | signature | contract |
+|---|---|---|
+| `search_reference` | (query, k?) | deterministic BM25 keyword search over `reference/`; top-k (default 5, clamped to 1–10) passages, each `{path, offset, length, text}` with BYTE offsets so `workspace_read(path, offset, length)` expands the hit; snippet bounded at 600 chars; an index with no indexable file answers `no reference files` |
+
+`search_reference` in detail, because every number in it is a pinned
+artifact of the arms it serves: the index is built lazily, once per
+session, from `run_dir/reference` over `.md` / `.markdown` / `.txt` /
+`.csv`; chunks are paragraphs packed to ≤ 1200 bytes (a longer paragraph
+is cut on a whitespace boundary near that limit) and, for CSV, whole row
+groups of 20 rows with the header riding in the first group; tokens are
+lowercase `[a-z0-9]+` with no stemming and no stop-word list; scoring is
+Okapi BM25 with `k1 = 1.5`, `b = 0.75`, `idf = ln(1 + (N − n + 0.5) /
+(n + 0.5))`; ordering is score descending, then `path`, then `offset`.
+**Same tree plus same query yields a byte-identical result.** It searches
+`reference/` only: the agent's own `workspace/` notes are reachable
+through `workspace_list` / `workspace_read` and are not indexed. Its
+description is mechanism-only, and it carries no advice about when
+searching is worth doing (I3).
+
+**Ordering rule** (unchanged in kind, now stated per profile): game tools
+first, then base scaffold tools in declaration order, then profile-added
+tools in declaration order. Because `tools_hash` hashes that list *in
+order*, appending the additions last means a profile that adds nothing
+produces the **same** `tools_hash` as 0.4.0 did at the same harness pin,
+and every profile at or above `search` produces exactly one other value.
+
+**So `session_start.tools_hash` differs by profile BY DESIGN**, while the
+harness's own registry hash and mass are identical across every arm of a
+family (the arms differ in the scaffold, not the environment). Recorded,
+expected, and — as always — never equated with the harness's value (D1).
+
+The name-collision check at loop construction runs against the **union**
+of the base and every profile's added names, so a harness that registers
+one of them is refused identically on every arm rather than only on the
+arms whose profile carries it.
+
+The two tables above are the whole scaffold surface. The session-start brief
 (P1.12) adds no entry to it, and from 0.4.0 that is true more strongly
 than before: the brief is not a tool at all. Its name appears in the
 injected assistant turn and in telemetry, never in the tool definitions
@@ -556,16 +700,19 @@ run/
 ├── run.lock          # PID + created (P4); absent between sessions
 ├── workspace/        # agent-owned (P11)
 ├── reference/        # read-only documentation snapshot (D5)
-├── prompts/          # frozen strings: system.txt, kickoff.txt, continue.txt
+├── prompts/          # frozen assets: system.txt, kickoff.txt, continue.txt,
+│                     #   orientation.txt, planning.txt (P13)
 ├── transcripts/      # session-NNNN.jsonl, messages exactly as sent (post-truncation)
 └── telemetry.jsonl   # append-only event stream (P9) — source of truth
 ```
 
 - `kami-agent init --manifest M --run-dir DIR` — validation and
-  scaffolding only: copies the manifest, materializes the frozen
-  prompts, creates `workspace/` and `transcripts/`, runs connectivity
-  checks (chain RPC, mainnet RPC with `eth_chainId == 1`, provider API,
-  MCP handshake), emits `run_start`. **There is no key path through
+  scaffolding only: copies the manifest, materializes **all five** frozen
+  prompt assets (P13, whatever the profile), creates `workspace/` and
+  `transcripts/`, runs connectivity checks (chain RPC, mainnet RPC with
+  `eth_chainId == 1`, provider API, MCP handshake — which also reports
+  whether the pinned surface carries the balance tool, D1), emits
+  `run_start`. **There is no key path through
   init**: it never generates, imports, or writes key material.
   `--skip-connectivity` skips the four checks (and leaves
   `run_start.harness_tools` empty).
@@ -573,22 +720,64 @@ run/
 - `kami-agent status --run-dir DIR` — prints the `state.json` summary.
   Operator-facing; never an agent channel.
 
-### P13. Frozen prompt strings
+### P13. Frozen prompt assets
 
-Three strings ship per run and are byte-frozen: `prompts/system.txt`,
-`prompts/kickoff.txt`, `prompts/continue.txt`. The system prompt states,
-in order: the situation (autonomous agent, periodic sessions, tool calls
-are the only effect, no human reads the text); the objective (complete
-as many quests as possible); persistence (`workspace/` survives, its use
-and structure are the agent's own); `reference/` as read-only
-documentation; the two tool families; scheduling via `set_next_wake`
-within the bounds, and that there is no in-session waiting; and that
-on-chain actions cost gas even when they revert.
+Five files ship per run and every one is byte-frozen. Three are the
+strings every session uses; two are **profile appendices**, appended to
+the system prompt by the profiles that carry them (D3). `init`
+materializes all five regardless of profile, so a run directory can be
+inspected against any rung, and a profile whose asset is missing fails
+loudly before the session starts (P1 step 8).
+
+| asset | used by | content |
+|---|---|---|
+| `prompts/system.txt` | every profile | the fixed system prompt |
+| `prompts/kickoff.txt` | every profile | the first user message; no dynamic content, no digits |
+| `prompts/continue.txt` | every profile | the tool-less-turn continuation |
+| `prompts/orientation.txt` | profiles ≥ `orientation` | the core-loop paragraph |
+| `prompts/planning.txt` | profile `planning` | what `workspace/plan.md` is and that it is shown each session |
+
+The system prompt states, in order: the situation (autonomous agent,
+periodic sessions, tool calls are the only effect, no human reads the
+text); the objective (complete as many quests as possible); persistence
+(`workspace/` survives, its use and structure are the agent's own);
+`reference/` as read-only documentation; the two tool families;
+scheduling via `set_next_wake` within the bounds, and that there is no
+in-session waiting; that on-chain actions cost gas even when they revert;
+and — new at 0.5.0, on **every** profile — that gas is paid in ETH from
+the agent's wallets whose balances it is shown at the start of every
+session (P1.12.2). No numbers: the balances themselves arrive as a tool
+result, never as prompt text.
+
+`orientation.txt` states what the world's core loop *is* — kamis,
+harvesting, health, liquidation, MUSU, food, experience, levels, skill
+points, quests, gas. Every sentence is a rule of the game; none is a
+recommendation. That boundary is the rung's whole point, and the text is
+a pinned artifact of the design that varies it: rewording it changes what
+those arms were measured on.
+
+`planning.txt` states where the plan file is, that the scaffold shows it
+each session, and that keeping it current is the agent's business — the
+mechanism of a file, not advice about what to put in it.
+
+Dynamic content is never prompt text. Balances and plan contents are
+**injected context** (P1.12), which keeps every prompt asset a fixed
+artifact that a byte-exact test can freeze.
+
+**The fixed floor therefore depends on the profile.** Call-1 context
+carries the base prompt plus this profile's appendices plus the file
+index plus the tool surface plus the injections, so a floor measured on
+one rung is not a floor on another. The smoke tier prints the terms
+separately — `system_chars`, `orientation_chars`, `planning_chars`,
+`balance_chars`, `plan_file_chars` — for exactly that reason, and the
+plan-file term is the one the *agent* controls (P1.12.3).
 
 Excluded by construction: budget, cost, tokens, compute limits, run
 duration, session caps, forced truncation, the existence of measurement
 — and equally, strategy hints, tool-usage advice, memory-structure
-suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
+suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5). Gas
+and ETH are world facts, not apparatus (P7.4), which is why the leak scan
+carves out "cost(s) gas" and nothing else.
 
 ---
 
@@ -647,14 +836,32 @@ suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
   unrecognized message is recorded as no state rather than guessed at.
 - `tx_hash` is extracted best-effort from structured content or JSON
   text, top level or one `result` level down, for telemetry only.
-- **No tool is depended on by name.** The scaffold's one name-coupling
-  to the harness surface was the session-start brief's `lens_party`
-  call; from 0.4.0 the brief reads the daemon directly (D7) and the
-  coupling is gone. The scaffold now consumes the surface entirely as
-  given: it depends on no tool existing, and refuses only the reverse
-  case — a tool named like the brief (P10).
-- **Cap arithmetic assumption.** Every call re-sends the system prompt,
-  the file index, the entire tool surface, and the session-start brief.
+- **Exactly one tool is depended on by name: the balance tool
+  (`get_gas_balance`).** 0.4.0 had none — the brief's `lens_party` call
+  was the last one and moving the brief onto the daemon retired it (D7).
+  0.5.0 re-introduces one, deliberately and with its cost stated, because
+  the session-start gas balances (P1.12.2) have no other possible source:
+  the run's wallet addresses are known only to the harness, whose operator
+  keypair is generated in-process and whose key never leaves it, while
+  this scaffold has no key path (P12) and no account identity of its own
+  (D7). A lens query would need a query the pinned daemon does not serve;
+  a direct RPC read would need addresses the operator would have to
+  hand-copy after an in-run wallet creation, which is state going stale by
+  construction.
+  The coupling is made safe by being **explicit, asserted early, and
+  visibly degrading**, never by being enforced: the name is a module
+  constant, `init`'s harness connectivity check reports whether the pinned
+  surface carries it (a warning line when it does not), and at runtime an
+  absent name yields the loop's ordinary `unknown tool` result in the
+  session record rather than a refusal — runtime refusal on surface drift
+  stays a non-goal (N10, X21).
+  Apart from that one name the scaffold still consumes the surface
+  entirely as given, and it still refuses the reverse case: a harness tool
+  named like the brief, or like any profile's scaffold tool (P10).
+- **Cap arithmetic assumption.** Every call re-sends the system prompt
+  (with this profile's appendices, P13), the file index, the entire tool
+  surface, and every session-start injection (P1.12) — the roster, the
+  gas balances, and on `planning` the plan file.
   That fixed floor must leave room for a session to be more than one
   call: the worst-case first-call floor is assumed **≤ 1/3 of
   `session_token_cap`**. The brief still makes the floor a function of
@@ -662,9 +869,16 @@ suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5).
   but the compact roster cut both the constant and the per-kami slope by
   close to an order of magnitude against the party report it replaced,
   so roster growth is no longer the term that threatens the assumption.
-  It remains a standing measurement, not a one-off. This is **not
-  enforced anywhere in the scaffold** — it is an operator sizing
-  obligation on the manifest. The tri-provider smoke tier reports the
+  It remains a standing measurement, not a one-off. From 0.5.0 the floor
+  gained three terms and one of them is not the operator's to bound: the
+  appendices are fixed bytes, the balance payload is small and bounded by
+  the account count, but **the plan file is the agent's own file and can
+  grow to `tool_result_max_bytes`** (default 64 KiB ≈ 16k tokens) on every
+  call of every session. Accepted rather than knobbed: it is the agent
+  spending its own context on its own plan, and the operator sizes
+  `session_token_cap` and `tool_result_max_bytes` knowing it. Floors do
+  not compare across profiles. This is **not enforced anywhere in the
+  scaffold** — it is an operator sizing obligation on the manifest. The tri-provider smoke tier reports the
   observed floor (`fixed_floor_input_tokens=…`) for that purpose;
   floors do not compare across 0.4.0, in either the brief's content or
   its serialization. A violated assumption degrades quietly into
@@ -737,6 +951,7 @@ at construction, everything else is silently ignored.
 | `workspace_quota_bytes` | P11 |
 | `lock_stale_s` | P4 |
 | `chain_rpc_url` | `init` connectivity check only |
+| `scaffold_profile` (`control`\|`orientation`\|`search`\|`pushed`\|`planning`) | P10, P13, P1.12.3 — the knowledge-delivery rung: it selects the scaffold surface, the prompt appendices, and the plan-file injection, and it is recorded on every `session_start`. **Validated at `build_run_config`**: an unknown value exits there, before any lock, telemetry, or session number, exactly as an unknown provider does. Absent = `control`. Cumulative: each value implies the ones to its left. `pushed` changes **nothing agent-side** beyond the recorded value — its rung is lens/harness result enrichment behind their own runtime flags, which the manifest records for provenance and the scaffold neither reads nor asserts |
 | `presentation_mode` | D1 — passed to the harness child as `PRESENTATION_MODE`, recorded on `session_start`; never validated scaffold-side. Also selects the brief's `noAuthored` request flag (D7), so both read paths ask the daemon for the same composition |
 | `harness.{command,args,cwd,env,handshake_timeout_s}` | D1 |
 | `lens.{socket_path,timeout_s,enabled}` | D7 — the world-state daemon the session-start brief reads. `socket_path` unset resolves `KAMI_LENS_SOCKET`, then the platform default; `enabled: false` is the only way to run with no brief at all |
@@ -815,11 +1030,11 @@ the same daemon over the same socket.
 
 | # | claim | enforcement |
 |---|---|---|
-| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — system prompt, tool descriptions, tool results, error messages, or `get_status` | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all three frozen strings), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`; tri-provider smoke re-scans every agent-visible string of a real session |
+| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — system prompt, prompt appendices, tool descriptions, tool results, error messages, or `get_status`. **In-world resources are not apparatus**: gas and the ETH that pays it are world facts (P7.4), so "cost(s) gas" is carved out of the vocabulary scan and nothing else is; the wallets' ETH balances reach the agent as world state through a tool result, while the dollar budget stays unreachable and `budget_visible` stays pinned false (X10) | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all **five** frozen assets, with the `\bcosts? gas\b` carve-out), `::test_the_gas_sentence_states_the_resource_and_where_it_is_shown`, `tests/unit/test_profiles.py::test_no_apparatus_leaks_in_any_profiles_tool_strings` (every profile's surface), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`; tri-provider smoke re-scans every agent-visible string of a real session |
 | I2 | Budget and t_max are checked **only** at session boundaries; no in-flight session is ever terminated for either | single `boundary_check` call site in `runner.run_session`; `tests/unit/test_governor.py` (budget, t_max, precedence, overspend), `tests/unit/test_runner.py::test_budget_boundary_completes_run`, `::test_t_max_boundary` |
-| I3 | Zero strategy content in the scaffold or the prompts — mechanics only | `tests/unit/test_prompts.py::test_frozen_strings_are_exactly_as_reviewed` (byte-exact; any reword must be re-frozen in the same commit) + the I1 scans + review discipline on every agent-visible string |
+| I3 | Zero strategy content in the scaffold, the prompts, or the profile appendices — mechanics and rules only. The orientation appendix states what the core loop *is* and never what to do; `search_reference`'s description states what it searches and never when to search | `tests/unit/test_prompts.py::test_frozen_strings_are_exactly_as_reviewed`, `::test_profile_appendices_are_exactly_as_reviewed` (byte-exact; any reword must be re-frozen in the same commit), `tests/unit/test_search.py::test_the_tool_description_is_mechanism_only` + the I1 scans + review discipline on every agent-visible string |
 | I4 | Forced endings are silent: no warning message, no final model call, no tool result, no `tool_call` event for the carried wake | `tests/unit/test_loop.py::test_context_guard_trips_post_call_and_is_silent`, `tests/unit/test_repetition.py::test_trip_is_silent_and_ends_like_tool_cap`, the carried-wake suite (`test_token_cap_carries_final_turn_wake_intent` … `test_cap_without_wake_intent_carries_nothing`) |
-| I5 | Frozen strings and code defaults cannot silently diverge (wake bounds), and the packaged copies match the repo copies byte-for-byte (prompts and telemetry schema) | `tests/unit/test_prompts.py::test_wake_bounds_in_frozen_prompt_match_code_defaults`, `::test_packaged_prompts_match_repo_prompts`, `tests/unit/test_telemetry.py::test_packaged_schema_matches_repo_schema`, `::test_schema_resolves_inside_the_installed_package` |
+| I5 | Frozen strings and code defaults cannot silently diverge (wake bounds), and the packaged copies match the repo copies byte-for-byte — all five prompt assets and the telemetry schema | `tests/unit/test_prompts.py::test_wake_bounds_in_frozen_prompt_match_code_defaults`, `::test_packaged_prompts_match_repo_prompts` (five assets), `::test_init_materializes_every_asset`, `tests/unit/test_telemetry.py::test_packaged_schema_matches_repo_schema`, `::test_schema_resolves_inside_the_installed_package` |
 | I6 | Telemetry is append-only and crash-consistent: one line per event, validated before write, `write → flush → fsync` before the action it describes is complete; a crash loses at most the event being written | `TelemetryWriter.emit`; `tests/unit/test_telemetry.py::test_append_only_ordering`, `::test_appends_across_writer_instances`, and the rejection suite (`unknown event`, `missing required`, `bad enum`, `wrong type`, `extra field`, `non-UTC ts`) proving invalid events never land |
 | I7 | Telemetry is the source of truth for accounting; `state.json` is a cache rebuilt by folding the stream, and a crashed session is closed exactly once | `tests/unit/test_state.py::test_fold_recomputes_accounting_from_the_stream`, `::test_crashed_session_detected`, `tests/unit/test_runner.py::test_crash_recovery_writes_synthetic_end_and_refolds_accounting`, `::test_crash_recovery_is_idempotent` |
 | I8 | Every stop reason is enumerated and telemetered — the `session_end.reason` enum is closed and each value has a producing path | schema enum + `tests/unit/test_telemetry.py::test_schema_covers_exactly_the_spec_events`, `::test_bad_enum_value_rejected`; producers covered by `test_loop.py` (agent, token_cap, tool_cap, errors), `test_repetition.py` (repetition), `test_runner.py` (crash, harness-abort errors) |
@@ -834,7 +1049,7 @@ the same daemon over the same socket.
 | I17 | Provider reasoning state is opaque, same-session, same-adapter, and never reaches telemetry | `tests/unit/test_provider_state.py` (capture, verbatim replay, foreign-state ignore per adapter, `test_loop_copies_state_verbatim_without_inspecting`, `test_transcript_records_state_as_sent`) |
 | I18 | The tool surface presented to the model is deterministic and collision-free | `tests/unit/test_loop.py::test_harness_scaffold_name_collision_rejected`, `tests/unit/test_harness_client.py::test_tools_hash_is_deterministic_and_sensitive` |
 | I19 | Tool schemas stay inside the subset all three providers accept | `tests/unit/test_scaffold_tools.py::test_tool_defs_cover_spec_surface` (no `oneOf`/`anyOf`/`allOf`) + the tri-provider tier parsing every call natively |
-| I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress | the scaffold tool list is exactly the seven of P10 (`test_tool_defs_cover_spec_surface`); network-level closure is operator-owned (see *Unowned*, README) |
+| I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress. `search_reference` adds a *view* of `reference/`, not a channel: it reads the same read-only tree `workspace_read` already serves | the scaffold tool list is exactly the base seven of P10 plus, per profile, the one added tool (`test_tool_defs_cover_spec_surface`, `tests/unit/test_profiles.py::test_the_surface_per_profile`); network-level closure is operator-owned (see *Unowned*, README) |
 | I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
 | I22 | The three post-broadcast terminal states plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing), `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
 | I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
@@ -842,6 +1057,10 @@ the same daemon over the same socket.
 | I25 | A model request that was sent always leaves a record, whether or not its outcome did — and the write-ahead marker never inflates accounting | `tests/unit/test_loop.py::test_every_model_request_is_written_before_it_is_sent` (asserts the marker is on disk at the moment the request goes out), `::test_each_retry_is_its_own_request`, `::test_write_ahead_markers_never_contribute_to_accounting`, `::test_an_unnormalizable_response_is_recorded_instead_of_escaping`; recovery in `tests/unit/test_runner.py::test_a_request_that_never_completed_is_named_not_lost`, `::test_the_phantom_is_counted_by_the_crash_session_end`, `::test_phantom_recovery_is_idempotent`, `::test_a_completed_request_is_never_called_phantom`; pairing re-asserted per session by `tests/cron_smoke/check_telemetry.py` |
 | I26 | Every emitted `tool_call` row is 1:1 with the intent behind it, and a provider that reuses a call id is recorded rather than obeyed or refused | `tests/unit/test_loop.py::test_every_emitted_row_carries_a_monotonic_call_identity`, `::test_skipped_intents_also_get_an_identity`, `::test_provider_call_ids_are_recorded_verbatim`, `::test_a_reused_provider_call_id_is_flagged_and_both_calls_still_execute` (both calls run, in order, with their own arguments, and nothing raises); `check_telemetry.py` asserts `call_seq` is unique and ordered in a real session |
 | I27 | Transaction evidence survives into telemetry from both the returned and the raised path, and from every nesting level a multi-transaction payload uses | `tests/unit/test_receipts.py` (`test_raised_revert_and_unconfirmed_yield_their_transaction_hash`, `::test_a_batch_error_yields_no_single_hash`, `::test_a_pre_signing_rejection_has_no_hash_to_report`, `::test_a_hash_quoted_outside_the_contract_clause_is_not_read_as_the_transaction`), `tests/unit/test_harness_client.py::test_per_hop_receipts_are_copied_from_a_top_level_array`, `::test_per_row_receipts_are_copied_from_inside_a_batch_result_list`, `tests/unit/test_loop.py::test_a_reverted_transaction_records_its_hash_on_the_field`, `::test_in_band_receipts_and_error_shaped_results_reach_telemetry` |
+| I28 | **The session-start injections run in one fixed order — roster, balances, plan — all before the first model call, each attempted exactly once, each injected verbatim, and none of them bounds anything the agent does** | `tests/unit/test_injections.py::test_the_three_injections_run_in_order_before_the_first_model_call`, `::test_call_seq_covers_the_injections_in_order`, `::test_balances_reach_the_model_verbatim`, `::test_the_balance_call_is_attempted_exactly_once`, `::test_balances_bound_nothing_the_agent_does`, `::test_a_failed_balance_call_does_not_advance_the_error_counter`, `::test_the_plan_injection_bounds_nothing_the_agent_does`; end to end under a cron environment, per profile, in `tests/cron_smoke/check_telemetry.py` |
+| I29 | **Every injection degrades visibly rather than vanishing**: a harness that raises is quoted verbatim, a surface without the balance tool yields the ordinary unknown-tool result, a missing plan file yields the ordinary not-found result — and an injection is skipped silently only when its whole source is unconfigured | `tests/unit/test_injections.py::test_a_surface_without_the_balance_tool_degrades_visibly`, `::test_a_failing_balance_call_is_injected_as_the_harness_own_words`, `::test_a_missing_plan_file_is_the_normal_not_found_error`, `::test_no_harness_means_no_balance_injection_and_no_telemetry`, `tests/unit/test_brief.py::test_no_brief_when_no_daemon_is_configured` |
+| I30 | **The profile selects the surface and the prompt, and both are byte-exact artifacts**: an unknown rung never starts a run, a rung whose asset is missing never starts a session, a profile below `search` cannot execute the search tool, and a profile that adds no tool hashes exactly as 0.4.0 did | `tests/unit/test_profiles.py::test_an_unknown_rung_fails_before_anything_starts`, `::test_the_surface_per_profile`, `::test_profile_added_defs_come_after_the_base_ones`, `::test_control_and_orientation_hash_exactly_as_the_base_surface_does`, `::test_a_profile_that_adds_a_tool_has_its_own_hash_by_design`, `::test_the_system_prompt_gains_one_appendix_per_rung`, `::test_a_missing_appendix_fails_loudly_and_names_the_rung`, `tests/unit/test_search.py::test_a_profile_below_search_cannot_execute_it_by_name`, `tests/unit/test_runner.py::test_the_profile_lands_on_every_session_start`, `::test_a_mis_provisioned_profile_starts_no_session` |
+| I31 | **Reference search is deterministic and its hits are re-readable**: the same tree and query give byte-identical output, ties break on path then offset, spans never overlap or leave their file, and `workspace_read` with a hit's own offset and length returns that passage | `tests/unit/test_search.py::test_same_tree_and_query_give_byte_identical_results`, `::test_ordering_breaks_ties_on_path_then_offset`, `::test_chunk_spans_do_not_overlap_and_stay_inside_their_file`, `::test_hits_are_ordered_and_carry_a_re_readable_span`, `::test_k_is_clamped_to_the_allowed_range`, `::test_an_empty_tree_says_so` |
 
 ---
 
@@ -892,6 +1111,23 @@ a bug; changing one is a spec change, not a fix.
   tools, pinned false, and is deliberately not manifest-wired.** It is
   mechanism kept alive for a future budget-visible configuration;
   reaching it requires a code change, which is the intended friction.
+  **Session-start ETH balances are not a reversal of this, and the
+  distinction is not a technicality.** `budget_visible` would expose the
+  *apparatus'* own accounting — dollars spent against `budget_usd`, a
+  quantity that exists only because someone is paying for inference and
+  that no player of this world can observe. ETH is the opposite kind of
+  fact: a world resource every player holds, which the harness has served
+  on its balance tool for many versions and which the agent could already
+  read unprompted. Pre-reading it changes *when* the agent sees a world
+  fact, not *whether* it can see the apparatus. `get_status` still returns
+  exactly its four fields; the dollar budget, the caps, `t_max` and the
+  session counts remain unreachable; `budget_visible` remains pinned false
+  and un-wired. The honest residue: an agent reasoning about ETH
+  burn-down has a weak proxy for run length. Weak by measurement — gas on
+  this chain is tiny (one full run's 224 transactions cost 0.00064 ETH),
+  so a starting balance is nowhere near a horizon signal — and accepted,
+  because the alternative is hiding from the agent the resource its own
+  actions consume.
 - **X11 — The harness child is spawned before `session_start` is
   emitted**, inverting a naive reading of the lifecycle, because
   `session_start` carries `tools_hash`. The hard ordering constraint
@@ -931,8 +1167,11 @@ a bug; changing one is a spec change, not a fix.
   producing a wrong label. The recorded-surface CI fixture and the
   copied message text in the fake MCP server are what surface the
   drift.
-- **X20 — the session-start brief consumes no cap, and it is skipped
-  only when no daemon is configured.** It performs a real read yet
+- **X20 — the session-start injections consume no cap, and each is
+  skipped only when its own source is unconfigured.** (Written for the
+  brief, the first of them; from 0.5.0 it governs all three identically —
+  the balance read is skipped only when no harness is configured, and the
+  plan read only on profiles that do not carry it.) It performs a real read yet
   counts toward neither `session_tool_cap` nor the consecutive-error
   counter nor the repetition breaker: those counters exist to bound what
   the *agent* does, and a read the agent did not choose must not shrink
@@ -944,8 +1183,12 @@ a bug; changing one is a spec change, not a fix.
   to ask, so a *configured but unreachable* daemon degrades visibly
   rather than vanishing. Silence would make "the brief never ran" and
   "the brief was never wanted" the same reading.
-- **X21 — a failed brief is injected as a minimal error record and the
-  session proceeds.** One attempt, no retry, no fallback content, no
+- **X21 — a failed injection is injected as the failure it is and the
+  session proceeds.** (Below in the brief's terms; the same rule and the
+  same reasoning cover the balance read — whose failure text is the
+  harness's own, or the loop's unknown-tool wording when the pinned
+  surface lacks the tool — and the plan read, whose failure is the
+  ordinary not-found result.) One attempt, no retry, no fallback content, no
   abort. For a query error the record is the daemon's own code and
   message. For a transport failure there is no daemon text to quote, so
   the scaffold composes `{"error": {"code": "LENS_UNAVAILABLE",
@@ -956,7 +1199,7 @@ a bug; changing one is a spec change, not a fix.
   would put scaffold-authored prose where world state belongs; aborting
   would let an unavailable read-side daemon end sessions that could
   still act. The record is machine-shaped, carries no advice, and is
-  frozen and leak-scanned like the three prompt strings (P13, I1).
+  frozen and leak-scanned like the prompt assets (P13, I1).
 - **X22 — the brief is a special path, and says so.** Through 0.3.2 the
   brief was a call to a general harness tool the agent could equally
   make, and "no special path" was a contract. It is not one any more:
@@ -968,6 +1211,11 @@ a bug; changing one is a spec change, not a fix.
   roster — but the exception is real and is not to be re-described as
   symmetry. What preserves the agent's reach is that the **full**
   per-kami detail stays on `lens_party`, unchanged.
+  **This exception covers the roster and nothing else.** The other two
+  injections (P1.12.2, P1.12.3) name tools that ARE on the surface, so
+  there the scaffold only pre-calls something the agent can call itself —
+  0.3.2's symmetry, still true for those two. Do not generalize X22 into
+  "scaffold-initiated calls are special paths": one of the three is.
 - **X23 — a duplicated provider call id is recorded, never obeyed and
   never refused.** The loop routes results positionally, so a repeated
   id changes nothing about execution: both calls run, in order, with
@@ -976,13 +1224,37 @@ a bug; changing one is a spec change, not a fix.
   because a provider quirk must not end a session — and it is not
   deduplicated, because N9 forbids that and because the two calls are
   genuinely different intents.
+- **X24 — the scaffold surface differs between arms of one experiment,
+  and so does `session_start.tools_hash`.** A profile at or above `search`
+  is shown one tool the profiles below it are not (P10), which is the
+  point of a scaffold-ablation ladder: the delivery mechanism is the
+  variable. The consequence is that two arms running the same agent SHA,
+  the same harness SHA and the same world record different `tools_hash`
+  values, which looks like drift and is not. It is recorded rather than
+  suppressed (a single hash across profiles would require hashing a
+  surface the model was not shown), and the harness-side hash and registry
+  mass stay identical across every arm — so the *environment* is provably
+  constant while the scaffold varies.
+- **X25 — `pushed` is a recorded value with no agent-side behaviour.** Of
+  the five profiles, one changes nothing in this repo: its rung is result
+  enrichment inside the lens and the harness, behind their own runtime
+  flags. The scaffold records the name so the arm's provenance is
+  self-describing, and does not read, verify, or assert the flags — a
+  profile naming a rung the VM does not actually carry is a launch-gate
+  question, not something this scaffold can detect. It still carries the
+  search tool, because the ladder is cumulative.
 
 ---
 
 ## Non-goals
 
 - **N1** Multi-model roles (executor/optimizer splits).
-- **N2** Knowledge packs or calibrated strategy priors of any kind.
+- **N2** Knowledge packs or calibrated strategy priors of any kind. The
+  `orientation` appendix is not one and the line is worth stating: it is
+  the world's *rules* (what harvesting does, what experience is for),
+  never a policy, a priority, an efficiency claim, or a number to aim at.
+  A profile that shipped tactics would be this non-goal broken, not a new
+  rung.
 - **N3** Mid-session compaction or context summarization. Cross-session
   memory exists only as agent-written `workspace/` files.
 - **N4** Self-funding or economic self-sustainability.
@@ -999,7 +1271,14 @@ a bug; changing one is a spec change, not a fix.
 - **N9** Reordering, deduplicating, or dependency-analyzing parallel
   tool intents; retrying reverted transactions on the agent's behalf.
 - **N10** Runtime refusal on harness surface drift (D1) — detection is
-  analytical and CI-side.
+  analytical and CI-side. This now covers the one by-name dependency too:
+  a pinned surface without the balance tool degrades visibly every session
+  and is warned about at `init`, but never refuses to run.
+- **N11** Searching anything but `reference/`. `search_reference` indexes
+  the documentation snapshot only — not the agent's own `workspace/`
+  notes, not its transcripts, not the run record. Retrieval over the
+  agent's own history is a later rung's question, and answering it here
+  would quietly change what the `search` arm measures.
 
 ---
 
@@ -1007,6 +1286,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 2.0 | v0.5.0 | **A manifest-selected `scaffold_profile` makes the scaffold the experimental variable** (D3, P10, P13): five cumulative rungs — `control`, `orientation`, `search`, `pushed`, `planning` — served by ONE agent version, validated at `build_run_config`, recorded on every `session_start`. The surface is profile-selected: profiles at or above `search` carry `search_reference`, a deterministic pure-python BM25 index over `reference/` returning top-k passages with BYTE offsets that `workspace_read` re-reads exactly, whose `query` and `hits` are promoted into telemetry as the family's process observable. Prompt assets become base + **pinned appendices** (`orientation.txt`, `planning.txt`), each byte-frozen and each materialized by `init`; they are read before the harness spawn, so a rung whose asset is missing fails loudly and starts no session (P1 step 8). **Gas visibility on every profile** (P1.12.2): one fixed system-prompt sentence stating that gas is paid in ETH from the agent's wallets and that the balances arrive each session, plus a session-start injection of the harness's own balance tool — which re-introduces exactly one by-name dependency on the surface, argued and bounded in D1 (asserted at `init`, degrading visibly, never refusing), and argued against `budget_visible` in X10 (ETH is a world resource; the dollar budget stays unreachable). **The `planning` profile adds the plan-file surface** (P1.12.3): the agent's own `workspace/plan.md`, re-read at session start through the ordinary tool, missing-file error included, and named in D1's cap arithmetic as the one floor term the agent itself controls. P1.12 is restated as the **session-start injections** — one ordered contract (roster → balances → plan) with shared verbatimness, single-attempt, visible-degradation and cap-exclusion rules — and X22's special-path exception is confined to the roster, since the other two name tools that are on the surface. Consequences for readers: `initiator=scaffold` is no longer a synonym for the brief (split on `tool`), `session_end.tool_calls` does not compare across 0.5.0, and `tools_hash` differs between arms by design (X24) while the harness's own hash and mass stay identical. New deviations X24 (per-profile surface) and X25 (`pushed` is agent-side inert); new non-goal N11 (search covers `reference/` only). Telemetry schema 0.4.0 → 0.5.0: three additive optional fields (`session_start.scaffold_profile`, `tool_call.query`, `tool_call.hits`), no new event types. New invariants I28–I31. |
 | 1.9 | v0.4.0 | Consumption of the kami-harness 2.1.0 surface (101 tools) and of the kami-lens 0.3.0 compact roster. **The session-start brief becomes a direct daemon read** (P1.12, new D7): one `roster` query over the daemon's own socket, replacing the harness `lens_party` call. It is now explicitly a special path (X22) — not a tool, not on the surface, not issuable by the agent, refused at construction if a harness registers its name (P10) — and the compaction cuts both the fixed floor's brief term and its slope in roster size by close to an order of magnitude, which is what takes roster growth off D1's cap-arithmetic assumption. Failures degrade to a minimal machine-shaped record, the transport half of which is the one string the scaffold authors and is frozen accordingly (X21, P13). **Telemetry integrity** (P3, P9): every model request is written ahead as `llm_request` and paired by `request_seq`, so a request billed but never completed is recovered as a named `phantom` row instead of vanishing, with the residual window stated exactly; no exception can escape the call site unrecorded (P8); `call_seq` gives the stream its own 1:1 call identity and `provider_call_id`/`provider_call_id_duplicate` record — without obeying or refusing — a provider that reuses an id (X23, I26), the class that once presented as a routing defect and was adjudicated to be an analysis mis-join; `tx_hash` now covers the raised path and `txs[]` carries in-band per-transaction receipts from both nesting levels (I27); `result_error_shaped` names a returned-rather-than-raised failure without moving `ok`. Per-call `provider_request_id` and the Anthropic cache-lifetime split are recorded where served and as absent where not (D2), which makes N5 measured. `harness_tools_hash` records the harness's own published registry hash beside — never equated with — the scaffold's. `usage_unknown`'s two distinct lossy classes are separated in P7.4, with the recoverable one named as out of scope. Telemetry schema 0.3.1 → 0.4.0: one new event type, one widened enum (`tool_call.source` gains `lens`), the rest additive. |
 | 1.8 | v0.3.2 | Session-start status brief (P1.12): before the first model call the scaffold calls the pinned surface's general any-operator party report, `lens_party`, for the account's own operator, and injects the result verbatim as a normal tool result — one call covering every owned kami's on-chain state, HP current/total/rate, and cooldown, so orientation is not re-derived from scratch each session. Explicitly not a special path: the same tool stays available to the agent for any account, both invocations share one execution path, and only the new `tool_call.initiator` (`model` \| `scaffold`) separates them (P9). The brief is attempted exactly once and degrades visibly — a failure is injected as the error it is and the session continues (X21) — and it bounds nothing the agent does: no `session_tool_cap`, no error counter, no repetition breaker (X20). No new scaffold tool, so `tools_hash` is unchanged (P10). Telemetry schema 0.3.0 → 0.3.1 (one additive optional field). D1's cap arithmetic restated: the fixed floor now grows linearly with the account's roster size, so it is a standing measurement, not a one-off. |
 | 1.7 | v0.3.0 | Consumption of a harness that **raises** confirmed reverts and unconfirmed transactions instead of returning them: harness error messages are contractually verbatim to the model and dispatched once (I21); the transaction outcome is classified once at ingestion into `tool_call.tx_terminal_state`, a closed five-value enum, so analysis splits validation-rejects / reverts / unconfirmed on a field rather than on prose (I22, X18, X19); `tool_call.ok` restated as exception-keyed and harness-dependent, to be read with the new field and never alone; P5.1's error-or-revert note restated as harness-dependent, with knobs unchanged. Harness `presentation_mode` pinned in the manifest, passed to the child unvalidated, and recorded on every `session_start` (I23, X17). `tools_hash` restated as the scaffold's own fingerprint, different by construction from any hash a harness publishes of its own registry. Telemetry schema 0.2.0 → 0.3.0 (two additive optional fields). |

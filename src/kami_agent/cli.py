@@ -39,15 +39,26 @@ from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient
 from kami_agent.lens import LensClient, LensQueryError, LensUnavailableError
-from kami_agent.loop import BRIEF_QUERY, LoopCaps
+from kami_agent.loop import BALANCE_TOOL, BRIEF_QUERY, LoopCaps
 from kami_agent.runner import RunConfig, run_session
 from kami_agent.state import load_state
 from kami_agent.supervisor import uninstall_cron
 from kami_agent.telemetry import TelemetryWriter
+from kami_agent.tools.scaffold import DEFAULT_PROFILE, PROFILES
 
 PROVIDERS = ("anthropic", "openai", "google")
 
-PROMPT_NAMES = ("system.txt", "kickoff.txt", "continue.txt")
+# Every pinned prompt asset: the three frozen strings plus the profile
+# appendices (SPEC P13). `init` materializes all of them regardless of
+# profile, so one run directory can be inspected against any rung and a
+# profile can never be selected without its asset on disk.
+PROMPT_NAMES = (
+    "system.txt",
+    "kickoff.txt",
+    "continue.txt",
+    "orientation.txt",
+    "planning.txt",
+)
 
 
 def _prompts_source() -> Any:
@@ -79,6 +90,13 @@ def build_run_config(manifest: dict[str, Any], run_dir: Path) -> RunConfig:
     caps = manifest.get("caps", {})
     wake = manifest.get("wake", {})
     prices = manifest["price_table"]
+    # Validated here, before any lock, telemetry, or session number: an
+    # unknown rung is a manifest error, not a run to start (as with an
+    # unknown provider). Absent = control, which is the 0.4.0 scaffold
+    # plus gas visibility.
+    profile = manifest.get("scaffold_profile", DEFAULT_PROFILE)
+    if profile not in PROFILES:
+        raise SystemExit(f"unknown scaffold_profile {profile!r}; expected one of {PROFILES}")
     return RunConfig(
         run_dir=run_dir,
         run_id=manifest["run_id"],
@@ -105,6 +123,7 @@ def build_run_config(manifest: dict[str, Any], run_dir: Path) -> RunConfig:
         workspace_quota_bytes=manifest.get("workspace_quota_bytes", 10 * 1024 * 1024),
         lock_stale_s=manifest.get("lock_stale_s", 7200.0),
         presentation_mode=manifest.get("presentation_mode"),
+        scaffold_profile=profile,
     )
 
 
@@ -264,16 +283,30 @@ def check_lens(manifest: dict[str, Any]) -> str:
 
 
 def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
+    """Bring-up check for the harness surface, including the one tool the
+    scaffold depends on by name.
+
+    The session-start gas balances are read from the harness's own balance
+    tool (SPEC D1): only the harness knows the run's wallet addresses. That
+    coupling is asserted HERE, loudly, at bring-up — never at runtime,
+    where a surface without the tool degrades visibly instead of refusing
+    to run (N10, X21).
+    """
     factory = harness_factory(manifest)
     if factory is None:
         return "harness: not configured (skipped)", []
     client = factory()
     try:
         names = [t.name for t in client.tool_defs]
-        return (
-            f"harness ok ({client.server_name} {client.server_version}, {len(names)} tools)",
-            names,
-        )
+        line = f"harness ok ({client.server_name} {client.server_version}, {len(names)} tools)"
+        if BALANCE_TOOL in names:
+            line += f"; {BALANCE_TOOL} present (session-start gas balances)"
+        else:
+            line += (
+                f"; harness WARNING: this surface has no {BALANCE_TOOL} — every "
+                "session's gas-balance injection will degrade visibly (D1)"
+            )
+        return line, names
     finally:
         client.close()
 

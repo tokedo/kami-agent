@@ -25,6 +25,7 @@ def test_handshake_loads_tools(client):
     assert names == [
         "echo",
         "lens_party",
+        "get_gas_balance",
         "multi_hop_tx",
         "batch_rows_tx",
         "error_payload",
