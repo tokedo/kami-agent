@@ -14,6 +14,12 @@ protocol here rather than only in unit tests — including under the
 stripped cron environment, where a socket path resolved from ``HOME``
 is exactly the kind of assumption this job exists to catch.
 
+The scaffold profile is the second argument (default ``control``). It is a
+parameter because the injections a session performs depend on it: every
+profile reads the roster and the wallets' gas balances, and ``planning``
+also re-reads ``workspace/plan.md``. Run it for the two ends of the ladder
+and the whole injection set is covered under cron conditions.
+
 Exit code is the CLI's own; the workflow judges the printed markers
 ("initialized ...", "session_ran") and telemetry via check_telemetry.py,
 never through a pipe.
@@ -131,7 +137,7 @@ class StubAdapter:
         )
 
 
-def write_manifest(path: Path, lens_socket: str) -> None:
+def write_manifest(path: Path, lens_socket: str, profile: str) -> None:
     manifest = {
         "run_id": "cron-smoke-001",
         "provider": "anthropic",  # never constructed: the stub adapter is injected
@@ -140,6 +146,9 @@ def write_manifest(path: Path, lens_socket: str) -> None:
         "params": {"max_tokens": 1024},
         "caps": {"session_token_cap": 100000},
         "budget_usd": 10.0,
+        # The rung under test: it selects the tool surface, the prompt
+        # appendices and the plan-file injection (SPEC D3).
+        "scaffold_profile": profile,
         "harness": {
             # Absolute interpreter path: cron environments resolve nothing
             # via PATH — this is the defect class under test.
@@ -159,12 +168,19 @@ def write_manifest(path: Path, lens_socket: str) -> None:
 
 def main() -> int:
     run_dir = Path(sys.argv[1])
+    profile = sys.argv[2] if len(sys.argv) > 2 else "control"
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir.parent / "manifest.yaml"
     daemon = StubLensDaemon(run_dir.parent / "lens.sock")
-    write_manifest(manifest_path, daemon.path)
+    write_manifest(manifest_path, daemon.path, profile)
     (run_dir / "reference").mkdir(exist_ok=True)
     (run_dir / "reference" / "gdd.md").write_text("lore\n", encoding="utf-8")
+    if profile == "planning":
+        # An agent-written plan from a previous session: the plan-file
+        # injection's happy path is what a planning arm normally sees.
+        # (The missing-file path is covered in the unit tier.)
+        (run_dir / "workspace").mkdir(exist_ok=True)
+        (run_dir / "workspace" / "plan.md").write_text("1. quests\n", encoding="utf-8")
 
     try:
         rc = cli.main(

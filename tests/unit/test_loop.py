@@ -15,7 +15,16 @@ from kami_agent.adapters.base import (
     UserMessage,
 )
 from kami_agent.governor import PriceTable
-from kami_agent.loop import AgentLoop, GameToolResult, LoopCaps, SessionResult
+from kami_agent.loop import (
+    BALANCE_CALL_ID,
+    BALANCE_TOOL,
+    BRIEF_CALL_ID,
+    PLAN_CALL_ID,
+    AgentLoop,
+    GameToolResult,
+    LoopCaps,
+    SessionResult,
+)
 from kami_agent.telemetry import TelemetryWriter, read_events
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.scaffold import ScaffoldTools
@@ -24,6 +33,13 @@ PRICES = PriceTable(input_usd_per_mtok=3.0, output_usd_per_mtok=15.0)
 PARAMS = SamplingParams(max_tokens=4096)
 KICKOFF = "Session start."
 CONTINUE = "Continue. To end this session, call end_session."
+
+# What the fake harness answers the session-start balance call with.
+BALANCE_JSON = '{"balances": {"main": {"owner_eth": "0.03", "operator_eth": "0.01"}}}'
+
+# The call ids of the session-start injections (SPEC P1.12): reads the
+# agent did not choose, excluded wherever a test is about what it did.
+INJECTED_CALL_IDS = frozenset({BRIEF_CALL_ID, BALANCE_CALL_ID, PLAN_CALL_ID})
 
 
 def response(*tool_calls, text=None, stop=None, tokens=(1000, 100)):
@@ -57,6 +73,16 @@ class ScriptedAdapter:
 
 
 class FakeGame:
+    """A harness surface with one read tool and the balance tool.
+
+    The balance tool is here because the scaffold calls it once per session
+    before the first model call (SPEC P1.12, D1). ``execute`` serves that
+    call itself and routes everything else to ``act``, which is what
+    subclasses override — so a game that raises, stalls, or reverts does so
+    for the AGENT's calls without turning the session-start injection into
+    a second thing under test.
+    """
+
     def __init__(self):
         self.calls = []
         self.tool_defs = [
@@ -64,16 +90,29 @@ class FakeGame:
                 name="get_state",
                 description="d",
                 input_schema={"type": "object", "properties": {}},
-            )
+            ),
+            ToolDef(
+                name=BALANCE_TOOL,
+                description="d",
+                input_schema={
+                    "type": "object",
+                    "properties": {"account": {"type": "string", "default": ""}},
+                },
+            ),
         ]
 
     def execute(self, name, args):
+        if name == BALANCE_TOOL:
+            return GameToolResult(content=BALANCE_JSON)
+        return self.act(name, args)
+
+    def act(self, name, args):
         self.calls.append((name, args))
         return GameToolResult(content='{"world": "state"}', tx_hash="0xabc")
 
 
 class SlowGame(FakeGame):
-    def execute(self, name, args):
+    def act(self, name, args):
         import time
 
         time.sleep(0.5)
@@ -114,6 +153,20 @@ def make_loop(run_dir, adapter, *, game=None, session=1, sleeps=None, **cap_over
 def events_of(run_dir, kind=None):
     events = list(read_events(run_dir / "telemetry.jsonl"))
     return [e for e in events if kind is None or e["event"] == kind]
+
+
+def model_calls(run_dir):
+    """tool_call rows for intents the AGENT returned (SPEC P9)."""
+    return [e for e in events_of(run_dir, "tool_call") if e["initiator"] == "model"]
+
+
+def agent_results(request):
+    """Tool results in one request that are answers to the agent's own calls."""
+    return [
+        m
+        for m in request["messages"]
+        if isinstance(m, ToolResultMessage) and m.tool_call_id not in INJECTED_CALL_IDS
+    ]
 
 
 # --- happy path / agent-ended sessions ---------------------------------------
@@ -176,7 +229,7 @@ def test_game_tool_routing_and_tx_hash(run_dir):
     result = loop.run()
     assert result.reason == "agent"
     assert game.calls == [("get_state", {})]
-    game_event = events_of(run_dir, "tool_call")[0]
+    game_event = model_calls(run_dir)[0]
     assert game_event["tool"] == "get_state"
     assert game_event["source"] == "harness"
     assert game_event["tx_hash"] == "0xabc"
@@ -204,7 +257,7 @@ class RaisingGame(FakeGame):
         super().__init__()
         self._message = message
 
-    def execute(self, name, args):
+    def act(self, name, args):
         self.calls.append((name, args))
         raise ToolError(self._message)
 
@@ -228,12 +281,12 @@ def test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field(run_di
 
     # (a) verbatim to the model: the whole message, nothing prepended,
     # appended, reworded, or summarized.
-    results = [m for m in adapter.requests[1]["messages"] if isinstance(m, ToolResultMessage)]
+    results = agent_results(adapter.requests[1])
     assert results[0].is_error
     assert results[0].content == message
 
     # (b) the terminal state is a field, so the split needs no string-matching.
-    event = events_of(run_dir, "tool_call")[0]
+    event = model_calls(run_dir)[0]
     assert event["tx_terminal_state"] == state
     assert event["ok"] is False
     assert event["error"] == message
@@ -249,7 +302,9 @@ def test_a_raised_outcome_is_executed_once_and_never_retried(run_dir):
     loop, _, _ = make_loop(run_dir, adapter, game=game)
     loop.run()
     assert game.calls == [("get_state", {})]
-    assert len(events_of(run_dir, "tool_call")) == 2  # the call + end_session
+    # The call + end_session; the session-start balance read is the
+    # scaffold's, not the agent's (P1.12).
+    assert len(model_calls(run_dir)) == 2
 
 
 def test_scaffold_failures_carry_no_terminal_state(run_dir):
@@ -265,7 +320,7 @@ def test_scaffold_failures_carry_no_terminal_state(run_dir):
 
 def test_confirmed_success_is_recorded_from_the_harness_result(run_dir):
     class ConfirmingGame(FakeGame):
-        def execute(self, name, args):
+        def act(self, name, args):
             self.calls.append((name, args))
             return GameToolResult(
                 content='{"tx_hash": "0xc0ffee", "status": "success"}',
@@ -279,7 +334,7 @@ def test_confirmed_success_is_recorded_from_the_harness_result(run_dir):
     )
     loop, _, _ = make_loop(run_dir, adapter, game=ConfirmingGame())
     loop.run()
-    event = events_of(run_dir, "tool_call")[0]
+    event = model_calls(run_dir)[0]
     assert event["ok"] is True
     assert event["tx_terminal_state"] == "confirmed_success"
 
@@ -291,7 +346,7 @@ def test_reads_carry_no_terminal_state(run_dir):
     )
     loop, _, _ = make_loop(run_dir, adapter, game=FakeGame())
     loop.run()
-    assert "tx_terminal_state" not in events_of(run_dir, "tool_call")[0]
+    assert "tx_terminal_state" not in model_calls(run_dir)[0]
 
 
 # --- I12: strict serialization + end_session batch semantics ------------------
@@ -438,7 +493,7 @@ def test_tool_timeout_is_an_error_result(run_dir):
     loop, _, _ = make_loop(run_dir, adapter, game=SlowGame(), tool_timeout_s=0.05)
     result = loop.run()
     assert result.reason == "agent"
-    results = [m for m in adapter.requests[1]["messages"] if isinstance(m, ToolResultMessage)]
+    results = agent_results(adapter.requests[1])
     assert results[0].is_error
     assert "timed out after 0.05 seconds" in results[0].content
 
@@ -887,8 +942,9 @@ def test_skipped_intents_also_get_an_identity(run_dir):
     calls = [end_call(), call("get_state", id_="after")]
     loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*calls)), game=FakeGame())
     loop.run()
-    rows = events_of(run_dir, "tool_call")
-    assert [r["call_seq"] for r in rows] == [1, 2]
+    rows = model_calls(run_dir)
+    # The scaffold's own session-start read took call_seq 1.
+    assert [r["call_seq"] for r in rows] == [2, 3]
     assert rows[1]["skipped"] is True
 
 
@@ -896,9 +952,12 @@ def test_provider_call_ids_are_recorded_verbatim(run_dir):
     calls = [call("get_state", id_="call_AAA111"), end_call(id_="call_BBB222")]
     loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*calls)), game=FakeGame())
     loop.run()
-    rows = events_of(run_dir, "tool_call")
+    rows = model_calls(run_dir)
     assert [r["provider_call_id"] for r in rows] == ["call_AAA111", "call_BBB222"]
     assert not any(r.get("provider_call_id_duplicate") for r in rows)
+    # A scaffold-minted id is not a provider fact, so it is not recorded as one.
+    injected = [e for e in events_of(run_dir, "tool_call") if e["initiator"] == "scaffold"]
+    assert injected and all("provider_call_id" not in e for e in injected)
 
 
 def test_a_reused_provider_call_id_is_flagged_and_both_calls_still_execute(run_dir):
@@ -930,7 +989,7 @@ def test_a_reverted_transaction_records_its_hash_on_the_field(run_dir):
     """It used to live only in the error text — the one field P9 says not to parse."""
 
     class RevertingGame(FakeGame):
-        def execute(self, name, args):
+        def act(self, name, args):
             raise ToolError(
                 "transaction 0xbadbeef landed on-chain in block 77 and REVERTED: "
                 "gas was spent (91234 gas) and no state change was applied."
@@ -955,7 +1014,7 @@ def test_a_scaffold_failure_carries_no_transaction_hash(run_dir):
 
 def test_in_band_receipts_and_error_shaped_results_reach_telemetry(run_dir):
     class MultiTxGame(FakeGame):
-        def execute(self, name, args):
+        def act(self, name, args):
             return GameToolResult(
                 content='{"error": "step failed", "txs": [{"tx_hash": "0xaa"}]}',
                 txs=({"tx_hash": "0xaa", "status": "success"},),

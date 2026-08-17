@@ -10,6 +10,11 @@ session_start is emitted, because session_start carries ``tools_hash``,
 which needs the loaded game tools. The hard constraint — the session
 counter is persisted before the first model call (P1.7), so crashes never
 reuse a session number — is preserved.
+
+The profile's prompt assets are read before that spawn (P1, P13): they
+are a pure filesystem read, and a profile whose pinned asset is missing
+from the run directory is a mis-provisioned arm, which must fail loudly
+and leave no half-started session behind.
 """
 
 from __future__ import annotations
@@ -49,7 +54,13 @@ from kami_agent.state import (
 )
 from kami_agent.supervisor import LOCK_FILENAME, acquire_lock, release_lock
 from kami_agent.telemetry import TelemetryWriter, read_events
-from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS, ScaffoldTools
+from kami_agent.tools.scaffold import (
+    DEFAULT_PROFILE,
+    PROFILE_ORIENTATION,
+    PROFILE_PLANNING,
+    ScaffoldTools,
+    profile_at_least,
+)
 
 # run_session outcomes (operator-facing, never agent-visible)
 LOCK_HELD = "lock_held"
@@ -88,6 +99,11 @@ class RunConfig:
     # and the harness applied its own default, which is recorded as
     # absence rather than guessed at.
     presentation_mode: str | None = None
+    # Which rung of the knowledge-delivery ladder this run's scaffold is
+    # (SPEC D3, P10, P13): it selects the tool surface, the prompt
+    # appendices, and the plan-file injection, and it is recorded on every
+    # session_start. `control` is the 0.4.0 scaffold plus gas visibility.
+    scaffold_profile: str = DEFAULT_PROFILE
 
 
 def run_session(
@@ -234,9 +250,15 @@ def _run_one_session(
     run_dir: Path,
     session: int,
 ) -> str:
+    # Read before the harness child is spawned and before any telemetry:
+    # a profile whose pinned asset is missing dies here, with a named
+    # cause, leaving no unmatched session_start for recovery to close.
+    prompts = _load_prompts(run_dir, config.scaffold_profile)
+
     scaffold = ScaffoldTools(
         run_dir,
         session_number=session,
+        profile=config.scaffold_profile,
         workspace_quota_bytes=config.workspace_quota_bytes,
         wake_min_minutes=config.wake_min_minutes,
         wake_max_minutes=config.wake_max_minutes,
@@ -253,6 +275,10 @@ def _run_one_session(
             "budget_remaining_usd": config.budget_usd - state.cumulative_usd,
             "wallclock_elapsed_s": elapsed,
             "tools_hash": hash_value,
+            # The rung this arm is. Recorded on every session_start because
+            # it is what the family varies, and because tools_hash above
+            # differs BY DESIGN between profiles that add a tool.
+            "scaffold_profile": config.scaffold_profile,
         }
         if config.presentation_mode is not None:
             fields["presentation_mode"] = config.presentation_mode
@@ -299,7 +325,7 @@ def _run_one_session(
     except HarnessError:
         # D1: handshake failure aborts the session — zero model calls,
         # next wake = wake_default.
-        start_record = emit_session_start(tools_hash(list(SCAFFOLD_TOOL_DEFS)))
+        start_record = emit_session_start(tools_hash(list(scaffold.tool_defs)))
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
         writer.emit(
@@ -324,16 +350,16 @@ def _run_one_session(
     try:
         game_defs = list(game.tool_defs) if game is not None else []
         start_record = emit_session_start(
-            tools_hash(game_defs + list(SCAFFOLD_TOOL_DEFS)),
+            tools_hash(game_defs + list(scaffold.tool_defs)),
             getattr(game, "harness_tools_hash", None),
         )
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
 
-        # 5. Build context: frozen system prompt + the file index (P1.10) —
-        # full workspace/ tree, reference/ collapsed to one entry.
-        prompts = _load_prompts(run_dir)
-        system = prompts["system"] + "\n\n" + scaffold.workspace_list()
+        # 5. Build context: frozen system prompt + this profile's pinned
+        # appendices + the file index (P1.10) — full workspace/ tree,
+        # reference/ collapsed to one entry.
+        system = "\n\n".join([*prompts["system_parts"], scaffold.workspace_list()])
 
         # 6–7. Kickoff + agent loop.
         loop = AgentLoop(
@@ -386,12 +412,38 @@ def _run_one_session(
                 close()
 
 
-def _load_prompts(run_dir: Path) -> dict[str, str]:
+def _load_prompts(run_dir: Path, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
+    """The frozen strings this profile needs (SPEC P13).
+
+    ``system_parts`` is the base prompt followed by the profile's pinned
+    appendices, in ladder order; the caller joins them and appends the
+    file index. Each asset is a separate frozen file, so what a profile
+    was shown is a byte-exact artifact rather than a string built at
+    runtime.
+
+    A missing asset raises: the profile named a rung its run directory
+    cannot deliver, which is a provisioning error, not a condition to
+    absorb.
+    """
     prompts_dir = run_dir / "prompts"
+
+    def read(name: str) -> str:
+        path = prompts_dir / name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"scaffold_profile {profile!r} needs prompts/{name}, which is not in {run_dir}"
+            )
+        return path.read_text(encoding="utf-8").rstrip("\n")
+
+    system_parts = [read("system.txt")]
+    if profile_at_least(profile, PROFILE_ORIENTATION):
+        system_parts.append(read("orientation.txt"))
+    if profile_at_least(profile, PROFILE_PLANNING):
+        system_parts.append(read("planning.txt"))
     return {
-        "system": (prompts_dir / "system.txt").read_text(encoding="utf-8").rstrip("\n"),
-        "kickoff": (prompts_dir / "kickoff.txt").read_text(encoding="utf-8").rstrip("\n"),
-        "continue": (prompts_dir / "continue.txt").read_text(encoding="utf-8").rstrip("\n"),
+        "system_parts": system_parts,
+        "kickoff": read("kickoff.txt"),
+        "continue": read("continue.txt"),
     }
 
 

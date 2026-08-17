@@ -8,12 +8,22 @@ strings (kickoff, continuation) are injected by the runner from
 Forced endings (context guard, tool cap, errors) are silent (I4): no
 warning message, no final model call.
 
-Before the first model call the loop issues the session-start status
-brief (SPEC P1.12): one compact roster query to the kami-lens daemon,
-made by the scaffold over the daemon's own socket, injected as a tool
-result. It **is** a special path (X22): the query is not on the tool
-surface, the agent cannot make it, and it runs on its own execution
-path rather than through ``_execute_intent``.
+Before the first model call the loop issues the **session-start
+injections** (SPEC P1.12), in this order and each as a completed tool
+call plus its result:
+
+1. the status brief — one compact roster query to the kami-lens daemon,
+   made by the scaffold over the daemon's own socket (D7);
+2. the wallets' gas balances — one call to the harness's own balance
+   tool, for every profile (D1);
+3. the plan file — one ``workspace_read`` of ``workspace/plan.md``, on
+   the ``planning`` profile only.
+
+All three run on their own execution path rather than through
+``_execute_intent``, consume no cap and feed no counter (X20), and
+degrade visibly rather than vanishing (X21). Only the first is a call
+the agent could not make itself (X22): the other two name tools that
+are on the surface, so the scaffold is merely pre-calling them.
 """
 
 from __future__ import annotations
@@ -54,7 +64,13 @@ from kami_agent.repetition import (
 from kami_agent.telemetry import TelemetryWriter
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.receipts import classify_error, error_shaped_payload, tx_hash_from_error
-from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS, SCAFFOLD_TOOL_NAMES, ScaffoldTools
+from kami_agent.tools.scaffold import (
+    ALL_SCAFFOLD_TOOL_NAMES,
+    PROFILE_PLANNING,
+    SEARCH_TOOL_DEF,
+    ScaffoldTools,
+    profile_at_least,
+)
 from kami_agent.tools.truncation import cap_tool_result
 
 # session_end reasons produced by the loop (SPEC P5; "crash" is written by
@@ -113,6 +129,34 @@ BRIEF_TOOL = "lens_roster"
 BRIEF_QUERY = "roster"
 BRIEF_ARGS: dict[str, Any] = {}
 BRIEF_CALL_ID = "brief_1"
+
+# Session-start gas balances (SPEC P1.12, D1). Gas is an in-world resource
+# and the wallets that hold it belong to the run's account, so the balances
+# are a world fact the agent is shown at session start on every profile.
+#
+# This is the scaffold's ONE by-name dependency on the harness surface, and
+# it is deliberate: only the harness knows the run's wallet addresses (the
+# operator keypair is generated inside the harness process and its key
+# never leaves it), so no scaffold-side read can answer this. The coupling
+# is asserted at bring-up by `init`'s harness check, and at runtime it
+# degrades visibly — a surface without the tool yields the same
+# unknown-tool result the agent would get for any name that is not there —
+# and never refuses a session (N10, X21).
+#
+# No arguments: the tool's empty account label reports every account the
+# harness has, so the scaffold does not have to know which account the run
+# is — the same reason the brief sends no argument (D7).
+BALANCE_TOOL = "get_gas_balance"
+BALANCE_ARGS: dict[str, Any] = {}
+BALANCE_CALL_ID = "balance_1"
+
+# Session-start plan file (SPEC P1.12), profile `planning` only. An
+# ordinary workspace file the agent writes with workspace_write; the
+# scaffold only re-reads it at session start, through the same tool the
+# agent uses, and a missing file yields the normal not-found error.
+PLAN_TOOL = "workspace_read"
+PLAN_PATH = "plan.md"
+PLAN_CALL_ID = "plan_1"
 
 _BACKOFF_BASE_S = 1.0
 _BACKOFF_MAX_S = 60.0
@@ -241,7 +285,11 @@ class AgentLoop:
         self._sleep = sleep
 
         game_defs = list(game.tool_defs) if game is not None else []
-        collisions = {t.name for t in game_defs} & SCAFFOLD_TOOL_NAMES
+        # Checked against every name any profile can add, not just this
+        # session's surface: one name meaning two things is a mis-pin, and a
+        # mis-pin must be refused identically on every arm of a family whose
+        # arms differ only by profile.
+        collisions = {t.name for t in game_defs} & ALL_SCAFFOLD_TOOL_NAMES
         if collisions:
             raise ValueError(f"harness tools shadow scaffold tools: {sorted(collisions)}")
         # The brief's name is not on the surface, so a harness tool of the
@@ -251,9 +299,11 @@ class AgentLoop:
         # exactly as a scaffold collision does.
         if BRIEF_TOOL in {t.name for t in game_defs}:
             raise ValueError(f"harness tool shadows the session-start brief name: {BRIEF_TOOL!r}")
-        # Game tools first, scaffold tools second (SPEC P10 order); the order
-        # is deterministic so tools_hash is stable.
-        self._tool_defs: list[ToolDef] = game_defs + list(SCAFFOLD_TOOL_DEFS)
+        # Game tools first, then this profile's scaffold tools — base defs
+        # before profile-added ones (SPEC P10 order); the order is
+        # deterministic so tools_hash is stable, and it differs between
+        # profiles only by the appended additions.
+        self._tool_defs: list[ToolDef] = game_defs + list(scaffold.tool_defs)
         self._validators = {
             t.name: jsonschema.Draft202012Validator(t.input_schema) for t in self._tool_defs
         }
@@ -288,7 +338,11 @@ class AgentLoop:
 
     def run(self) -> SessionResult:
         messages: list[Message] = [UserMessage(text=self._kickoff_text)]
+        # Session-start injections, in this fixed order (P1.12): what the
+        # account owns, what it has to spend on gas, and what it planned.
         self._inject_brief(messages)
+        self._inject_balances(messages)
+        self._inject_plan(messages)
         continuation = False
         while True:
             response = self._call_model(messages, continuation)
@@ -324,7 +378,140 @@ class AgentLoop:
             if reason is not None:
                 return self._result(reason, messages)
 
-    # --- session-start status brief (SPEC P1.12) -----------------------------
+    # --- session-start injections (SPEC P1.12) -------------------------------
+
+    def _inject_pair(
+        self,
+        messages: list[Message],
+        intent: ToolCall,
+        *,
+        source: str,
+        content: str,
+        ok: bool,
+        duration_ms: float,
+        path_hint: str | None = None,
+        **emit_fields: Any,
+    ) -> None:
+        """Put one completed call/result pair in context and telemeter it.
+
+        The shape a model reads as "this read already happened": an
+        assistant turn holding the call, then its result. Content passes
+        through under the same byte cap every tool result gets (P2) and is
+        otherwise untouched — no summarizing, no annotation, and the same
+        for a failure as for an answer.
+        """
+        capped = cap_tool_result(content, self._caps.tool_result_max_bytes, path=path_hint)
+        messages.append(AssistantMessage(text=None, tool_calls=(intent,)))
+        messages.append(
+            ToolResultMessage(
+                tool_call_id=intent.id,
+                content=capped.content,
+                is_error=not ok,
+            )
+        )
+        self._emit_tool_call(
+            intent,
+            source=source,
+            duration_ms=duration_ms,
+            ok=ok,
+            error=None if ok else content,
+            truncated=capped.truncated,
+            original_bytes=capped.original_bytes if capped.truncated else None,
+            initiator=INITIATOR_SCAFFOLD,
+            **emit_fields,
+        )
+
+    def _inject_balances(self, messages: list[Message]) -> None:
+        """Inject the wallets' gas balances, on every profile.
+
+        Gas is spent in ETH from the account's own wallets, and how much
+        of it is left is a fact about the world the agent acts in — not
+        about the apparatus measuring it (X10). It arrives the same way
+        the roster does: one read the scaffold performs before the first
+        model call, injected verbatim, so a session opens knowing it.
+
+        The call is the harness's own balance tool, dispatched straight to
+        the harness rather than through ``_execute_intent``, so it
+        consumes no ``session_tool_cap``, never advances the
+        consecutive-error counter, and never feeds the repetition breaker
+        (X20). Unlike the brief this names a tool that IS on the surface:
+        the agent can call it again itself whenever it likes, which is
+        its business (X22 does not apply).
+
+        Degrade visibly, never block (X21): exactly one attempt, no retry.
+        A harness failure is injected as the harness's own words, verbatim
+        (D1, I21). A surface that does not carry the tool at all yields
+        the same unknown-tool result any missing name yields — the pin is
+        wrong, and the session record says so every session rather than
+        omitting the read silently.
+
+        Skipped entirely, with no telemetry, when no harness is
+        configured: with no surface there is nothing to ask.
+        """
+        if self._game is None:
+            return
+        intent = ToolCall(id=BALANCE_CALL_ID, name=BALANCE_TOOL, args=dict(BALANCE_ARGS))
+        source = self._source_of(BALANCE_TOOL)
+        start = time.perf_counter()
+        if source != SOURCE_HARNESS:
+            # Not on the loaded surface: the scaffold layer is what rejects
+            # the name, so the row is attributed to it exactly as any
+            # unknown tool is (X15), with the wording the agent would see.
+            content = f"unknown tool: {BALANCE_TOOL}"
+            ok = False
+        else:
+            try:
+                content = self._game.execute(BALANCE_TOOL, dict(BALANCE_ARGS)).content
+                ok = True
+            except ToolError as exc:
+                content = str(exc)
+                ok = False
+            except Exception as exc:  # noqa: BLE001 - recorded, never raised onward
+                content = f"tool execution failed: {exc}"
+                ok = False
+        self._inject_pair(
+            messages,
+            intent,
+            source=source,
+            content=content,
+            ok=ok,
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+
+    def _inject_plan(self, messages: list[Message]) -> None:
+        """Inject ``workspace/plan.md``, on the ``planning`` profile only.
+
+        The plan file is an ordinary workspace file: the agent writes it
+        with ``workspace_write``, owns its content entirely, and the
+        scaffold neither creates nor edits it (P11). All this does is read
+        it back at session start through the same tool the agent uses, so
+        what the agent wrote for itself is in front of it again.
+
+        A missing file yields the normal not-found error result — visible,
+        not silent — and the contents pass through the normal truncation,
+        which means an agent that grows its plan past
+        ``tool_result_max_bytes`` is spending its own context (D1).
+        """
+        if not profile_at_least(self._scaffold.profile, PROFILE_PLANNING):
+            return
+        intent = ToolCall(id=PLAN_CALL_ID, name=PLAN_TOOL, args={"path": PLAN_PATH})
+        start = time.perf_counter()
+        try:
+            content = self._scaffold.execute(PLAN_TOOL, {"path": PLAN_PATH})
+            ok = True
+        except ToolError as exc:
+            content = str(exc)
+            ok = False
+        self._inject_pair(
+            messages,
+            intent,
+            source=SOURCE_SCAFFOLD,
+            content=content,
+            ok=ok,
+            duration_ms=(time.perf_counter() - start) * 1000,
+            # Slice hint only where the result is re-readable (I16).
+            path_hint=PLAN_PATH if ok else None,
+        )
 
     def _inject_brief(self, messages: list[Message]) -> None:
         """Query the daemon's compact roster once and inject it verbatim.
@@ -370,11 +557,9 @@ class AgentLoop:
             # The record IS the failure text: no rewording, no advice.
             raw = exc.as_record()
             ok = False
-            error: str | None = raw
         else:
             raw = json.dumps(envelope, ensure_ascii=False)
             ok = True
-            error = None
             meta = envelope.get("meta")
             if isinstance(meta, dict):
                 # Operator-side only (I1): recorded so analysis can see the
@@ -385,25 +570,13 @@ class AgentLoop:
                     stale = meta["stale"]
                 if isinstance(meta.get("blockNumber"), int):
                     block = meta["blockNumber"]
-        duration_ms = (time.perf_counter() - start) * 1000
-        capped = cap_tool_result(raw, self._caps.tool_result_max_bytes)
-        messages.append(AssistantMessage(text=None, tool_calls=(intent,)))
-        messages.append(
-            ToolResultMessage(
-                tool_call_id=intent.id,
-                content=capped.content,
-                is_error=not ok,
-            )
-        )
-        self._emit_tool_call(
+        self._inject_pair(
+            messages,
             intent,
             source=SOURCE_LENS,
-            duration_ms=duration_ms,
+            content=raw,
             ok=ok,
-            error=error,
-            truncated=capped.truncated,
-            original_bytes=capped.original_bytes if capped.truncated else None,
-            initiator=INITIATOR_SCAFFOLD,
+            duration_ms=(time.perf_counter() - start) * 1000,
             lens_stale=stale,
             lens_block=block,
         )
@@ -629,7 +802,15 @@ class AgentLoop:
                     provider_call_id_duplicate=duplicate_id,
                 )
                 continue
+            # Cleared first so a search that never reached the handler (bad
+            # arguments, a timeout) cannot inherit the previous search's
+            # query and hit count; read back only for the search tool, so
+            # neither can any other call later in the batch.
+            is_search = intent.name == SEARCH_TOOL_DEF.name
+            if is_search:
+                self._scaffold.last_search = None
             outcome = self._execute_intent(intent)
+            search = self._scaffold.last_search if is_search else None
             messages.append(
                 ToolResultMessage(
                     tool_call_id=intent.id,
@@ -653,6 +834,8 @@ class AgentLoop:
                 error_shaped=outcome.get("error_shaped", False),
                 provider_call_id=intent.id,
                 provider_call_id_duplicate=duplicate_id,
+                query=search[0] if search is not None else None,
+                hits=search[1] if search is not None else None,
             )
             if outcome["ok"]:
                 self._consecutive_errors = 0
@@ -760,7 +943,7 @@ class AgentLoop:
         """Run one intent in a watchdog thread (tool_timeout_s, P2)."""
 
         def dispatch() -> tuple[str, str | None, str | None, tuple[dict[str, Any], ...]]:
-            if intent.name in SCAFFOLD_TOOL_NAMES:
+            if intent.name in self._scaffold.tool_names:
                 return self._scaffold.execute(intent.name, intent.args), None, None, ()
             assert self._game is not None  # _source_of guarantees this
             result = self._game.execute(intent.name, intent.args)
@@ -785,7 +968,10 @@ class AgentLoop:
         return value
 
     def _source_of(self, name: str) -> str:
-        if name in SCAFFOLD_TOOL_NAMES:
+        # This session's surface, not every profile's: a tool this profile
+        # was not shown is not a scaffold tool it can reach, it is a name
+        # that is not there.
+        if name in self._scaffold.tool_names:
             return SOURCE_SCAFFOLD
         if self._game is not None and name in {t.name for t in self._game.tool_defs}:
             return SOURCE_HARNESS
@@ -815,6 +1001,8 @@ class AgentLoop:
         provider_call_id_duplicate: bool = False,
         lens_stale: bool | None = None,
         lens_block: int | None = None,
+        query: str | None = None,
+        hits: int | None = None,
     ) -> None:
         self._call_seq += 1
         fields: dict[str, Any] = {
@@ -856,6 +1044,14 @@ class AgentLoop:
             fields["lens_stale"] = lens_stale
         if lens_block is not None:
             fields["lens_block"] = lens_block
+        # Reference searches: the query text and how many passages came
+        # back. Promoted out of the transcript on purpose — what an agent
+        # looked for, and whether the tree answered, is the process
+        # observable the knowledge-delivery family reads (P9).
+        if query is not None:
+            fields["query"] = query
+        if hits is not None:
+            fields["hits"] = hits
         self._tool_events += 1
         self._telemetry.emit("tool_call", session=self._session, **fields)
 

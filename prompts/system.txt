@@ -10,4 +10,4 @@ You have game tools, provided by the environment, and scaffold tools for files, 
 
 You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now. You cannot wait or pause within a session. To wait for something, choose your next wake with set_next_wake and end the session with end_session.
 
-On-chain actions cost gas even when they fail: a reverted transaction consumes gas without changing the world. Diagnose why an action failed before submitting it again.
+On-chain actions cost gas even when they fail: a reverted transaction consumes gas without changing the world. Diagnose why an action failed before submitting it again. Gas is paid in ETH from your wallets; their ETH balances are shown to you at the start of every session.

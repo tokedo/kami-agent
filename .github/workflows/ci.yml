@@ -30,8 +30,17 @@ jobs:
   # resolution and missing-env assumptions. Success is judged by explicit markers and
   # real exit codes — output goes to a file, grep runs on the file (never
   # through a pipe), and every command's status fails the step directly.
+  #
+  # Run once per END of the scaffold ladder (SPEC D3): `control` performs the
+  # roster and gas-balance injections, `planning` adds the plan-file read and
+  # the longest system prompt. Between them every session-start injection and
+  # every prompt asset is exercised under cron conditions.
   cron-smoke:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [control, planning]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -41,19 +50,20 @@ jobs:
           CRON_HOME="$RUNNER_TEMP/cron-home"
           RUN_DIR="$RUNNER_TEMP/cron-run/run"
           OUT="$RUNNER_TEMP/cron-smoke.out"
+          PROFILE="${{ matrix.profile }}"
           mkdir -p "$CRON_HOME"
           set +e
           env -i PATH=/usr/bin:/bin HOME="$CRON_HOME" sh -c \
-            "'$PWD/.venv/bin/python' '$PWD/tests/cron_smoke/stub_session.py' '$RUN_DIR'" \
+            "'$PWD/.venv/bin/python' '$PWD/tests/cron_smoke/stub_session.py' '$RUN_DIR' '$PROFILE'" \
             > "$OUT" 2>&1
           status=$?
           set -e
-          echo "--- session output (exit $status) ---"
+          echo "--- session output (profile $PROFILE, exit $status) ---"
           cat "$OUT"
           test "$status" -eq 0
           grep -q "^initialized " "$OUT"
           grep -qx "session_ran" "$OUT"
-          "$PWD/.venv/bin/python" "$PWD/tests/cron_smoke/check_telemetry.py" "$RUN_DIR"
+          "$PWD/.venv/bin/python" "$PWD/tests/cron_smoke/check_telemetry.py" "$RUN_DIR" "$PROFILE"
 
   # Tri-provider live tier (README, Verification tier 3): real
   # provider APIs against the recorded harness tool surface with simulated

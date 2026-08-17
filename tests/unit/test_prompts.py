@@ -1,10 +1,20 @@
-"""The three frozen prompt strings (SPEC P13): exact content + leak discipline."""
+"""The frozen prompt assets (SPEC P13): exact content + leak discipline.
 
+Three strings ship for every run and two more are the profile appendices
+(P10, P13): each is a separate pinned file, frozen byte-exact here, so
+what a rung showed the agent is an artifact rather than a string built at
+runtime. Any reword is deliberate and re-freezes its literal in the same
+commit.
+"""
+
+import re
 from pathlib import Path
 
 import pytest
 
 PROMPTS = Path(__file__).parents[2] / "prompts"
+
+ASSET_NAMES = ("system.txt", "kickoff.txt", "continue.txt", "orientation.txt", "planning.txt")
 
 # The frozen wording, reviewed and approved. Any change is deliberate:
 # update this test in the same commit that re-freezes the string.
@@ -21,12 +31,26 @@ You have game tools, provided by the environment, and scaffold tools for files, 
 
 You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now. You cannot wait or pause within a session. To wait for something, choose your next wake with set_next_wake and end the session with end_session.
 
-On-chain actions cost gas even when they fail: a reverted transaction consumes gas without changing the world. Diagnose why an action failed before submitting it again.
+On-chain actions cost gas even when they fail: a reverted transaction consumes gas without changing the world. Diagnose why an action failed before submitting it again. Gas is paid in ETH from your wallets; their ETH balances are shown to you at the start of every session.
 """
 
 KICKOFF = "Session start.\n"
 
 CONTINUE = "Continue. To end this session, call end_session.\n"
+
+# Appendix for profiles at or above `orientation` (P13). Every sentence is a
+# rule of the world; none is a recommendation. Verified against the pinned
+# design document at build time, and pinned by the family's design — a
+# reword here is a change to what those arms were measured on.
+ORIENTATION = """\
+You own kamis (creatures). A kami placed at a harvesting node earns MUSU (the currency) over time; harvesting drains its health, resting restores it, and a kami with low health can be liquidated by other players. MUSU buys items; food restores health. Harvesting earns experience; experience lets a kami level up, which grants a skill point spent on skills that change its stats. Quests reward MUSU, items and experience for completing objectives. Every on-chain action costs gas (ETH).
+"""
+
+# Appendix for the `planning` profile (P13). Mechanism about a file, not
+# advice about what to plan.
+PLANNING = """\
+The file workspace/plan.md is where your goals and plan live. Its contents are shown to you at the start of every session. Keeping it current is up to you.
+"""
 
 # I1: no budget, cost, tokens, compute limits, run duration, session caps,
 # forced truncation, or study existence. I3: no strategy hints, no vendor
@@ -59,15 +83,41 @@ def test_frozen_strings_are_exactly_as_reviewed():
     assert (PROMPTS / "continue.txt").read_text(encoding="utf-8") == CONTINUE
 
 
-@pytest.mark.parametrize("name", ["system.txt", "kickoff.txt", "continue.txt"])
+def test_profile_appendices_are_exactly_as_reviewed():
+    """Each rung's appendix is frozen on the same terms as the base prompt."""
+    assert (PROMPTS / "orientation.txt").read_text(encoding="utf-8") == ORIENTATION
+    assert (PROMPTS / "planning.txt").read_text(encoding="utf-8") == PLANNING
+
+
+def test_the_gas_sentence_states_the_resource_and_where_it_is_shown():
+    """Gas visibility is one sentence of the FIXED prompt, on every profile.
+
+    It names the resource (ETH), whose it is (the agent's wallets), and
+    that the balances arrive at session start — the fact that makes the
+    session-start injection legible instead of surprising. No numbers: the
+    balances themselves are world state, injected as a tool result, never
+    prompt text.
+    """
+    sentence = (
+        "Gas is paid in ETH from your wallets; their ETH balances are shown "
+        "to you at the start of every session."
+    )
+    assert sentence in SYSTEM
+    assert not any(ch.isdigit() for ch in sentence)
+
+
+@pytest.mark.parametrize("name", ASSET_NAMES)
 def test_no_apparatus_or_policy_leaks(name):
     # I1: no budget, cost, tokens, compute limits, run duration, session
     # caps, forced truncation, or study existence. I3: no strategy hints,
     # no vendor idioms, no XML-tag formatting.
     # Gas is a world mechanic, not apparatus (SPEC P7.4: in-world resources
-    # are outside budget_usd): the transaction-cost item's "cost gas" is
-    # the one allowed use of "cost"; any other occurrence still fails.
-    text = (PROMPTS / name).read_text(encoding="utf-8").lower().replace("cost gas", "")
+    # are outside budget_usd): "cost gas" / "costs gas" is the one allowed
+    # use of "cost"; any other occurrence still fails. Both forms are
+    # carved out because both are in pinned text — the base prompt uses
+    # one and the orientation appendix the other.
+    text = (PROMPTS / name).read_text(encoding="utf-8").lower()
+    text = re.sub(r"\bcosts? gas\b", "", text)
     for word in FORBIDDEN:
         assert word not in text, f"{name} contains {word!r}"
 
@@ -79,10 +129,17 @@ def test_packaged_prompts_match_repo_prompts():
     from importlib import resources
 
     packaged = resources.files("kami_agent") / "prompts"
-    for name in ("system.txt", "kickoff.txt", "continue.txt"):
+    for name in ASSET_NAMES:
         assert (packaged / name).read_text(encoding="utf-8") == (PROMPTS / name).read_text(
             encoding="utf-8"
         ), f"packaged {name} diverges from prompts/{name}"
+
+
+def test_init_materializes_every_asset():
+    """`init` writes all five, so a profile can never lack its appendix."""
+    from kami_agent.cli import PROMPT_NAMES
+
+    assert set(PROMPT_NAMES) == set(ASSET_NAMES)
 
 
 def test_wake_bounds_in_frozen_prompt_match_code_defaults():
@@ -150,3 +207,36 @@ def test_the_unavailable_record_leaks_no_apparatus_vocabulary():
     text = LensUnavailableError("socket error: broken pipe").as_record().lower()
     for word in FORBIDDEN:
         assert word not in text
+
+
+# --- the two strings 0.5.0 adds to that set ----------------------------------
+#
+# The gas-balance injection authors NO new string on its happy path (the
+# harness's payload) or its failure path (the harness's own words). The one
+# case it composes is a surface without the balance tool, and it composes it
+# by reusing the loop's existing unknown-tool wording rather than inventing
+# a record — so the agent sees exactly what any missing name yields.
+
+
+def test_a_missing_balance_tool_reuses_the_unknown_tool_wording():
+    from kami_agent.loop import BALANCE_TOOL
+
+    assert f"unknown tool: {BALANCE_TOOL}" == "unknown tool: get_gas_balance"
+    for word in FORBIDDEN:
+        assert word not in f"unknown tool: {BALANCE_TOOL}".lower()
+
+
+def test_the_empty_reference_index_answer_is_exactly_as_reviewed(tmp_path):
+    """search_reference over an empty tree says so, rather than returning
+    an empty list a reader could take for 'nothing matched'."""
+    import json
+
+    from kami_agent.tools.scaffold import NO_REFERENCE_FILES, ScaffoldTools
+
+    assert NO_REFERENCE_FILES == "no reference files"
+    for word in FORBIDDEN:
+        assert word not in NO_REFERENCE_FILES.lower()
+    # No reference/ tree in this run directory at all.
+    empty = ScaffoldTools(tmp_path, profile="search")
+    payload = json.loads(empty.execute("search_reference", {"query": "musu"}))
+    assert payload == {"hits": [], "message": NO_REFERENCE_FILES}

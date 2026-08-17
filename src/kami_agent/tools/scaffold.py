@@ -3,6 +3,13 @@
 All strings the model can see — tool names, descriptions, results, error
 messages — are mechanism-only: no budget, spend, horizon, or cap
 information (I1), no strategy or memory-structure hints (I3).
+
+The surface is **profile-selected** from 0.5.0 (SPEC P10, D3): the base
+tools below are present for every run, and a profile at or above
+``search`` adds ``search_reference``. Profile-added definitions are
+appended AFTER the base ones, so the base surface's serialization — and
+therefore ``session_start.tools_hash`` for a profile that adds nothing —
+is unchanged from 0.4.0 at the same harness pin.
 """
 
 from __future__ import annotations
@@ -17,10 +24,42 @@ from typing import Any
 from kami_agent.adapters.base import ToolDef
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.sandbox import resolve_path
+from kami_agent.tools.search import ReferenceIndex, clamp_k
 
 DEFAULT_WORKSPACE_QUOTA_BYTES = 10 * 1024 * 1024
 DEFAULT_WAKE_MIN_MINUTES = 5.0
 DEFAULT_WAKE_MAX_MINUTES = 24 * 60.0
+
+# --- scaffold profiles (SPEC D3) ----------------------------------------------
+#
+# The knowledge-delivery ladder, cumulative and in order: each profile is
+# everything to its left plus its own rung. One agent version serves every
+# arm of the family; the profile is a manifest key, not a branch.
+#
+# `pushed` adds nothing agent-side — its rung is result enrichment behind
+# the lens's and harness's own runtime flags — but it sits above `search`,
+# so it carries the search tool like every profile above that rung.
+PROFILE_CONTROL = "control"
+PROFILE_ORIENTATION = "orientation"
+PROFILE_SEARCH = "search"
+PROFILE_PUSHED = "pushed"
+PROFILE_PLANNING = "planning"
+
+PROFILES: tuple[str, ...] = (
+    PROFILE_CONTROL,
+    PROFILE_ORIENTATION,
+    PROFILE_SEARCH,
+    PROFILE_PUSHED,
+    PROFILE_PLANNING,
+)
+
+DEFAULT_PROFILE = PROFILE_CONTROL
+
+
+def profile_at_least(profile: str, rung: str) -> bool:
+    """Is ``profile`` at or above ``rung`` on the cumulative ladder?"""
+    return PROFILES.index(profile) >= PROFILES.index(rung)
+
 
 SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
     ToolDef(
@@ -107,6 +146,62 @@ SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
 
 SCAFFOLD_TOOL_NAMES = frozenset(tool.name for tool in SCAFFOLD_TOOL_DEFS)
 
+# Added by profiles at or above `search` (SPEC P10). Mechanism only: what
+# it searches, what it returns, and how to expand a hit — never a word
+# about when searching is worth doing (I3).
+SEARCH_TOOL_DEF = ToolDef(
+    name="search_reference",
+    description=(
+        "Keyword search over the read-only reference/ tree. Returns the "
+        "passages that best match a query, each with its file path, byte "
+        "offset and byte length, so workspace_read with that path, offset "
+        "and length re-reads the passage in place. Optional k sets how many "
+        "passages come back (default 5, at most 10)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "k": {"type": "integer"},
+        },
+        "required": ["query"],
+    },
+)
+
+# Every tool any profile can add. The harness/scaffold name-collision
+# check runs against the UNION (base + all profile-added), so a mis-pinned
+# harness is refused identically on every arm rather than only on the arms
+# whose profile happens to carry the name.
+PROFILE_TOOL_DEFS: dict[str, list[ToolDef]] = {PROFILE_SEARCH: [SEARCH_TOOL_DEF]}
+
+ALL_SCAFFOLD_TOOL_NAMES = SCAFFOLD_TOOL_NAMES | {
+    tool.name for defs in PROFILE_TOOL_DEFS.values() for tool in defs
+}
+
+# The empty-index answer: an explicit statement, not an empty list that
+# reads as "nothing matched".
+NO_REFERENCE_FILES = "no reference files"
+
+
+def scaffold_tool_defs(profile: str = DEFAULT_PROFILE) -> list[ToolDef]:
+    """The scaffold surface for one profile: base defs, then added defs.
+
+    Order is the P10 ordering rule and it is load-bearing: ``tools_hash``
+    hashes the list in order, so appending profile additions keeps the
+    base surface's bytes — and a no-addition profile's hash — identical
+    to 0.4.0's.
+    """
+    defs = list(SCAFFOLD_TOOL_DEFS)
+    for rung, added in PROFILE_TOOL_DEFS.items():
+        if profile_at_least(profile, rung):
+            defs.extend(added)
+    return defs
+
+
+def scaffold_tool_names(profile: str = DEFAULT_PROFILE) -> frozenset[str]:
+    """The names executable under one profile (the surface, and only it)."""
+    return frozenset(tool.name for tool in scaffold_tool_defs(profile))
+
 
 class ScaffoldTools:
     """Executes the scaffold tools against a run directory.
@@ -116,6 +211,10 @@ class ScaffoldTools:
     ``clamped_wake_min`` / ``session_ended`` / ``end_reason``) for the
     runner to apply. ``emit`` receives the SPEC P9 ``workspace_write`` /
     ``workspace_delete`` telemetry payloads.
+
+    ``profile`` selects the surface (P10): ``tool_defs`` / ``tool_names``
+    are this session's, and a name outside them is not executable, so a
+    profile that was not shown a tool cannot reach it by guessing.
     """
 
     def __init__(
@@ -123,6 +222,7 @@ class ScaffoldTools:
         run_dir: str | Path,
         *,
         session_number: int = 0,
+        profile: str = DEFAULT_PROFILE,
         workspace_quota_bytes: int = DEFAULT_WORKSPACE_QUOTA_BYTES,
         wake_min_minutes: float = DEFAULT_WAKE_MIN_MINUTES,
         wake_max_minutes: float = DEFAULT_WAKE_MAX_MINUTES,
@@ -133,6 +233,9 @@ class ScaffoldTools:
     ) -> None:
         self.run_dir = Path(run_dir)
         self.session_number = session_number
+        self.profile = profile
+        self.tool_defs = scaffold_tool_defs(profile)
+        self.tool_names = frozenset(tool.name for tool in self.tool_defs)
         self.workspace_quota_bytes = workspace_quota_bytes
         self.wake_min_minutes = wake_min_minutes
         self.wake_max_minutes = wake_max_minutes
@@ -151,9 +254,18 @@ class ScaffoldTools:
         self.clamped_wake_min: float | None = None
         self.session_ended = False
         self.end_reason: str | None = None
+        # Built lazily on the first search of a session and reused for the
+        # rest of it: the reference tree is read-only (P11), so one build
+        # per session is enough and none happens on a profile that never
+        # searches.
+        self._reference_index: ReferenceIndex | None = None
+        # The query and hit count of the last search_reference call, for
+        # the loop to record on that call's telemetry row (P9). Same
+        # accumulate-on-the-instance pattern as the wake and end flags.
+        self.last_search: tuple[str, int] | None = None
 
     def execute(self, name: str, args: dict[str, Any]) -> str:
-        if name not in SCAFFOLD_TOOL_NAMES:
+        if name not in self.tool_names:
             raise ToolError(f"unknown tool: {name}")
         handler = getattr(self, name)
         try:
@@ -236,6 +348,24 @@ class ScaffoldTools:
             {"path": rel, "workspace_total_bytes": self.workspace_bytes_used()},
         )
         return f"Deleted {rel}."
+
+    def search_reference(self, query: str, k: int | None = None) -> str:
+        """Top-k reference passages for a query (profiles ≥ search).
+
+        Deterministic by construction: the index is a pure function of the
+        tree's bytes and the ordering breaks ties on path then offset, so
+        the same tree and query give byte-identical output. Each hit's
+        offset and length are byte positions, which is exactly what
+        ``workspace_read`` slices on.
+        """
+        if self._reference_index is None:
+            self._reference_index = ReferenceIndex.build(self.reference_root)
+        index = self._reference_index
+        hits = index.search(str(query), clamp_k(k))
+        self.last_search = (str(query), len(hits))
+        if not index.chunks:
+            return json.dumps({"hits": [], "message": NO_REFERENCE_FILES}, ensure_ascii=False)
+        return json.dumps({"hits": hits}, ensure_ascii=False)
 
     # --- scheduling / status / termination -----------------------------------
 

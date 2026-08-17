@@ -26,6 +26,13 @@ report to a compact roster AND from the harness's pretty-printed
 serialization to the scaffold's compact one. Both cut it; together they
 cut it by roughly an order of magnitude at a given roster size, and they
 flatten its slope in roster size by about as much again.
+
+FLOORS DO NOT COMPARE ACROSS PROFILES EITHER, from 0.5.0. Call-1 context
+now depends on the rung: every profile adds the gas-balance injection, the
+rungs at or above `orientation` add a pinned prompt appendix, and
+`planning` adds another appendix plus the plan file — whose size is the
+AGENT's to decide, bounded only by tool_result_max_bytes. The report below
+prints each term separately for that reason.
 """
 
 import json
@@ -41,11 +48,25 @@ from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient, tools_hash
 from kami_agent.lens import LensClient, LensUnavailableError
-from kami_agent.loop import BRIEF_QUERY, BRIEF_TOOL, GameToolResult, LoopCaps
+from kami_agent.loop import (
+    BALANCE_TOOL,
+    BRIEF_QUERY,
+    BRIEF_TOOL,
+    PLAN_PATH,
+    PLAN_TOOL,
+    GameToolResult,
+    LoopCaps,
+)
 from kami_agent.runner import SESSION_RAN, RunConfig, run_session
 from kami_agent.telemetry import read_events, validate_event
 from kami_agent.tools.errors import ToolError
-from kami_agent.tools.scaffold import SCAFFOLD_TOOL_DEFS
+from kami_agent.tools.scaffold import (
+    DEFAULT_PROFILE,
+    PROFILE_ORIENTATION,
+    PROFILE_PLANNING,
+    profile_at_least,
+    scaffold_tool_defs,
+)
 
 REPO_ROOT = Path(__file__).parents[2]
 FIXTURE = Path(__file__).parent / "fixtures" / "harness_tools.json"
@@ -133,20 +154,33 @@ _STEP_4 = (
     else f'Call {HARNESS_TOOL} with account "{SMOKE_ACCOUNT}".'
 )
 
+# Which rung this tier runs (SPEC D3). Default control: the family's other
+# rungs differ from it by prompt assets, one scaffold tool and one more
+# injection, all of which the unit tier pins exactly — what only real
+# provider APIs can prove is that they accept the synthesized turns, and
+# `planning` is the profile that has the most of them.
+SMOKE_PROFILE = os.environ.get("KAMI_SMOKE_PROFILE", DEFAULT_PROFILE)
+
+# The session-start injections this run performs, in order (SPEC P1.12).
+INJECTED_TOOLS = [BRIEF_TOOL, BALANCE_TOOL] + (
+    [PLAN_TOOL] if profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING) else []
+)
+
 # Test-only kickoff (the frozen production one is "Session start."). The
-# opening paragraph is load-bearing. The session-start brief puts a
-# completed BRIEF_TOOL call and its result in context ahead of the model's
-# first turn, and a synthesized assistant turn is indistinguishable from
-# the model's own — so the cheapest tiers read the script as already
-# underway and absorb its first step. Observed: gpt-4o-mini skipping
-# get_status (having counted the brief as step 1) and gemini-2.5-flash
-# jumping straight to end_session. Naming the tool is what makes it
-# stick; the softer "a tool call may appear above" did not. It states
-# facts about the transcript, not a strategy.
+# opening paragraph is load-bearing. The session-start injections put
+# COMPLETED calls and their results in context ahead of the model's first
+# turn, and a synthesized assistant turn is indistinguishable from the
+# model's own — so the cheapest tiers read the script as already underway
+# and absorb its first steps. Observed: gpt-4o-mini skipping get_status
+# (having counted the brief as step 1) and gemini-2.5-flash jumping
+# straight to end_session. Naming the tools is what makes it stick; the
+# softer "a tool call may appear above" did not — and from 0.5.0 there are
+# two or three such calls, so all of them are named. It states facts about
+# the transcript, not a strategy.
 KICKOFF = f"""\
-A {BRIEF_TOOL} call and its result already appear above. You did not make
-that call, it counts as none of the steps below, and no step below has
-been done yet. Start at step 1 and do every step.
+These calls and their results already appear above: {", ".join(INJECTED_TOOLS)}.
+You did not make them, they count as none of the steps below, and no step
+below has been done yet. Start at step 1 and do every step.
 
 Complete the following steps in order, one tool call each, then stop.
 1. Call get_status.
@@ -320,7 +354,9 @@ def make_lens():
 def run_dir(tmp_path):
     prompts = tmp_path / "prompts"
     prompts.mkdir()
-    for name in ("system.txt", "continue.txt"):
+    # Every pinned asset, as `init` materializes them (P13); the profile
+    # decides which reach the prompt.
+    for name in ("system.txt", "continue.txt", "orientation.txt", "planning.txt"):
         (prompts / name).write_text(
             (REPO_ROOT / "prompts" / name).read_text(encoding="utf-8"), encoding="utf-8"
         )
@@ -330,6 +366,14 @@ def run_dir(tmp_path):
     (reference / "guide.md").write_text(
         "# Field guide\n\n" + "The world persists between sessions. " * 20, encoding="utf-8"
     )
+    if profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING):
+        # A plan from a previous session: the planning arm's normal shape,
+        # and part of the floor this tier reports.
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / PLAN_PATH).write_text(
+            "goal: complete quests\nnext: check the roster\n", encoding="utf-8"
+        )
     return tmp_path
 
 
@@ -352,6 +396,7 @@ def test_canned_session(provider, run_dir):
             # window (observed: gemini 429s for >31 s, the default-5 span).
             caps=LoopCaps(session_token_cap=150_000, session_tool_cap=12, retry_max_attempts=8),
             budget_usd=5.0,
+            scaffold_profile=SMOKE_PROFILE,
         )
         outcome = run_session(
             config, adapter, harness_factory=lambda: harness, lens_factory=lambda: lens
@@ -418,27 +463,39 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     # on the model following seven ordered instructions, which the cheapest
     # tiers occasionally do not, and a flake there must not decide whether
     # the brief gate ran.
-    briefs = [e for e in tool_events if e["initiator"] == "scaffold"]
-    assert len(briefs) == 1, f"{provider}: expected one scaffold-initiated call, got {len(briefs)}"
-    assert briefs[0]["tool"] == BRIEF_TOOL
-    assert briefs[0]["source"] == "lens"
+    injections = [e for e in tool_events if e["initiator"] == "scaffold"]
+    assert [e["tool"] for e in injections] == INJECTED_TOOLS, (
+        f"{provider}: injections {[e['tool'] for e in injections]}, expected {INJECTED_TOOLS}"
+    )
+    assert injections[0]["source"] == "lens"
+    assert injections[1]["source"] == "harness"
     assert BRIEF_TOOL not in {t.name for t in harness.tool_defs}
-    assert tool_events[0] is briefs[0], f"{provider}: the brief was not the first tool call"
+    # The balance tool, unlike the brief, IS on the surface: the scaffold
+    # pre-called a tool the agent could call itself (D1, X22 does not apply).
+    assert BALANCE_TOOL in {t.name for t in harness.tool_defs}
+    assert tool_events[: len(injections)] == injections, (
+        f"{provider}: the injections were not the first tool calls"
+    )
     kinds = [e["event"] for e in events]
     assert kinds.index("tool_call") < kinds.index("llm_call"), (
-        f"{provider}: the brief must precede the first model call, got {kinds[:4]}"
+        f"{provider}: the injections must precede the first model call, got {kinds[:4]}"
     )
-    # And it reached the model verbatim, envelope untouched.
+    # And each reached the model verbatim, envelope untouched, as its own
+    # completed call/result pair.
     transcript = [
         json.loads(line)
         for line in (run_dir / "transcripts" / "session-0001.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert transcript[1]["role"] == "assistant"
-    assert [c["name"] for c in transcript[1]["tool_calls"]] == [BRIEF_TOOL]
-    assert transcript[2]["role"] == "tool_result"
+    for index, tool in enumerate(INJECTED_TOOLS):
+        assistant, result = transcript[1 + index * 2], transcript[2 + index * 2]
+        assert assistant["role"] == "assistant"
+        assert [c["name"] for c in assistant["tool_calls"]] == [tool]
+        assert result["role"] == "tool_result"
     brief_content = transcript[2]["content"]
+    balance_content = transcript[4]["content"]
+    plan_content = transcript[6]["content"] if len(INJECTED_TOOLS) > 2 else ""
     if isinstance(lens, RecordedFakeLens):
         assert brief_content == json.dumps(lens.brief["envelope"], ensure_ascii=False)
 
@@ -474,13 +531,15 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     # and the full transcript (assistant + tool results as sent).
     visible = [
         (run_dir / "prompts" / "system.txt").read_text(encoding="utf-8"),
+        (run_dir / "prompts" / "orientation.txt").read_text(encoding="utf-8"),
+        (run_dir / "prompts" / "planning.txt").read_text(encoding="utf-8"),
         KICKOFF,
         (run_dir / "prompts" / "continue.txt").read_text(encoding="utf-8"),
         (run_dir / "transcripts" / "session-0001.jsonl").read_text(encoding="utf-8"),
         json.dumps(
             [
                 {"name": t.name, "description": t.description, "schema": t.input_schema}
-                for t in list(harness.tool_defs) + list(SCAFFOLD_TOOL_DEFS)
+                for t in list(harness.tool_defs) + scaffold_tool_defs(SMOKE_PROFILE)
             ]
         ),
     ]
@@ -501,17 +560,39 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     system_chars = len(
         (run_dir / "prompts" / "system.txt").read_text(encoding="utf-8").rstrip("\n")
     ) + len(_file_index(run_dir))
+    # Per-profile floor terms (SPEC P13, D1): the appendices this rung
+    # appends to the prompt, and the two session-start injections beyond the
+    # brief. Zero where this rung does not carry the term — the fixed floor
+    # is profile-dependent from 0.5.0, so a floor is only comparable against
+    # a floor of the same profile.
+    orientation_chars = (
+        len((run_dir / "prompts" / "orientation.txt").read_text(encoding="utf-8").rstrip("\n"))
+        if profile_at_least(SMOKE_PROFILE, PROFILE_ORIENTATION)
+        else 0
+    )
+    planning_chars = (
+        len((run_dir / "prompts" / "planning.txt").read_text(encoding="utf-8").rstrip("\n"))
+        if profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING)
+        else 0
+    )
+    balance_chars = len(balance_content)
+    plan_file_chars = len(plan_content)
     # The brief is part of call 1, so it is part of the floor. Its size is a
     # function of roster size and nothing else — quote both, so a floor
     # measured at one roster converts to any other.
     kami_count = lens.brief["kami_count"] if isinstance(lens, RecordedFakeLens) else "live"
     print(
         f"\nSMOKE[{provider}] model={model} "
+        f"scaffold_profile={SMOKE_PROFILE} "
         f"fixed_floor_input_tokens={ok_llm[0]['input_tokens']} "
         f"surface_hash={tools_hash(list(harness.tool_defs))} "
-        f"brief_query={BRIEF_QUERY} brief_ok={briefs[0]['ok']} "
+        f"tools_hash={next(e for e in events if e['event'] == 'session_start')['tools_hash']} "
+        f"brief_query={BRIEF_QUERY} brief_ok={injections[0]['ok']} "
         f"brief_chars={len(brief_content)} brief_kamis={kami_count} "
-        f"system_chars={system_chars} kickoff_chars={len(KICKOFF)} "
+        f"balance_ok={injections[1]['ok']} balance_chars={balance_chars} "
+        f"plan_file_chars={plan_file_chars} "
+        f"system_chars={system_chars} orientation_chars={orientation_chars} "
+        f"planning_chars={planning_chars} kickoff_chars={len(KICKOFF)} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
         f"session_tokens={session_end['session_tokens']} "
         f"session_cache_read={session_cache_read} "

@@ -79,6 +79,10 @@ def wake_call(minutes):
     return ToolCall(id="t-wake", name="set_next_wake", args={"minutes_from_now": minutes})
 
 
+ORIENTATION_TXT = "You own kamis. Every on-chain action costs gas (ETH).\n"
+PLANNING_TXT = "The file workspace/plan.md is where your goals and plan live.\n"
+
+
 @pytest.fixture
 def run_dir(tmp_path):
     prompts = tmp_path / "prompts"
@@ -86,6 +90,10 @@ def run_dir(tmp_path):
     (prompts / "system.txt").write_text(SYSTEM_TXT)
     (prompts / "kickoff.txt").write_text(KICKOFF_TXT)
     (prompts / "continue.txt").write_text(CONTINUE_TXT)
+    # The profile appendices `init` materializes (P13); stand-ins here, the
+    # pinned wording is frozen in test_prompts.py.
+    (prompts / "orientation.txt").write_text(ORIENTATION_TXT)
+    (prompts / "planning.txt").write_text(PLANNING_TXT)
     reference = tmp_path / "reference"
     reference.mkdir()
     (reference / "gdd.md").write_text("lore")
@@ -108,6 +116,58 @@ def events_of(run_dir, kind=None):
     path = Path(run_dir) / "telemetry.jsonl"
     events = list(read_events(path)) if path.exists() else []
     return [e for e in events if kind is None or e["event"] == kind]
+
+
+# --- scaffold_profile: recorded, and it shapes the prompt (P9, P10, P13) -------
+
+
+def test_the_profile_lands_on_every_session_start(run_dir):
+    """What the family varies is recorded per session, not only in the config
+    copy — and tools_hash beside it differs by profile by design."""
+    adapter = ScriptedAdapter(response(end_call()), response(end_call()))
+    config = config_for(run_dir, scaffold_profile="search")
+    run_session(config, adapter, clock=Clock())
+    run_session(config, adapter, clock=Clock(), trigger="manual")
+    starts = events_of(run_dir, "session_start")
+    assert [s["scaffold_profile"] for s in starts] == ["search", "search"]
+    control = events_of(run_dir, "session_start")[0]["tools_hash"]
+    other_dir = run_dir / "control"
+    (other_dir / "prompts").mkdir(parents=True)
+    for name in ("system.txt", "kickoff.txt", "continue.txt"):
+        (other_dir / "prompts" / name).write_text((run_dir / "prompts" / name).read_text())
+    run_session(config_for(other_dir), ScriptedAdapter(response(end_call())), clock=Clock())
+    assert events_of(other_dir, "session_start")[0]["scaffold_profile"] == "control"
+    assert events_of(other_dir, "session_start")[0]["tools_hash"] != control
+
+
+def test_the_default_profile_is_control(run_dir):
+    run_session(config_for(run_dir), ScriptedAdapter(response(end_call())), clock=Clock())
+    assert events_of(run_dir, "session_start")[0]["scaffold_profile"] == "control"
+
+
+def test_the_profile_appendices_reach_the_system_prompt_in_order(run_dir):
+    adapter = ScriptedAdapter(response(end_call()))
+    run_session(config_for(run_dir, scaffold_profile="planning"), adapter, clock=Clock())
+    system = adapter.requests[0]["system"]
+    assert system.startswith(SYSTEM_TXT.rstrip("\n"))
+    assert system.index(ORIENTATION_TXT.rstrip("\n")) < system.index(PLANNING_TXT.rstrip("\n"))
+    # The file index stays last (P1.10).
+    assert system.rstrip().endswith("read-only")
+
+
+def test_a_mis_provisioned_profile_starts_no_session(run_dir):
+    """The asset check runs before the harness spawn and before telemetry, so
+    a run directory that cannot deliver its rung leaves no session_start."""
+    (run_dir / "prompts" / "planning.txt").unlink()
+    with pytest.raises(FileNotFoundError, match="prompts/planning.txt"):
+        run_session(
+            config_for(run_dir, scaffold_profile="planning"),
+            ScriptedAdapter(response(end_call())),
+            clock=Clock(),
+        )
+    assert events_of(run_dir, "session_start") == []
+    # And the lock was released, so the next invocation is not blocked.
+    assert not (run_dir / LOCK_FILENAME).exists()
 
 
 # --- presentation_mode telemetry ---------------------------------------------------

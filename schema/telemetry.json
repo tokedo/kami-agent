@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -65,6 +65,10 @@
         "tools_hash": {
           "type": "string",
           "description": "The SCAFFOLD's sha256:-prefixed fingerprint of the surface presented to the model (harness tools + scaffold tools). The harness publishes its own bare-hex hash of its own registry over a different serialization; the two values are different by construction and must never be equated (SPEC D1)"
+        },
+        "scaffold_profile": {
+          "enum": ["control", "orientation", "search", "pushed", "planning"],
+          "description": "The knowledge-delivery rung this run's scaffold is, from the manifest (SPEC D3, P10, P13). Cumulative: each value is everything to its left plus its own rung — control (the base scaffold plus session-start gas balances), orientation (+ the pinned core-loop paragraph), search (+ search_reference), pushed (+ lens/harness result enrichment, which is THEIR runtime flags: nothing changes agent-side beyond this recorded value), planning (+ the plan-file appendix and its session-start injection). It is why tools_hash above differs between arms of one family: a profile at or above search carries one more scaffold tool BY DESIGN, while the harness's own registry hash is identical across every arm. Closed enum, unlike presentation_mode, because this set is the scaffold's own. Present from schema 0.5.0 on; absence means a stream written before it, i.e. the control surface"
         },
         "presentation_mode": {
           "type": "string",
@@ -191,7 +195,7 @@
         },
         "initiator": {
           "enum": ["model", "scaffold"],
-          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — only the once-per-session status brief (SPEC P1.12), issued before the first model call and injected as a tool result. Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
+          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — the session-start injections (SPEC P1.12), issued before the first model call and injected as tool results. From schema 0.5.0 there are up to THREE of them per session, so initiator=scaffold is no longer a synonym for the status brief and must be split on `tool`: the roster brief (source=lens), the wallets' gas balances (source=harness, the balance tool), and on the planning profile the plan-file read (source=scaffold, workspace_read of plan.md). Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
         },
         "call_seq": {
           "type": "integer",
@@ -226,7 +230,16 @@
         },
         "path": {
           "type": "string",
-          "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC P9)"
+          "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC P9). Note the plan-file injection is a workspace_read of plan.md with initiator=scaffold: a read the agent did not choose, which any measure of its own file access must exclude"
+        },
+        "query": {
+          "type": "string",
+          "description": "search_reference calls only: the query text, verbatim as the agent wrote it. Promoted out of the transcript deliberately — what an agent looked for is the process observable of the knowledge-delivery family, and reading it should not require parsing transcripts (SPEC P9). Present from schema 0.5.0"
+        },
+        "hits": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "search_reference calls only: how many passages the search returned (0 to k). Zero means the query matched nothing in the reference tree, or the tree holds no indexable file at all — the two are distinguished by the result body, not here. Present from schema 0.5.0"
         },
         "duration_ms": { "type": "number", "minimum": 0 },
         "ok": {
