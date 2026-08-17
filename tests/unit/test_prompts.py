@@ -43,7 +43,7 @@ CONTINUE = "Continue. To end this session, call end_session.\n"
 # design document at build time, and pinned by the family's design — a
 # reword here is a change to what those arms were measured on.
 ORIENTATION = """\
-You own kamis (creatures). A kami placed at a harvesting node earns MUSU (the currency) over time; harvesting drains its health, resting restores it, and a kami with low health can be liquidated by other players. MUSU buys items; food restores health. Harvesting earns experience; experience lets a kami level up, which grants a skill point spent on skills that change its stats. Quests reward MUSU, items and experience for completing objectives. Every on-chain action costs gas (ETH).
+You own kamis (creatures). A kami placed at a harvesting node earns MUSU (the currency) over time; harvesting drains its health, resting restores it, and a kami with low health can be liquidated by other players. MUSU buys items; food restores health. Harvesting earns experience; experience lets a kami level up, which grants a skill point spent on skills that change its stats. Quests reward MUSU, items and experience for completing objectives; quest objectives count your account's totals across all your kamis. Every on-chain action costs gas (ETH).
 """
 
 # Appendix for the `planning` profile (P13). Mechanism about a file, not
