@@ -14,14 +14,22 @@ enforced, and the behaviors that are accepted by design.
 kami-agent turns a stateless model API into a persistent actor in the
 Kamigotchi world. It is deliberately minimal: its value comes from being
 boring. The scaffold fixes *how* an agent can act, remember, and schedule
-itself; it never fixes *what* to do, *what* to remember, or *when* to act.
-All strategy, memory content, and pacing decisions belong to the model
-under test — cross-model divergence there is a primary measurement.
+itself; it never plays for the agent — within any one configuration,
+no strategy, priorities, or targets are supplied. What the scaffold
+*offers* the model — which files are read back to it, which prompt
+appendices it gets, which retrieval tools exist — is itself a
+manifest-pinned variable (`scaffold_profile`). The unit a run measures
+is the whole system: model plus scaffold configuration plus pinned
+environment. A comparison across models holds the other two equal; a
+comparison across configurations holds the model and environment equal.
 
 Design principles behind the contract:
 
-1. **Mechanism fixed, policy free.** No strategy, memory advice, or pacing
-   hints anywhere the model can see.
+1. **Mechanism fixed, policy free — per configuration.** No strategy,
+   priorities, efficiency claims, or numbers to aim at anywhere the
+   model can see. Structure (memory surfaces, appendices, retrieval,
+   session-start injections) is a named, byte-frozen, manifest-pinned
+   profile — never a default that drifts, never advice.
 2. **Model-agnostic by construction.** One loop, N provider adapters,
    native tool calling per provider, no vendor idioms in prompts or loop
    logic.

@@ -1,6 +1,6 @@
 ---
 module: kami-agent
-version: 2.1
+version: 2.2
 describes: v0.5.1
 ---
 
@@ -772,12 +772,20 @@ separately — `system_chars`, `orientation_chars`, `planning_chars`,
 `balance_chars`, `plan_file_chars` — for exactly that reason, and the
 plan-file term is the one the *agent* controls (P1.12.3).
 
-Excluded by construction: budget, cost, tokens, compute limits, run
-duration, session caps, forced truncation, the existence of measurement
-— and equally, strategy hints, tool-usage advice, memory-structure
-suggestions, XML-tag formatting, and vendor-idiomatic phrasing (I5). Gas
-and ETH are world facts, not apparatus (P7.4), which is why the leak scan
-carves out "cost(s) gas" and nothing else.
+Excluded by construction on **every** profile: budget, cost, tokens,
+compute limits, run duration, session caps, forced truncation, the
+existence of measurement; and XML-tag formatting and vendor-idiomatic
+phrasing (I5). Gas and ETH are world facts, not apparatus (P7.4), which
+is why the leak scan carves out "cost(s) gas" and nothing else.
+
+Excluded from the `control` profile, and from the rules text of every
+profile: strategy hints, tool-usage advice, memory-structure
+suggestions. Above `control`, structural additions — an appendix, a
+retrieval tool, a file read back at session start — are admissible only
+as a named profile whose assets are byte-frozen and pinned (P10, P13):
+the profile is the variable under study, and what a run measures is the
+system it produces — model, profile, and pinned environment together —
+never the model alone.
 
 ---
 
@@ -1248,13 +1256,18 @@ a bug; changing one is a spec change, not a fix.
 
 ## Non-goals
 
-- **N1** Multi-model roles (executor/optimizer splits).
-- **N2** Knowledge packs or calibrated strategy priors of any kind. The
-  `orientation` appendix is not one and the line is worth stating: it is
-  the world's *rules* (what harvesting does, what experience is for),
-  never a policy, a priority, an efficiency claim, or a number to aim at.
-  A profile that shipped tactics would be this non-goal broken, not a new
-  rung.
+- **N1** Multi-model roles (executor/optimizer splits) — absent from
+  every profile at this version. A later profile's question, admitted
+  the way any rung is (named, frozen, measured against `control`), not
+  a principle.
+- **N2** Knowledge packs or calibrated strategy priors in any profile
+  shipped at this version. The `orientation` appendix is not one and the
+  line is worth stating: it is the world's *rules* (what harvesting does,
+  what experience is for), never a policy, a priority, an efficiency
+  claim, or a number to aim at. Tactics could only ever arrive as a NEW
+  named profile measured against `control` — never as a change to an
+  existing rung, never as the default; at this version no such profile
+  exists.
 - **N3** Mid-session compaction or context summarization. Cross-session
   memory exists only as agent-written `workspace/` files.
 - **N4** Self-funding or economic self-sustainability.
@@ -1286,6 +1299,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 2.2 | v0.5.1 | Docs-only. The contract states what a run measures: the **system** — model, `scaffold_profile`, pinned environment — not the model alone. "Policy free" is restated per configuration (the scaffold never plays for the agent), while structure is a named, frozen, pinned profile; the P13 exclusion paragraph splits into every-profile apparatus/vendor items vs `control`-and-rules-text advice items; N1/N2 restated as version-scoped, not principled. No code, asset, schema, or hash moves. |
 | 2.1 | v0.5.1 | `prompts/orientation.txt` gains one rule sentence — "quest objectives count your account's totals across all your kamis" — a stated fact of the world (quest objective progress is tracked per account, not per kami) that the reference client's quest text leaves ambiguous; rules only, no advice; both copies and the frozen literal re-frozen (I3, P13). Nothing else moves; tools_hash per profile unchanged. |
 | 2.0 | v0.5.0 | **A manifest-selected `scaffold_profile` makes the scaffold the experimental variable** (D3, P10, P13): five cumulative rungs — `control`, `orientation`, `search`, `pushed`, `planning` — served by ONE agent version, validated at `build_run_config`, recorded on every `session_start`. The surface is profile-selected: profiles at or above `search` carry `search_reference`, a deterministic pure-python BM25 index over `reference/` returning top-k passages with BYTE offsets that `workspace_read` re-reads exactly, whose `query` and `hits` are promoted into telemetry as the family's process observable. Prompt assets become base + **pinned appendices** (`orientation.txt`, `planning.txt`), each byte-frozen and each materialized by `init`; they are read before the harness spawn, so a rung whose asset is missing fails loudly and starts no session (P1 step 8). **Gas visibility on every profile** (P1.12.2): one fixed system-prompt sentence stating that gas is paid in ETH from the agent's wallets and that the balances arrive each session, plus a session-start injection of the harness's own balance tool — which re-introduces exactly one by-name dependency on the surface, argued and bounded in D1 (asserted at `init`, degrading visibly, never refusing), and argued against `budget_visible` in X10 (ETH is a world resource; the dollar budget stays unreachable). **The `planning` profile adds the plan-file surface** (P1.12.3): the agent's own `workspace/plan.md`, re-read at session start through the ordinary tool, missing-file error included, and named in D1's cap arithmetic as the one floor term the agent itself controls. P1.12 is restated as the **session-start injections** — one ordered contract (roster → balances → plan) with shared verbatimness, single-attempt, visible-degradation and cap-exclusion rules — and X22's special-path exception is confined to the roster, since the other two name tools that are on the surface. Consequences for readers: `initiator=scaffold` is no longer a synonym for the brief (split on `tool`), `session_end.tool_calls` does not compare across 0.5.0, and `tools_hash` differs between arms by design (X24) while the harness's own hash and mass stay identical. New deviations X24 (per-profile surface) and X25 (`pushed` is agent-side inert); new non-goal N11 (search covers `reference/` only). Telemetry schema 0.4.0 → 0.5.0: three additive optional fields (`session_start.scaffold_profile`, `tool_call.query`, `tool_call.hits`), no new event types. New invariants I28–I31. |
 | 1.9 | v0.4.0 | Consumption of the kami-harness 2.1.0 surface (101 tools) and of the kami-lens 0.3.0 compact roster. **The session-start brief becomes a direct daemon read** (P1.12, new D7): one `roster` query over the daemon's own socket, replacing the harness `lens_party` call. It is now explicitly a special path (X22) — not a tool, not on the surface, not issuable by the agent, refused at construction if a harness registers its name (P10) — and the compaction cuts both the fixed floor's brief term and its slope in roster size by close to an order of magnitude, which is what takes roster growth off D1's cap-arithmetic assumption. Failures degrade to a minimal machine-shaped record, the transport half of which is the one string the scaffold authors and is frozen accordingly (X21, P13). **Telemetry integrity** (P3, P9): every model request is written ahead as `llm_request` and paired by `request_seq`, so a request billed but never completed is recovered as a named `phantom` row instead of vanishing, with the residual window stated exactly; no exception can escape the call site unrecorded (P8); `call_seq` gives the stream its own 1:1 call identity and `provider_call_id`/`provider_call_id_duplicate` record — without obeying or refusing — a provider that reuses an id (X23, I26), the class that once presented as a routing defect and was adjudicated to be an analysis mis-join; `tx_hash` now covers the raised path and `txs[]` carries in-band per-transaction receipts from both nesting levels (I27); `result_error_shaped` names a returned-rather-than-raised failure without moving `ok`. Per-call `provider_request_id` and the Anthropic cache-lifetime split are recorded where served and as absent where not (D2), which makes N5 measured. `harness_tools_hash` records the harness's own published registry hash beside — never equated with — the scaffold's. `usage_unknown`'s two distinct lossy classes are separated in P7.4, with the recoverable one named as out of scope. Telemetry schema 0.3.1 → 0.4.0: one new event type, one widened enum (`tool_call.source` gains `lens`), the rest additive. |
