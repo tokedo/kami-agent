@@ -36,6 +36,31 @@ def echo(text: str) -> str:
 
 
 @mcp.tool()
+def lens_roster(account_index: int = -1) -> dict:
+    """Compact roster: one line per kami (index, state, HP) plus where
+    the account is.
+
+    The session-start brief calls this (SPEC P1.12): from 0.6.0 the
+    roster is an ordinary harness tool, and a surface without it is
+    refused at loop construction, so every harness stand-in carries it.
+
+    Args:
+        account_index: Account index (-1: daemon default operator).
+    """
+    return {
+        "data": {
+            "account": {"index": 7, "roomIndex": 11},
+            "kamis": [
+                {"index": 1, "state": "HARVESTING", "hp": [41, 90]},
+                {"index": 2, "state": "RESTING", "hp": [70, 88]},
+            ],
+        },
+        "untrusted": [],
+        "meta": {"blockNumber": 8814052, "stale": False, "mode": "daemon"},
+    }
+
+
+@mcp.tool()
 def lens_party(account_index: int = -1) -> dict:
     """Party report for an account: every kami with full vitals.
 

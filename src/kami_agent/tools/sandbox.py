@@ -1,10 +1,11 @@
-"""Path sandbox: every file path must resolve under workspace/ or reference/ (SPEC P11).
+"""Path sandbox: every path resolves under workspace/, reference/ or journal/ (SPEC P11).
 
 Paths are relative to the workspace root: a bare ``notes.md`` and a
 prefixed ``workspace/notes.md`` name the same file (one leading
 ``workspace/`` segment is stripped). ``reference/...`` addresses the
-read-only reference tree. Bare paths therefore can never reach
-run-directory internals (state.json, telemetry.jsonl, prompts/).
+read-only documentation tree and ``journal/...`` the read-only session
+journal (P15). Bare paths therefore can never reach run-directory
+internals (state.json, telemetry.jsonl, errors.jsonl, prompts/).
 """
 
 from __future__ import annotations
@@ -13,7 +14,11 @@ from pathlib import Path
 
 from kami_agent.tools.errors import ToolError
 
-ROOTS = ("workspace", "reference")
+ROOTS = ("workspace", "reference", "journal")
+
+# Roots that are addressed by their own name rather than relative to the
+# workspace root, and that no tool may write to.
+_READ_ONLY_ROOTS = ("reference", "journal")
 
 
 class SandboxError(ToolError):
@@ -23,10 +28,11 @@ class SandboxError(ToolError):
 def resolve_path(run_dir: Path, path: str) -> tuple[Path, str]:
     """Resolve an agent-supplied path to ``(absolute_path, root_name)``.
 
-    ``root_name`` is ``"workspace"`` or ``"reference"``. Raises
-    :class:`SandboxError` for absolute paths and for anything that
-    resolves (after ``..``, ``.``, and symlinks) outside both roots —
-    including other run-directory files like state.json or telemetry.jsonl.
+    ``root_name`` is ``"workspace"``, ``"reference"`` or ``"journal"``.
+    Raises :class:`SandboxError` for absolute paths and for anything that
+    resolves (after ``..``, ``.``, and symlinks) outside every root —
+    including other run-directory files like state.json, telemetry.jsonl
+    or errors.jsonl.
     """
     if "\x00" in path:
         raise SandboxError("invalid path")
@@ -39,7 +45,7 @@ def resolve_path(run_dir: Path, path: str) -> tuple[Path, str]:
         # workspace-relative (so workspace/notes.md == notes.md).
         candidate = Path(*parts[1:]) if len(parts) > 1 else Path()
         resolved = ((run_dir / "workspace") / candidate).resolve()
-    elif parts and parts[0] == "reference":
+    elif parts and parts[0] in _READ_ONLY_ROOTS:
         resolved = (run_dir / candidate).resolve()
     else:
         # Bare paths are relative to the workspace root.
@@ -48,4 +54,5 @@ def resolve_path(run_dir: Path, path: str) -> tuple[Path, str]:
         root = (run_dir / root_name).resolve()
         if resolved == root or resolved.is_relative_to(root):
             return resolved, root_name
-    raise SandboxError(f"path is outside workspace/ and reference/: {path!r}")
+    roots = ", ".join(f"{name}/" for name in ROOTS)
+    raise SandboxError(f"path is outside {roots}: {path!r}")

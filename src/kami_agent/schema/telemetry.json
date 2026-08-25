@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -73,6 +73,22 @@
         "presentation_mode": {
           "type": "string",
           "description": "The harness presentation mode this run pinned in the manifest, passed to the harness child unvalidated (SPEC D1). Absent when the manifest pinned no mode, in which case the harness applied its own default — absence is recorded rather than guessed at. Not constrained to an enum here: the set of modes is the harness's to define, and an unsupported one fails at the harness rather than being normalized by the scaffold"
+        },
+        "lens_version": {
+          "type": "string",
+          "description": "Version of the kami-lens daemon that served this session's roster brief, taken from one operator-side `status` query over the daemon's own socket (SPEC D7). Recorded because a run's live daemon version was otherwise unknowable from its own records: the manifest pins a lens SHA that nothing verifies, and a daemon serving a different build than the pin claims is invisible until someone checks the host. Absent when no daemon is configured, when the status query failed, or when the pinned daemon serves no version — absence is never read as agreement with the pin"
+        },
+        "lens_upstream_pin": {
+          "type": "string",
+          "description": "The upstream world-contract pin the serving lens daemon reports for itself, verbatim, from the same status query as lens_version (SPEC D7). Absent on the same terms"
+        },
+        "lens_enrich": {
+          "type": "boolean",
+          "description": "Whether the serving lens daemon had result enrichment switched ON, from the same status query (SPEC D7). This is the daemon half of the `pushed` rung: that rung changes nothing agent-side in this scaffold (X25), so an arm pinned to `pushed` against a daemon running with enrichment off was previously undetectable from telemetry and could only be caught by inspecting the host. Recorded, never asserted — runtime refusal on drift stays a non-goal (N10); the arm's scaffold_profile and this field are two facts to compare in analysis, not a check the scaffold performs"
+        },
+        "lens_default_operator": {
+          "type": "string",
+          "description": "The account index the serving lens daemon fills in for an operator-argument query when the caller sends none, from the same status query (SPEC D7). The roster brief depends on it being set, and until provisioning sets it the brief degrades visibly every session; recording it makes 'the brief failed because the daemon had no default operator' readable from the stream instead of inferrable from the error text. Absent when the daemon has none configured"
         },
         "harness_tools_hash": {
           "type": "string",
@@ -160,6 +176,22 @@
           "type": "string",
           "description": "The provider's own identifier for this call, verbatim, where the SDK serves one: Anthropic and OpenAI expose it on both successful responses and API errors (from the request-id / x-request-id response headers); Google exposes a model response id, which is NOT a transport request id, and no header without changing the pinned request configuration. Absent means the provider served none — never that the call did not happen"
         },
+        "error_status": {
+          "type": ["integer", "null"],
+          "description": "HTTP status the provider returned for a FAILED attempt (SPEC P8, P9). Emitted on every error-path llm_call row together with error_type and error_text, and carrying an explicit null when the failure happened before any provider answer existed (a connection reset, a timeout). The null is deliberate and differs from every other optional field on this event, which is omitted when absent: during an outage the reader must be able to tell 'the provider sent no status' from 'this row predates the field', and omission collapses those two into one. Absent entirely on successful calls",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "error_type": {
+          "type": ["string", "null"],
+          "description": "The provider's OWN error-type token for a failed attempt — insufficient_quota, invalid_request_error, RESOURCE_EXHAUSTED — recorded verbatim and never normalized across providers (SPEC P8, P9). Null when the provider served none, including every transport failure and every fault the adapter did not normalize, where the exception class is carried inside error_text instead so that this field holds one vocabulary and not two. Emitted with error_status and error_text on every error-path row",
+          "maxLength": 200
+        },
+        "error_text": {
+          "type": ["string", "null"],
+          "description": "The provider's own error MESSAGE for a failed attempt, cut to 200 characters (SPEC P8, P9). The message only: adapters never fold the request payload into it, and the SDKs' own str(exc) — which embeds the whole response body — is deliberately not what lands here. Exists because a run-wide provider outage once produced 150+ error rows carrying a request id and nothing else, which cannot answer the first question asked after any incident. The full-length message is in the run's errors.jsonl artifact (SPEC P14); this field is the copy that survives in the stream everyone reads. Null when no provider message exists",
+          "maxLength": 400
+        },
         "cache_write_5m_tokens": {
           "type": "integer",
           "minimum": 0,
@@ -231,6 +263,21 @@
         "path": {
           "type": "string",
           "description": "File-tool calls only; promoted into telemetry so documentation/memory access patterns are analyzable without transcript parsing (SPEC P9). Note the plan-file injection is a workspace_read of plan.md with initiator=scaffold: a read the agent did not choose, which any measure of its own file access must exclude"
+        },
+        "path_resolved": {
+          "type": "string",
+          "description": "What the sandbox actually resolved `path` to, relative to the run directory and therefore always carrying its root segment (SPEC P11, P9). `path` is the agent's own argument and `path_resolved` is the file it named; the two differ whenever the agent writes a workspace/-prefixed path, since exactly one leading workspace/ segment is stripped. READ THIS FIELD, NOT `path`, for any measure of which files an agent touched: a run-006 analysis that grouped on `path` concluded one arm had split its notes across two parallel trees, and the archived workspace showed a single tree — the same 102 writes had simply been issued 41 times bare and 61 times prefixed. Absent when the path did not resolve at all (an escape, an absolute path), which is also when the call itself failed",
+          "maxLength": 4096
+        },
+        "wait_requested_s": {
+          "type": "number",
+          "description": "Seconds the agent asked the `wait` tool for, before clamping (SPEC P10). Present only on wait rows. Recorded beside wait_actual_s because a clamp is visible only in the difference between the two",
+          "minimum": 0
+        },
+        "wait_actual_s": {
+          "type": "number",
+          "description": "Seconds the `wait` tool actually blocked for, measured rather than assumed (SPEC P10). Present only on wait rows. Makes time an agent chose to spend waiting analyzable as its own quantity — the wall time a session covers is otherwise indistinguishable from provider latency",
+          "minimum": 0
         },
         "query": {
           "type": "string",

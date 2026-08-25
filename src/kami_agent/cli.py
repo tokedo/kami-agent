@@ -38,8 +38,8 @@ from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient
-from kami_agent.lens import LensClient, LensQueryError, LensUnavailableError
-from kami_agent.loop import BALANCE_TOOL, BRIEF_QUERY, LoopCaps
+from kami_agent.lens import ROSTER_QUERY, LensClient, LensQueryError, LensUnavailableError
+from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, LoopCaps
 from kami_agent.runner import RunConfig, run_session
 from kami_agent.state import load_state
 from kami_agent.supervisor import uninstall_cron
@@ -267,7 +267,7 @@ def check_lens(manifest: dict[str, Any]) -> str:
         return "lens: not configured (skipped)"
     client = factory()
     try:
-        envelope = client.query(BRIEF_QUERY)
+        envelope = client.query(ROSTER_QUERY)
     except LensUnavailableError as exc:
         return f"lens WARNING: {exc.message} — every session-start brief will degrade (D7)"
     except LensQueryError as exc:
@@ -283,7 +283,7 @@ def check_lens(manifest: dict[str, Any]) -> str:
 
 
 def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
-    """Bring-up check for the harness surface, including the one tool the
+    """Bring-up check for the harness surface, including the two tools the
     scaffold depends on by name.
 
     The session-start gas balances are read from the harness's own balance
@@ -291,6 +291,13 @@ def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
     coupling is asserted HERE, loudly, at bring-up — never at runtime,
     where a surface without the tool degrades visibly instead of refusing
     to run (N10, X21).
+
+    The roster tool is the other one, and it is stricter: from 0.6.0 the
+    session-start brief is a call of it, and a surface without it does not
+    degrade — it refuses the session at loop construction, because a
+    session that cannot see its own kamis is a session pointed at the
+    wrong environment. Reported here so the failure lands at bring-up,
+    where an operator is looking, rather than at the first wake.
     """
     factory = harness_factory(manifest)
     if factory is None:
@@ -305,6 +312,14 @@ def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
             line += (
                 f"; harness WARNING: this surface has no {BALANCE_TOOL} — every "
                 "session's gas-balance injection will degrade visibly (D1)"
+            )
+        if BRIEF_TOOL in names:
+            line += f"; {BRIEF_TOOL} present (session-start roster)"
+        else:
+            line += (
+                f"; harness ERROR: this surface has no {BRIEF_TOOL} — this scaffold "
+                "requires a harness serving it (kami-harness 3.0.0+) and will "
+                "refuse every session against this pin (D1)"
             )
         return line, names
     finally:

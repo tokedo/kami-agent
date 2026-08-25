@@ -1,11 +1,11 @@
 {
   "harness": {
     "name": "kamigotchi-executor",
-    "version": "2.1.0",
-    "sha": "ba62fc9",
+    "version": "2.2.0",
+    "sha": "7c6a7ba",
     "recorded_under_python": "3.13"
   },
-  "tools_hash": "sha256:70d65da17ff9b477b0c16cbb3ddf26d8793af1ebcd188c76b3415f49603d2741",
+  "harness_only_tools_hash": "sha256:70d65da17ff9b477b0c16cbb3ddf26d8793af1ebcd188c76b3415f49603d2741",
   "harness_published_tools_hash": "7fc11fe95b85ebeed4f898e774c50833cd63314d56c3ed18b5afa56989f75262",
   "tools": [
     {

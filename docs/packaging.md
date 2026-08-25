@@ -32,6 +32,23 @@ python -c "from kami_agent.supervisor import install_cron; \
 `kami-agent status --run-dir /srv/run` prints the state.json cache
 (operator-facing; never an agent channel — SPEC I1).
 
+## What to pull off a host, and in what order (SPEC P14, P15)
+
+- `/srv/run/telemetry.jsonl` — the source of truth for all accounting.
+- `/srv/run/errors.jsonl` — **pull this first after any incident.** One
+  line per failed provider call, written at the moment of the failure with
+  the provider's own status, error type and message. It exists because a
+  host may be gone, or its process dead, before anyone thinks to ask what
+  the provider actually said; nothing else on the machine records it, and
+  the telemetry copy is cut short for bulk reading.
+- `/srv/run/transcripts/` — messages exactly as sent. Injected
+  session-start turns carry `initiator: scaffold`; everything without that
+  key is the model's own.
+- `/srv/run/journal/sessions.jsonl` — the scaffold's own per-session
+  record. Derived from telemetry rather than authoritative, and rolled to
+  a size bound, so it is the agent's view of its past and not an archive.
+- `/srv/run/workspace/` — everything the agent wrote for itself.
+
 ## Egress allowlist (SPEC I20/N6, enforced at the VM level)
 
 The agent loop gets no web, shell, or network channel of its own. The VM

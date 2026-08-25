@@ -11,6 +11,7 @@ from kami_agent.adapters.base import (
     SamplingParams,
     StopReason,
     ToolCall,
+    ToolResultMessage,
     Usage,
 )
 from kami_agent.governor import PriceTable
@@ -26,7 +27,7 @@ from kami_agent.runner import (
     RunConfig,
     run_session,
 )
-from kami_agent.state import load_state
+from kami_agent.state import fold_telemetry, load_state, save_state
 from kami_agent.supervisor import LOCK_FILENAME
 from kami_agent.telemetry import TelemetryWriter, read_events
 
@@ -203,6 +204,9 @@ def test_full_session_lifecycle(run_dir):
     kinds = [e["event"] for e in events_of(run_dir)]
     assert kinds == [
         "session_start",
+        # The journal read (P1.12, P15) happens before the first model
+        # call, like every session-start injection.
+        "tool_call",
         # Every model request is written ahead of being sent, so that a
         # request billed but never completed leaves a record (P3, P9).
         "llm_request",
@@ -225,7 +229,9 @@ def test_full_session_lifecycle(run_dir):
     end = events_of(run_dir, "session_end")[0]
     assert end["reason"] == "agent"
     assert end["llm_calls"] == 1
-    assert end["tool_calls"] == 2
+    # Two the agent chose, plus the journal injection (P1.12): emitted
+    # rows count here, and injections are emitted rows (X20).
+    assert end["tool_calls"] == 3
 
     schedule = events_of(run_dir, "schedule_next")[0]
     assert schedule["source"] == "agent"
@@ -240,10 +246,29 @@ def test_full_session_lifecycle(run_dir):
     assert state.next_wake_at == schedule["next_wake_at"]
     assert not (run_dir / LOCK_FILENAME).exists()
 
-    transcript = (run_dir / "transcripts" / "session-0001.jsonl").read_text().splitlines()
-    roles = [json.loads(line)["role"] for line in transcript]
-    assert roles == ["user", "assistant", "tool_result", "tool_result"]
-    assert json.loads(transcript[0])["text"] == "Session start."
+    transcript = [
+        json.loads(line)
+        for line in (run_dir / "transcripts" / "session-0001.jsonl").read_text().splitlines()
+    ]
+    assert [m["role"] for m in transcript] == [
+        "user",
+        # The journal injection's synthesized pair, marked as the
+        # scaffold's so it is not read as a model turn (P12).
+        "assistant",
+        "tool_result",
+        "assistant",
+        "tool_result",
+        "tool_result",
+    ]
+    assert [m.get("initiator") for m in transcript] == [
+        None,
+        "scaffold",
+        "scaffold",
+        None,
+        None,
+        None,
+    ]
+    assert transcript[0]["text"] == "Session start."
 
 
 def test_system_context_is_prompt_plus_file_index(run_dir):
@@ -635,3 +660,106 @@ def test_a_completed_request_is_never_called_phantom(run_dir):
         clock=Clock(T0 + timedelta(hours=2)),
     )
     assert not [e for e in events_of(run_dir, "llm_call") if e.get("phantom")]
+
+
+# --- the journal across sessions (SPEC P15) ------------------------------------
+
+
+def test_a_second_session_is_told_how_long_it_was_away(run_dir):
+    """The elapsed figure end to end — the number a 17-hour outage hid.
+
+    Two real sessions through the runner: the first journals itself, the
+    second is injected with that entry and its own entry names the gap.
+    Nothing in a session's context mentions time between sessions, which
+    is why an outage produced not one sentence about elapsed time in any
+    arm of the last run.
+    """
+    from kami_agent import journal
+    from kami_agent.loop import JOURNAL_CALL_ID
+
+    clock = Clock()
+    assert run_session(config_for(run_dir), ScriptedAdapter(response(end_call())), clock=clock) == (
+        SESSION_RAN
+    )
+    first = journal.read_entries(run_dir)
+    assert [e["session"] for e in first] == [1]
+    # No previous session, so no elapsed figure — not a zero (P15).
+    assert "seconds_since_previous_session_end" not in first[0]
+
+    # The world advances 17 hours while nothing runs.
+    clock.now = clock.now + timedelta(hours=17)
+    adapter = ScriptedAdapter(response(end_call()))
+    assert run_session(config_for(run_dir), adapter, trigger="manual", clock=clock) == SESSION_RAN
+
+    entries = journal.read_entries(run_dir)
+    assert [e["session"] for e in entries] == [1, 2]
+    assert entries[1]["seconds_since_previous_session_end"] == pytest.approx(17 * 3600, abs=1)
+
+    # And session 2 was SHOWN session 1's entry, before its first model call.
+    injected = next(
+        m
+        for m in adapter.requests[0]["messages"]
+        if isinstance(m, ToolResultMessage) and m.tool_call_id == JOURNAL_CALL_ID
+    )
+    assert json.loads(injected.content)["session"] == 1
+
+
+def test_a_crashed_session_is_journaled_by_recovery(run_dir):
+    """Otherwise the next entry's elapsed figure silently spans two sessions."""
+    from kami_agent import journal
+
+    clock = Clock()
+    writer_path = run_dir / "telemetry.jsonl"
+    with TelemetryWriter(writer_path, run_id="run-001", clock=clock) as writer:
+        writer.emit(
+            "session_start",
+            session=1,
+            trigger="scheduled",
+            budget_remaining_usd=10.0,
+            wallclock_elapsed_s=0.0,
+            tools_hash="sha256:x",
+        )
+        writer.emit(
+            "tool_call",
+            session=1,
+            tool="harvest_start",
+            source="harness",
+            initiator="model",
+            duration_ms=1.0,
+            ok=True,
+            tx_hash="0xdead",
+        )
+    save_state(fold_telemetry(list(read_events(writer_path))), run_dir / "state.json")
+
+    clock.now = clock.now + timedelta(hours=2)
+    run_session(config_for(run_dir), ScriptedAdapter(response(end_call())), clock=clock)
+
+    entries = journal.read_entries(run_dir)
+    assert [e["session"] for e in entries] == [1, 2]
+    # Built from the folded stream: the agent's own calls and its
+    # transaction evidence survive; the roster does not, because it lived
+    # only in a transcript the crashed session never wrote.
+    assert entries[0]["tools"] == {"harvest_start": 1}
+    assert entries[0]["tx_hashes"] == ["0xdead"]
+    assert "roster" not in entries[0]
+
+
+def test_recovery_journaling_is_idempotent(run_dir):
+    from kami_agent import journal
+    from kami_agent.runner import _journal_crashed_session
+
+    entry = journal.build_entry(
+        session=1,
+        started_at="2026-08-25T12:00:00+00:00",
+        ended_at="2026-08-25T12:01:00+00:00",
+        previous_ended_at=None,
+        tools={"get_status": 1},
+        tx_hashes=[],
+    )
+    journal.append(run_dir, entry)
+    events = [
+        {"event": "session_start", "session": 1, "ts": "2026-08-25T12:00:00+00:00"},
+        {"event": "session_end", "session": 1, "ts": "2026-08-25T12:01:00+00:00"},
+    ]
+    _journal_crashed_session(run_dir, events, 1, 32768)
+    assert len(journal.read_entries(run_dir)) == 1

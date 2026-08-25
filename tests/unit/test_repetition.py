@@ -20,7 +20,13 @@ from kami_agent.adapters.base import (
     Usage,
 )
 from kami_agent.governor import PriceTable
-from kami_agent.loop import AgentLoop, GameToolResult, LoopCaps
+from kami_agent.loop import (
+    BALANCE_TOOL,
+    BRIEF_TOOL,
+    AgentLoop,
+    GameToolResult,
+    LoopCaps,
+)
 from kami_agent.repetition import (
     RepetitionTracker,
     is_error_or_revert,
@@ -47,20 +53,30 @@ class ScriptedAdapter:
 
 
 class ScriptedGame:
-    """Harness stand-in whose result content is scripted per tool."""
+    """Harness stand-in whose result content is scripted per tool.
+
+    The session-start injection tools ride along on every instance: from
+    0.6.0 a surface without the roster tool is refused at loop
+    construction (SPEC D1), and neither injection is what these tests are
+    about.
+    """
 
     def __init__(self, results):
         self._results = results
+        names = list(results)
+        names += [n for n in (BRIEF_TOOL, BALANCE_TOOL) if n not in names]
         self.tool_defs = [
             ToolDef(
                 name=name,
                 description="d",
                 input_schema={"type": "object", "properties": {}, "additionalProperties": True},
             )
-            for name in results
+            for name in names
         ]
 
     def execute(self, name, args):
+        if name in (BRIEF_TOOL, BALANCE_TOOL) and name not in self._results:
+            return GameToolResult(content='{"data": {}, "meta": {}}', tx_hash=None)
         return GameToolResult(content=self._results[name], tx_hash=None)
 
 

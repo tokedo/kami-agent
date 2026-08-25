@@ -12,18 +12,21 @@ Before the first model call the loop issues the **session-start
 injections** (SPEC P1.12), in this order and each as a completed tool
 call plus its result:
 
-1. the status brief — one compact roster query to the kami-lens daemon,
-   made by the scaffold over the daemon's own socket (D7);
+1. the status brief — one call to the harness's own compact-roster tool,
+   for every profile (D1);
 2. the wallets' gas balances — one call to the harness's own balance
    tool, for every profile (D1);
 3. the plan file — one ``workspace_read`` of ``workspace/plan.md``, on
-   the ``planning`` profile only.
+   the ``planning`` profile only;
+4. the previous session's journal entry — one ``workspace_read`` of the
+   scaffold's own session journal, for every profile (P15).
 
-All three run on their own execution path rather than through
+All four run on their own execution path rather than through
 ``_execute_intent``, consume no cap and feed no counter (X20), and
-degrade visibly rather than vanishing (X21). Only the first is a call
-the agent could not make itself (X22): the other two name tools that
-are on the surface, so the scaffold is merely pre-calling them.
+degrade visibly rather than vanishing (X21). **Every one of them now
+names a tool that is on the surface**, so the scaffold only ever
+pre-calls a call the agent could equally make itself: the special-path
+exception the roster brief used to need is gone (X22).
 """
 
 from __future__ import annotations
@@ -39,6 +42,8 @@ from typing import Any, Protocol, runtime_checkable
 import jsonschema
 
 from kami_agent.adapters.base import (
+    ERROR_TEXT_LOG_CHARS,
+    ERROR_TEXT_TELEMETRY_CHARS,
     AdapterError,
     AdapterResponse,
     AssistantMessage,
@@ -50,8 +55,13 @@ from kami_agent.adapters.base import (
     ToolResultMessage,
     UserMessage,
 )
+from kami_agent.errorlog import ErrorLog
 from kami_agent.governor import PriceTable, cost_usd
-from kami_agent.lens import LensError
+from kami_agent.journal import (
+    DEFAULT_JOURNAL_MAX_BYTES,
+    JOURNAL_PATH,
+    last_entry_slice,
+)
 from kami_agent.repetition import (
     DEFAULT_IDENTICAL_CAP,
     DEFAULT_MIN_DISTINCT,
@@ -66,6 +76,8 @@ from kami_agent.tools.errors import ToolError
 from kami_agent.tools.receipts import classify_error, error_shaped_payload, tx_hash_from_error
 from kami_agent.tools.scaffold import (
     ALL_SCAFFOLD_TOOL_NAMES,
+    DEFAULT_WAIT_MAX_SECONDS,
+    PLAN_FILE_MAX_BYTES,
     PROFILE_PLANNING,
     SEARCH_TOOL_DEF,
     ScaffoldTools,
@@ -98,35 +110,34 @@ INITIATOR_SCAFFOLD = "scaffold"
 # Which layer owns the thing that was called (tool_call.source, SPEC P9).
 SOURCE_HARNESS = "harness"
 SOURCE_SCAFFOLD = "scaffold"
-# The world-state daemon, reached directly by the scaffold. Neither of the
-# other two: the harness does not own this call and the scaffold does not
-# own the answer.
+# The world-state daemon, reached directly by the scaffold. Nothing emits
+# this from 0.6.0 — the roster brief moved onto the harness surface — but
+# the value stays in the schema so streams written at 0.4.0-0.5.1 keep
+# validating, and it stays named here so a reader of those streams can
+# find out what it meant.
 SOURCE_LENS = "lens"
 
-# Session-start status brief (SPEC P1.12). A compact roster query straight
-# to the kami-lens daemon: one line per kami (index, state, [hp, hpTotal])
-# plus the room the account is standing in. Full per-kami detail stays on
-# the harness's own party report, which the agent can still call itself.
+# Session-start status brief (SPEC P1.12). The compact roster: one line
+# per kami (index, state, [hp, hpTotal]) plus the room the account is
+# standing in.
 #
-# BRIEF_QUERY is the daemon's registry name. BRIEF_TOOL is the name the
-# injected call and its telemetry row carry — it is NOT on the tool surface
-# and the agent cannot call it (X22). It must not collide with a harness
-# tool name, and that is ENFORCED at loop construction rather than assumed
-# from the spelling: nothing stops a future harness from registering a
-# function of this name, and a pin that did would mean the two layers
-# disagree about who serves the roster.
+# **This is the harness's own tool**, called exactly as the gas-balance
+# injection calls the harness's balance tool, and executed through the
+# same dispatch as any intent the agent returns. Through 0.5.1 the
+# scaffold instead read the daemon's socket directly and injected the
+# answer under a name that was NOT on the tool surface — a pseudo-tool
+# the agent could see in its own transcript and could never call. Agents
+# repeatedly tried to call it anyway, which is a confusion the scaffold
+# manufactured and then charged them for. The pinned harness now serves
+# the same roster as a real, callable tool, so the injected pair shows a
+# tool that exists succeeding, and the agent can re-issue it whenever it
+# likes. The special path is retired with the pseudo-name.
 #
-# The name deliberately stays inside the [A-Za-z0-9_-] set every provider
-# accepts for a function name. A dotted namespace would be collision-proof
-# by construction, but the injected assistant turn carries this name to
-# three provider APIs, and at least one of them documents that character
-# set as a constraint.
-#
-# No arguments: the daemon prefills the account index of an
-# operator-argument query from its own configured default operator when the
-# argument list is empty (D7).
+# No arguments: the tool's account-index parameter defaults to the
+# daemon's own configured default operator, so the scaffold does not have
+# to know which account the run is — the same reasoning as the balance
+# call's empty account label.
 BRIEF_TOOL = "lens_roster"
-BRIEF_QUERY = "roster"
 BRIEF_ARGS: dict[str, Any] = {}
 BRIEF_CALL_ID = "brief_1"
 
@@ -157,6 +168,28 @@ BALANCE_CALL_ID = "balance_1"
 PLAN_TOOL = "workspace_read"
 PLAN_PATH = "plan.md"
 PLAN_CALL_ID = "plan_1"
+
+# Session-start journal entry (SPEC P1.12, P15), every profile. The
+# scaffold's own record of the PREVIOUS session, read back through the
+# ordinary workspace_read with the byte offset and length of that one
+# line — so this injection, like the balance and plan reads and unlike
+# the roster brief, names a call the agent can make itself (X22 does not
+# apply to it). The offset/length form is deliberate: it shows the
+# mechanism for reading more of the file without a word of advice about
+# whether to.
+JOURNAL_TOOL = "workspace_read"
+JOURNAL_CALL_ID = "journal_1"
+
+# The tool whose repetition is not repetition (SPEC P5.1). Waiting is the
+# one call whose whole purpose is to be issued again when the world has
+# not changed yet, so counting it toward the breaker would re-create the
+# failure the wait tool exists to remove.
+WAIT_TOOL = "wait"
+
+# Margin over wait_max_seconds for the tool watchdog (P2). A wait that
+# runs its full clamp must not be killed by the timeout that exists to
+# catch a hung harness call.
+_WAIT_WATCHDOG_MARGIN_S = 5.0
 
 _BACKOFF_BASE_S = 1.0
 _BACKOFF_MAX_S = 60.0
@@ -194,13 +227,6 @@ class GameTools(Protocol):
     def execute(self, name: str, args: dict[str, Any]) -> GameToolResult: ...
 
 
-@runtime_checkable
-class LensQuery(Protocol):
-    """The world-state daemon surface the brief needs (implemented in lens.py)."""
-
-    def query(self, name: str, args: list[Any] | None = None) -> dict[str, Any]: ...
-
-
 @dataclass(frozen=True, slots=True)
 class LoopCaps:
     """Per-session caps, pinned per manifest (SPEC D3).
@@ -215,6 +241,8 @@ class LoopCaps:
     retry_max_attempts: int = 5
     tool_timeout_s: float = 120.0
     tool_result_max_bytes: int = 65536
+    wait_max_seconds: float = DEFAULT_WAIT_MAX_SECONDS
+    journal_max_bytes: int = DEFAULT_JOURNAL_MAX_BYTES
     repetition_identical_cap: int = DEFAULT_IDENTICAL_CAP
     repetition_window: int = DEFAULT_WINDOW
     repetition_min_distinct: int = DEFAULT_MIN_DISTINCT
@@ -242,6 +270,14 @@ class SessionResult:
     messages: list[Message] = field(default_factory=list)
     repetition: RepetitionTrip | None = None
     carried_wake: str | None = None
+    # Journal material (P15), accumulated over the session: the agent's
+    # OWN executed calls by name, the transaction hashes its results
+    # carried, and the roster it was shown. Scaffold-initiated injections
+    # are excluded from the counts on purpose — they are reads the agent
+    # did not choose (P9).
+    journal_tools: dict[str, int] = field(default_factory=dict)
+    journal_tx_hashes: list[str] = field(default_factory=list)
+    journal_roster: Any | None = None
 
 
 class AgentLoop:
@@ -262,7 +298,7 @@ class AgentLoop:
         params: SamplingParams,
         prices: PriceTable,
         caps: LoopCaps,
-        lens: LensQuery | None = None,
+        error_log: ErrorLog | None = None,
         cumulative_usd: float = 0.0,
         cumulative_tokens: int = 0,
         sleep: Callable[[float], None] = time.sleep,
@@ -279,7 +315,11 @@ class AgentLoop:
         self._params = params
         self._prices = prices
         self._caps = caps
-        self._lens = lens
+        # Persistent provider-error artifact (P14). Optional: a loop
+        # constructed without one still runs and still telemeters, it just
+        # leaves no on-disk evidence — the artifact is diagnostic, never
+        # load-bearing.
+        self._error_log = error_log
         self._cumulative_usd = cumulative_usd
         self._cumulative_tokens = cumulative_tokens
         self._sleep = sleep
@@ -292,13 +332,20 @@ class AgentLoop:
         collisions = {t.name for t in game_defs} & ALL_SCAFFOLD_TOOL_NAMES
         if collisions:
             raise ValueError(f"harness tools shadow scaffold tools: {sorted(collisions)}")
-        # The brief's name is not on the surface, so a harness tool of the
-        # same name would make one name mean two things — an injected call
-        # the agent cannot make, and a real tool it can. That is a mis-pin,
-        # not a runtime condition to absorb: refuse before any model call,
-        # exactly as a scaffold collision does.
-        if BRIEF_TOOL in {t.name for t in game_defs}:
-            raise ValueError(f"harness tool shadows the session-start brief name: {BRIEF_TOOL!r}")
+        # The brief is a call of the harness's OWN roster tool, so the
+        # pinned surface has to carry it. This inverts the check that stood
+        # through 0.5.1, when the same name was reserved AGAINST the
+        # harness: then a surface serving it was the mis-pin, now a surface
+        # lacking it is. Refused before any model call rather than degraded
+        # at runtime, because unlike the balance tool (D1, N10) this one has
+        # no useful degraded shape — a session that cannot see its own
+        # kamis is a session started against the wrong environment, and
+        # every one of them would silently be that session.
+        if game is not None and BRIEF_TOOL not in {t.name for t in game_defs}:
+            raise ValueError(
+                f"mis-pin: this scaffold requires a harness serving {BRIEF_TOOL!r} "
+                "(kami-harness 3.0.0+); the pinned surface does not carry it"
+            )
         # Game tools first, then this profile's scaffold tools — base defs
         # before profile-added ones (SPEC P10 order); the order is
         # deterministic so tools_hash is stable, and it differs between
@@ -333,16 +380,25 @@ class AgentLoop:
         # One monotonic number per model REQUEST, written ahead of the call
         # so a request that is billed but never completed leaves a record.
         self._request_seq = 0
+        # Journal material (P15). Counted over the agent's own executed
+        # calls only; the injections below never touch these.
+        self._journal_tools: Counter[str] = Counter()
+        self._journal_tx_hashes: list[str] = []
+        self._journal_roster: Any | None = None
 
     # --- public --------------------------------------------------------------
 
     def run(self) -> SessionResult:
         messages: list[Message] = [UserMessage(text=self._kickoff_text)]
         # Session-start injections, in this fixed order (P1.12): what the
-        # account owns, what it has to spend on gas, and what it planned.
+        # account owns, what it has to spend on gas, what it planned, and
+        # what its previous session did. The journal read is LAST so the
+        # first three keep the positions — and the call_seq numbers — they
+        # had before it existed.
         self._inject_brief(messages)
         self._inject_balances(messages)
         self._inject_plan(messages)
+        self._inject_journal(messages)
         continuation = False
         while True:
             response = self._call_model(messages, continuation)
@@ -390,23 +446,38 @@ class AgentLoop:
         ok: bool,
         duration_ms: float,
         path_hint: str | None = None,
+        max_bytes: int | None = None,
         **emit_fields: Any,
     ) -> None:
         """Put one completed call/result pair in context and telemeter it.
 
         The shape a model reads as "this read already happened": an
         assistant turn holding the call, then its result. Content passes
-        through under the same byte cap every tool result gets (P2) and is
-        otherwise untouched — no summarizing, no annotation, and the same
-        for a failure as for an answer.
+        through under a byte cap and is otherwise untouched — no
+        summarizing, no annotation, and the same for a failure as for an
+        answer. The cap is ``tool_result_max_bytes`` like every other tool
+        result unless the caller names a smaller one (the plan file does,
+        P1.12.3).
+
+        Both halves carry ``initiator="scaffold"``, which no adapter reads
+        and no provider sees: it is transcript provenance only (P12), so
+        a synthesized turn can be told from a model turn without joining
+        against telemetry.
         """
-        capped = cap_tool_result(content, self._caps.tool_result_max_bytes, path=path_hint)
-        messages.append(AssistantMessage(text=None, tool_calls=(intent,)))
+        capped = cap_tool_result(
+            content,
+            self._caps.tool_result_max_bytes if max_bytes is None else max_bytes,
+            path=path_hint,
+        )
+        messages.append(
+            AssistantMessage(text=None, tool_calls=(intent,), initiator=INITIATOR_SCAFFOLD)
+        )
         messages.append(
             ToolResultMessage(
                 tool_call_id=intent.id,
                 content=capped.content,
                 is_error=not ok,
+                initiator=INITIATOR_SCAFFOLD,
             )
         )
         self._emit_tool_call(
@@ -488,9 +559,18 @@ class AgentLoop:
         what the agent wrote for itself is in front of it again.
 
         A missing file yields the normal not-found error result — visible,
-        not silent — and the contents pass through the normal truncation,
-        which means an agent that grows its plan past
-        ``tool_result_max_bytes`` is spending its own context (D1).
+        not silent.
+
+        The contents are cut at ``PLAN_FILE_MAX_BYTES`` rather than at
+        ``tool_result_max_bytes``, with the ordinary truncation marker and
+        re-read hint. The injected file is re-sent on EVERY call of every
+        session, so it is the one term of the fixed floor the agent itself
+        controls (D1) — and before this cap it could grow to 64 KiB and
+        sit there for the rest of the run. The number is stated in
+        ``prompts/planning.txt`` so it is a known mechanism rather than a
+        surprise, which is why it is a code constant and not a manifest
+        knob: a frozen asset cannot state a number an operator may change
+        (P13).
         """
         if not profile_at_least(self._scaffold.profile, PROFILE_PLANNING):
             return
@@ -511,70 +591,114 @@ class AgentLoop:
             duration_ms=(time.perf_counter() - start) * 1000,
             # Slice hint only where the result is re-readable (I16).
             path_hint=PLAN_PATH if ok else None,
+            max_bytes=PLAN_FILE_MAX_BYTES,
         )
 
-    def _inject_brief(self, messages: list[Message]) -> None:
-        """Query the daemon's compact roster once and inject it verbatim.
+    def _inject_journal(self, messages: list[Message]) -> None:
+        """Inject the PREVIOUS session's journal entry (SPEC P1.12, P15).
 
-        Runs before the first model call, so call 1 already carries the
-        account's own kami state instead of spending turns rediscovering
-        it. The answer enters context as a tool result — an assistant
-        turn holding the call, then its result — which is the shape a
-        model reads as "a read already happened". Nothing is summarized,
-        reordered, filtered, or annotated: the daemon envelope is
-        serialized compactly and passed through under the same byte cap
-        every tool result gets (P2), and the same is true of a failure.
+        Every profile. The scaffold writes one entry per session whatever
+        the model wrote for itself (P15); this puts the most recent one
+        back in front of the next session, which is what makes an agent's
+        own past self a known actor instead of an unexplained one — and
+        what makes a long gap between sessions perceptible at all. A
+        17-hour provider outage previously showed up nowhere: sessions
+        resumed with no sentence about elapsed time anywhere in context,
+        and it surfaced only later as starving kamis.
 
-        **This is a special path** (X22), and the previous version's
-        claim that it was not is retired. The roster is not a harness
-        tool: the scaffold speaks to the daemon itself, on its own
-        execution path, and the agent cannot issue this call. What the
-        agent keeps is the full per-kami detail on the harness's own
-        party report, unchanged.
+        **The last entry only.** The whole file stays readable — it is a
+        listed path in the file index with its byte size, and this
+        injection is an ordinary ``workspace_read`` carrying that entry's
+        own byte offset and length, which demonstrates the slicing call
+        without a word of advice about using it. One entry is a bounded
+        cost; the file is not, and spending call-1 context on the whole
+        history every session is the agent's decision to make, not the
+        scaffold's to make for it.
 
-        Degrade visibly, never block (SPEC X21): exactly one attempt, no
-        retry and no fallback content. A failure is injected as the
-        minimal machine-shaped error record it is, telemetered, and the
-        session proceeds — the failure is data, not a reason to abort.
-        A query error carries the daemon's own code and message; a
-        transport failure has no daemon text to quote, so its code is the
-        scaffold's and its message is the operating system's.
-
-        The brief consumes no ``session_tool_cap``, never advances the
-        consecutive-error counter, and never feeds the repetition breaker
-        (X20): those caps bound what the agent does. It is skipped
-        entirely when no daemon is configured, which leaves no telemetry.
+        Session 1 has no previous entry and no file, which yields the
+        ordinary not-found result — the same visible shape the plan read
+        has on a fresh run (P1.12.3, X21).
         """
-        if self._lens is None:
-            return
-        intent = ToolCall(id=BRIEF_CALL_ID, name=BRIEF_TOOL, args=dict(BRIEF_ARGS))
+        offsets = last_entry_slice(self._scaffold.run_dir)
+        args: dict[str, Any] = {"path": JOURNAL_PATH}
+        if offsets is not None:
+            args["offset"], args["length"] = offsets
+        intent = ToolCall(id=JOURNAL_CALL_ID, name=JOURNAL_TOOL, args=args)
         start = time.perf_counter()
-        stale: bool | None = None
-        block: int | None = None
         try:
-            envelope = self._lens.query(BRIEF_QUERY)
-        except LensError as exc:
-            # The record IS the failure text: no rewording, no advice.
-            raw = exc.as_record()
-            ok = False
-        else:
-            raw = json.dumps(envelope, ensure_ascii=False)
+            content = self._scaffold.execute(JOURNAL_TOOL, dict(args))
             ok = True
-            meta = envelope.get("meta")
-            if isinstance(meta, dict):
-                # Operator-side only (I1): recorded so analysis can see the
-                # brief was served from degraded state without reparsing the
-                # transcript. Never a separate agent-visible channel — the
-                # same values are already inside the injected envelope.
-                if isinstance(meta.get("stale"), bool):
-                    stale = meta["stale"]
-                if isinstance(meta.get("blockNumber"), int):
-                    block = meta["blockNumber"]
+        except ToolError as exc:
+            content = str(exc)
+            ok = False
         self._inject_pair(
             messages,
             intent,
-            source=SOURCE_LENS,
-            content=raw,
+            source=SOURCE_SCAFFOLD,
+            content=content,
+            ok=ok,
+            duration_ms=(time.perf_counter() - start) * 1000,
+            path_hint=JOURNAL_PATH if ok else None,
+        )
+
+    def _inject_brief(self, messages: list[Message]) -> None:
+        """Call the harness's compact-roster tool once and inject it verbatim.
+
+        Runs before the first model call, so call 1 already carries the
+        account's own kami state instead of spending turns rediscovering
+        it. The answer enters context as a tool result — an assistant turn
+        holding the call, then its result — which is the shape a model
+        reads as "a read already happened". Nothing is summarized,
+        reordered, filtered, or annotated: the harness's payload is passed
+        through under the same byte cap every tool result gets (P2), and
+        the same is true of a failure.
+
+        **It is not a special path.** Through 0.5.1 it was: the scaffold
+        read the daemon's socket itself and injected the answer under a
+        name the tool surface did not carry, so the agent saw a call in
+        its own transcript that it could not make. From 0.6.0 the pinned
+        harness serves the roster as an ordinary tool and this is a
+        scaffold-initiated call of it — the same relationship the
+        gas-balance injection has always had to the balance tool (X22
+        retired for the roster).
+
+        Degrade visibly, never block (SPEC X21): exactly one attempt, no
+        retry and no fallback content. A harness failure is injected as
+        the harness's own words, verbatim (D1, I21) — the scaffold no
+        longer authors any part of a failed brief, because there is no
+        longer a transport it owns. Skipped entirely when no harness is
+        configured, which leaves no telemetry.
+
+        The brief consumes no ``session_tool_cap``, never advances the
+        consecutive-error counter, and never feeds the repetition breaker
+        (X20): those caps bound what the agent does.
+        """
+        if self._game is None:
+            return
+        intent = ToolCall(id=BRIEF_CALL_ID, name=BRIEF_TOOL, args=dict(BRIEF_ARGS))
+        start = time.perf_counter()
+        try:
+            result = self._game.execute(BRIEF_TOOL, dict(BRIEF_ARGS))
+            content = result.content
+            ok = True
+        except ToolError as exc:
+            # The harness's own words (D1, I21): no rewording, no advice.
+            content = str(exc)
+            ok = False
+        except Exception as exc:
+            content = f"tool execution failed: {exc}"
+            ok = False
+        stale, block, data = _roster_provenance(content) if ok else (None, None, None)
+        # Kept for this session's journal entry (P15): the roster the
+        # session opened on, so a successor can see what changed rather
+        # than inferring it. Operator-side reuse of a value the agent
+        # already has — not a second read.
+        self._journal_roster = data
+        self._inject_pair(
+            messages,
+            intent,
+            source=SOURCE_HARNESS,
+            content=content,
             ok=ok,
             duration_ms=(time.perf_counter() - start) * 1000,
             lens_stale=stale,
@@ -605,6 +729,18 @@ class AgentLoop:
                 )
             except AdapterError as exc:
                 latency_ms = (time.perf_counter() - start) * 1000
+                # The artifact FIRST, before the telemetry row: it is the
+                # record that has to survive a host going away mid-outage,
+                # and the longer message lives only there (P14).
+                self._record_error(
+                    session_attempt=attempt,
+                    request_seq=request_seq,
+                    error_status=exc.status_code,
+                    error_type=exc.error_type,
+                    error_text=exc.text_for_log(),
+                    request_id=exc.request_id,
+                    retryable=exc.retryable,
+                )
                 # Failed attempt: usage unknowable, logged at cost 0 (P7.4).
                 self._llm_calls += 1
                 self._emit_llm_call(
@@ -621,13 +757,17 @@ class AgentLoop:
                     continuation=continuation,
                     request_seq=request_seq,
                     provider_request_id=exc.request_id,
+                    provider_error=True,
+                    error_status=exc.status_code,
+                    error_type=exc.error_type,
+                    error_text=exc.text_for_telemetry(),
                 )
                 if not exc.retryable or attempt >= self._caps.retry_max_attempts:
                     return None
                 self._sleep(min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * 2**attempt))
                 attempt += 1
                 continue
-            except Exception:
+            except Exception as exc:
                 # Anything the adapter did not normalize into an AdapterError
                 # — an SDK shape the adapter did not expect, a fault inside
                 # response parsing — after the provider has already been
@@ -639,6 +779,22 @@ class AgentLoop:
                 # model error already means (P5). Deliberately broad: the
                 # point is that no exception type can reintroduce the hole.
                 latency_ms = (time.perf_counter() - start) * 1000
+                # No provider status and no provider type exist here by
+                # definition — the fault was not normalized, so nothing
+                # claims to know what the API returned. The exception
+                # class goes INSIDE the text rather than into error_type,
+                # which is contracted to hold the provider's own token and
+                # would otherwise quietly mix two vocabularies.
+                text = _unnormalized_error_text(exc)
+                self._record_error(
+                    session_attempt=attempt,
+                    request_seq=request_seq,
+                    error_status=None,
+                    error_type=None,
+                    error_text=text[:ERROR_TEXT_LOG_CHARS],
+                    request_id=None,
+                    retryable=False,
+                )
                 self._llm_calls += 1
                 self._emit_llm_call(
                     input_tokens=0,
@@ -653,6 +809,10 @@ class AgentLoop:
                     usage_unknown=True,
                     continuation=continuation,
                     request_seq=request_seq,
+                    provider_error=True,
+                    error_status=None,
+                    error_type=None,
+                    error_text=text[:ERROR_TEXT_TELEMETRY_CHARS],
                 )
                 return None
             latency_ms = (time.perf_counter() - start) * 1000
@@ -715,6 +875,37 @@ class AgentLoop:
             )
             return response
 
+    def _record_error(
+        self,
+        *,
+        session_attempt: int,
+        request_seq: int,
+        error_status: int | None,
+        error_type: str | None,
+        error_text: str | None,
+        request_id: str | None,
+        retryable: bool,
+    ) -> None:
+        """Append one row to the persistent error artifact (SPEC P14).
+
+        Best-effort by construction: the writer swallows its own failures,
+        and a loop with no artifact configured simply skips this. A
+        diagnostic that can end a session is not a diagnostic.
+        """
+        if self._error_log is None:
+            return
+        self._error_log.record(
+            session=self._session,
+            model=self._model,
+            attempt=session_attempt,
+            request_seq=request_seq,
+            error_status=error_status,
+            error_type=error_type,
+            error_text=error_text,
+            request_id=request_id,
+            retryable=retryable,
+        )
+
     def _emit_llm_call(
         self,
         *,
@@ -734,6 +925,10 @@ class AgentLoop:
         provider_request_id: str | None = None,
         cache_write_5m_tokens: int | None = None,
         cache_write_1h_tokens: int | None = None,
+        provider_error: bool = False,
+        error_status: int | None = None,
+        error_type: str | None = None,
+        error_text: str | None = None,
     ) -> None:
         fields: dict[str, Any] = {
             "model": self._model,
@@ -763,6 +958,20 @@ class AgentLoop:
             fields["empty_response"] = True
         if provider_request_id is not None:
             fields["provider_request_id"] = provider_request_id
+        # What the provider said (P9). These three are emitted TOGETHER on
+        # every failed attempt and carry an explicit null where the
+        # provider served nothing — deliberately unlike every other
+        # optional field here, which is omitted when absent. The reason is
+        # that a failed call has to be distinguishable from a failed call
+        # nobody tried to characterize: with omission, "the provider sent
+        # no type" and "this row predates the field" look identical, and
+        # an outage is exactly when that distinction is needed. Recorded
+        # beside X18, whose opposite choice was made for a field with the
+        # opposite problem.
+        if provider_error:
+            fields["error_status"] = error_status
+            fields["error_type"] = error_type
+            fields["error_text"] = error_text
         # Cache-TTL decomposition of cache_write_tokens, where the provider
         # reports one (D2). Absent means the provider serves no split — not
         # that the split is zero.
@@ -809,8 +1018,15 @@ class AgentLoop:
             is_search = intent.name == SEARCH_TOOL_DEF.name
             if is_search:
                 self._scaffold.last_search = None
+            # Same clear-then-read-back discipline for the wait tool: a
+            # wait that never reached the handler must not inherit the
+            # previous wait's durations.
+            is_wait = intent.name == WAIT_TOOL
+            if is_wait:
+                self._scaffold.last_wait = None
             outcome = self._execute_intent(intent)
             search = self._scaffold.last_search if is_search else None
+            waited = self._scaffold.last_wait if is_wait else None
             messages.append(
                 ToolResultMessage(
                     tool_call_id=intent.id,
@@ -836,7 +1052,15 @@ class AgentLoop:
                 provider_call_id_duplicate=duplicate_id,
                 query=search[0] if search is not None else None,
                 hits=search[1] if search is not None else None,
+                wait_requested_s=waited[0] if waited is not None else None,
+                wait_actual_s=waited[1] if waited is not None else None,
             )
+            # Journal material (P15): the agent's OWN calls, and the
+            # transaction evidence its results carried. Accumulated here
+            # rather than at the injection sites, which is exactly why the
+            # injections never appear in it.
+            self._journal_tools[intent.name] += 1
+            self._collect_journal_txs(outcome)
             if outcome["ok"]:
                 self._consecutive_errors = 0
             else:
@@ -846,10 +1070,26 @@ class AgentLoop:
             if not self._scaffold.session_ended:
                 # Repetition breaker: evaluated after every executed call,
                 # ends the session exactly as tool_cap does (silent, I4).
-                trip = self._repetition.record(
-                    intent.name,
-                    intent.args,
-                    error_or_revert=outcome["error_or_revert"],
+                #
+                # The wait tool is excluded, and it is the only exclusion.
+                # Every breaker rule keys on repetition being evidence of
+                # an agent that has stopped getting anywhere — but waiting
+                # is the one call whose PURPOSE is to be issued again while
+                # nothing has changed, and sitting out a three-minute
+                # cooldown in clamped chunks is five identical signatures
+                # in a row. Counting it would end the session for using
+                # the tool correctly, which is the failure this tool was
+                # added to remove. It still consumes session_tool_cap
+                # below: a session must stay bounded, and that is the cap
+                # that bounds it.
+                trip = (
+                    None
+                    if is_wait
+                    else self._repetition.record(
+                        intent.name,
+                        intent.args,
+                        error_or_revert=outcome["error_or_revert"],
+                    )
                 )
                 if trip is not None:
                     self._repetition_trip = trip
@@ -859,6 +1099,25 @@ class AgentLoop:
                     self._carry_wake(calls[index + 1 :])
                     return REASON_TOOL_CAP
         return REASON_AGENT if self._scaffold.session_ended else None
+
+    def _collect_journal_txs(self, outcome: dict[str, Any]) -> None:
+        """Transaction hashes this call's result reported (SPEC P15).
+
+        Both nesting levels the harness uses: the single hash a one-
+        transaction result names, and the per-transaction receipts a
+        multi-transaction result carries in band. Order preserved,
+        duplicates dropped — the journal names which transactions this
+        session's calls produced, not how many times each was mentioned.
+        """
+        seen = set(self._journal_tx_hashes)
+        candidates = [outcome.get("tx_hash")]
+        for receipt in outcome.get("txs") or ():
+            if isinstance(receipt, dict):
+                candidates.append(receipt.get("tx_hash"))
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate and candidate not in seen:
+                seen.add(candidate)
+                self._journal_tx_hashes.append(candidate)
 
     def _execute_intent(self, intent: ToolCall) -> dict[str, Any]:
         source = self._source_of(intent.name)
@@ -900,7 +1159,7 @@ class AgentLoop:
         try:
             raw = self._run_with_timeout(intent)
         except _ToolTimeout:
-            return failure(f"tool call timed out after {self._caps.tool_timeout_s:g} seconds")
+            return failure(f"tool call timed out after {self._watchdog_s(intent.name):g} seconds")
         except ToolError as exc:
             # A harness ToolError may be a raised transaction outcome
             # (SPEC D1); a scaffold one never is.
@@ -937,10 +1196,25 @@ class AgentLoop:
             "error_shaped": error_shaped_payload(content),
         }
 
+    def _watchdog_s(self, name: str) -> float:
+        """How long this tool may run before the watchdog calls it hung (P2).
+
+        ``tool_timeout_s`` for everything except ``wait``, whose whole
+        contract is to block for up to ``wait_max_seconds`` — a bound that
+        may legitimately exceed the timeout meant to catch a hung harness
+        call, and did at both defaults (300 s against 120 s). Without this
+        the tool would time out while working exactly as specified, count
+        a consecutive error for it, and leave the sleeping thread behind.
+        The margin covers dispatch, never a second wait.
+        """
+        if name == WAIT_TOOL:
+            return self._caps.wait_max_seconds + _WAIT_WATCHDOG_MARGIN_S
+        return self._caps.tool_timeout_s
+
     def _run_with_timeout(
         self, intent: ToolCall
     ) -> tuple[str, str | None, str | None, tuple[dict[str, Any], ...]]:
-        """Run one intent in a watchdog thread (tool_timeout_s, P2)."""
+        """Run one intent in a watchdog thread (P2; see :meth:`_watchdog_s`)."""
 
         def dispatch() -> tuple[str, str | None, str | None, tuple[dict[str, Any], ...]]:
             if intent.name in self._scaffold.tool_names:
@@ -959,7 +1233,7 @@ class AgentLoop:
 
         thread = threading.Thread(target=target, daemon=True)
         thread.start()
-        thread.join(self._caps.tool_timeout_s)
+        thread.join(self._watchdog_s(intent.name))
         if not box:
             raise _ToolTimeout
         kind, value = box[0]
@@ -1003,6 +1277,8 @@ class AgentLoop:
         lens_block: int | None = None,
         query: str | None = None,
         hits: int | None = None,
+        wait_requested_s: float | None = None,
+        wait_actual_s: float | None = None,
     ) -> None:
         self._call_seq += 1
         fields: dict[str, Any] = {
@@ -1019,7 +1295,18 @@ class AgentLoop:
         }
         path = intent.args.get("path") if intent.name in _FILE_TOOLS else None
         if isinstance(path, str):
+            # The agent's own argument, verbatim (P9). Whether it typed a
+            # bare or a workspace/-prefixed path is a fact about the agent
+            # and is kept as one.
             fields["path"] = path
+            # What that argument actually named. The two differ whenever
+            # the agent prefixes a path, and reading `path` as if it were
+            # the file makes one file look like two trees — which is
+            # exactly what a run-006 analysis concluded before the disk
+            # was checked. Absent when the path resolved to nothing.
+            resolved = self._scaffold.resolve_rel(path)
+            if resolved is not None:
+                fields["path_resolved"] = resolved
         if error is not None:
             fields["error"] = error
         if skipped:
@@ -1048,6 +1335,13 @@ class AgentLoop:
         # back. Promoted out of the transcript on purpose — what an agent
         # looked for, and whether the tree answered, is the process
         # observable the knowledge-delivery family reads (P9).
+        # Waiting has to be analyzable: how long was asked for, and how
+        # long actually passed (P9, P10). Recorded as a pair because a
+        # clamp is only visible in the difference.
+        if wait_requested_s is not None:
+            fields["wait_requested_s"] = wait_requested_s
+        if wait_actual_s is not None:
+            fields["wait_actual_s"] = wait_actual_s
         if query is not None:
             fields["query"] = query
         if hits is not None:
@@ -1098,7 +1392,42 @@ class AgentLoop:
             messages=messages,
             repetition=self._repetition_trip,
             carried_wake=self._carried_wake,
+            journal_tools=dict(self._journal_tools),
+            journal_tx_hashes=list(self._journal_tx_hashes),
+            journal_roster=self._journal_roster,
         )
+
+
+def _roster_provenance(content: str) -> tuple[bool | None, int | None, Any]:
+    """Freshness and payload of a roster answer, best-effort (SPEC P9).
+
+    The daemon's envelope reaches the scaffold through the harness now, so
+    these are read out of the serialized result rather than off a response
+    object. Operator-side only (I1): the same values are already inside
+    the payload the agent was shown, and this only saves analysis a
+    transcript parse. Anything unparseable yields nothing — a harness free
+    to change its serialization must never be able to break a session over
+    a field nobody depends on.
+    """
+    try:
+        envelope = json.loads(content)
+    except (ValueError, TypeError):
+        return None, None, None
+    if not isinstance(envelope, dict):
+        return None, None, None
+    meta = envelope.get("meta")
+    stale = block = None
+    if isinstance(meta, dict):
+        if isinstance(meta.get("stale"), bool):
+            stale = meta["stale"]
+        if isinstance(meta.get("blockNumber"), int):
+            block = meta["blockNumber"]
+    return stale, block, envelope.get("data")
+
+
+def _unnormalized_error_text(exc: BaseException) -> str:
+    """A fault the adapter never turned into an AdapterError (SPEC P8)."""
+    return f"{type(exc).__name__}: {exc}"
 
 
 class _ToolTimeout(Exception):

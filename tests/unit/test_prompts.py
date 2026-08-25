@@ -29,7 +29,7 @@ The reference/ directory holds the game's design document. It is read-only.
 
 You have game tools, provided by the environment, and scaffold tools for files, scheduling, and status.
 
-You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now. You cannot wait or pause within a session. To wait for something, choose your next wake with set_next_wake and end the session with end_session.
+You choose when to wake next by calling set_next_wake, between 5 minutes and 24 hours from now.
 
 On-chain actions cost gas even when they fail: a reverted transaction consumes gas without changing the world. Diagnose why an action failed before submitting it again. Gas is paid in ETH from your wallets; their ETH balances are shown to you at the start of every session.
 """
@@ -43,13 +43,13 @@ CONTINUE = "Continue. To end this session, call end_session.\n"
 # design document at build time, and pinned by the family's design — a
 # reword here is a change to what those arms were measured on.
 ORIENTATION = """\
-You own kamis (creatures). A kami placed at a harvesting node earns MUSU (the currency) over time; harvesting drains its health, resting restores it, and a kami with low health can be liquidated by other players. MUSU buys items; food restores health. Harvesting earns experience; experience lets a kami level up, which grants a skill point spent on skills that change its stats. Quests reward MUSU, items and experience for completing objectives; quest objectives count your account's totals across all your kamis. Every on-chain action costs gas (ETH).
+You own kamis (creatures). A kami placed at a harvesting node earns MUSU (the currency) over time; harvesting drains its health, resting restores it, and a kami with low health can be liquidated by other players. MUSU buys items; food restores health. Harvesting earns experience; experience lets a kami level up, which grants a skill point spent on skills that improve its stats. Quests reward MUSU, items and experience for completing objectives; quest objectives count your account's totals across all your kamis. Every on-chain action costs gas (ETH).
 """
 
 # Appendix for the `planning` profile (P13). Mechanism about a file, not
 # advice about what to plan.
 PLANNING = """\
-The file workspace/plan.md is where your goals and plan live. Its contents are shown to you at the start of every session. Keeping it current is up to you.
+The file workspace/plan.md is where your goals and plan live. Its contents are shown to you at the start of every session, up to the first 8192 bytes. Keeping it current is up to you.
 """
 
 # I1: no budget, cost, tokens, compute limits, run duration, session caps,
@@ -165,51 +165,15 @@ def test_kickoff_and_continue_carry_no_dynamic_content():
         assert not any(ch.isdigit() for ch in text), f"{name} contains digits"
 
 
-# --- the one other agent-visible string the scaffold authors ------------------
+# --- the strings the injections author, and the ones they do not -------------
 #
-# A daemon that cannot be reached has no words of its own to quote, so the
-# session-start brief injects this record instead (SPEC X21, D7). It is the
-# only agent-visible text the scaffold composes outside the three prompts
-# above, so it is frozen on the same terms: reviewed wording, changed only
-# deliberately, in the commit that re-freezes it.
-
-
-def test_the_unavailable_lens_record_is_exactly_as_reviewed():
-    import json
-
-    from kami_agent.lens import LensUnavailableError
-
-    record = LensUnavailableError("cannot connect to /run/lens.sock: [Errno 2]").as_record()
-    assert record == (
-        '{"error": {"code": "LENS_UNAVAILABLE", '
-        '"message": "cannot connect to /run/lens.sock: [Errno 2]"}}'
-    )
-    # Machine-shaped, not prose: no advice, no judgement, no instruction to
-    # the agent about what to do next.
-    parsed = json.loads(record)
-    assert set(parsed) == {"error"}
-    assert set(parsed["error"]) == {"code", "message"}
-
-
-def test_the_scaffold_authors_only_the_code_of_that_record():
-    """The message half is the operating system's, verbatim."""
-    from kami_agent.lens import CODE_UNAVAILABLE, LensUnavailableError
-
-    os_text = "[Errno 111] Connection refused"
-    assert LensUnavailableError(os_text).message == os_text
-    assert CODE_UNAVAILABLE == "LENS_UNAVAILABLE"
-
-
-def test_the_unavailable_record_leaks_no_apparatus_vocabulary():
-    """I1 applies to it exactly as it does to the three prompts."""
-    from kami_agent.lens import LensUnavailableError
-
-    text = LensUnavailableError("socket error: broken pipe").as_record().lower()
-    for word in FORBIDDEN:
-        assert word not in text
-
-
-# --- the two strings 0.5.0 adds to that set ----------------------------------
+# Through 0.5.1 there was one more agent-visible string here: a daemon
+# that could not be reached had no words of its own to quote, so the
+# session-start brief composed a machine-shaped record instead, and that
+# record was frozen and scanned exactly like the prompts. It is gone at
+# 0.6.0 — the roster is a harness tool now, so a failed brief carries the
+# harness's own words like every other tool failure, and the scaffold
+# composes nothing for it at all.
 #
 # The gas-balance injection authors NO new string on its happy path (the
 # harness's payload) or its failure path (the harness's own words). The one

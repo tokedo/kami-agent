@@ -44,21 +44,40 @@ Design principles behind the contract:
    or cap information reaches it through any channel; forced endings are
    silent.
 7. **Closed world.** The agent's only channels are the harness tools, the
-   bundled read-only `reference/` tree, and its own `workspace/`.
+   bundled read-only `reference/` tree, its own `workspace/`, and the
+   read-only `journal/` the scaffold writes about its own past sessions.
 
 Every session opens with **session-start injections** (SPEC P1.12):
 before the first model call the scaffold performs a few reads and puts
 each into context as a completed tool call and its result, so a session
 starts already knowing where it stands rather than spending turns
-rediscovering it. In order: the compact **roster** of the account's kamis,
-read straight from the world-state daemon; the wallets' **gas balances**,
-read from the harness's own balance tool, because gas is the resource
-every action spends; and, on the profile that carries it, the agent's own
-**plan file**. They are state, not advice — passed through verbatim, one
-attempt each, degrading visibly rather than silently — and they bound
-nothing the agent does: no cap, no error counter, no breaker. Telemetry
-marks each with `initiator: scaffold`, so any measure of what the *agent*
-chose excludes them.
+rediscovering it. In order: the compact **roster** of the account's kamis
+and the wallets' **gas balances**, both read from the harness's own
+tools, because gas is the resource every action spends; on the profile that carries it, the agent's own
+**plan file**; and the previous session's **journal entry**. They are
+state, not advice — passed through verbatim, one attempt each, degrading
+visibly rather than silently — and they bound nothing the agent does: no
+cap, no error counter, no breaker. Telemetry marks each with
+`initiator: scaffold`, so any measure of what the *agent* chose excludes
+them.
+
+**The scaffold keeps a session journal** (SPEC P15). At the end of every
+session it appends one compact machine-written entry — session number,
+start and end times, **how long since the previous session ended**, which
+tools were called and how often, the transaction hashes the results
+carried, and the roster the session opened on — regardless of what the
+model wrote for itself. It exists because a session that acts and writes
+nothing makes the agent's own past self an unknown actor: successors were
+observed attributing their own harvest stops and item gains to
+"someone", and a 17-hour provider outage was invisible to every arm
+because nothing in context said any time had passed. The journal is a
+read-only third tree beside `workspace/` and `reference/`, listed in the
+file index with its size and never mentioned in any prompt, rolled to a
+size that always fits inside one read. It carries facts and never the
+apparatus: no budget, no caps, and — the one that matters — never the
+reason a session ended, because forced endings are silent and a journal
+that named them would say through the back door what that silence
+protects.
 
 **The scaffold itself is configurable as an experimental variable.** A
 manifest `scaffold_profile` selects one of five cumulative rungs —

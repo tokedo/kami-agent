@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kami_agent import journal
 from kami_agent.adapters.base import (
     AssistantMessage,
     Message,
@@ -34,14 +35,15 @@ from kami_agent.adapters.base import (
     ToolResultMessage,
     UserMessage,
 )
+from kami_agent.errorlog import ERRORS_FILENAME, ErrorLog
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
 from kami_agent.harness import HarnessError, tools_hash
+from kami_agent.lens import STATUS_QUERY, LensQuery
 from kami_agent.loop import (
     CARRIED_APPLIED,
     CARRIED_INVALID,
     AgentLoop,
     GameTools,
-    LensQuery,
     LoopCaps,
 )
 from kami_agent.state import (
@@ -140,7 +142,9 @@ def run_session(
         ):
             return NOT_DUE
 
-        with TelemetryWriter(telemetry_path, run_id=config.run_id, clock=clock) as writer:
+        error_log = ErrorLog(run_dir / ERRORS_FILENAME, run_id=config.run_id, clock=clock)
+        telemetry = TelemetryWriter(telemetry_path, run_id=config.run_id, clock=clock)
+        with telemetry as writer, error_log:
             # 2. Recover: unmatched session_start → synthetic crash end (P3).
             crashed = crashed_session(events)
             if crashed is not None:
@@ -179,6 +183,15 @@ def run_session(
                     **session_totals(events, crashed),
                 )
                 events.append(record)
+                # A crashed session wrote no journal entry of its own — the
+                # process died before session end. Without this the elapsed
+                # time the NEXT entry reports would silently span two
+                # sessions, which is the one number the journal exists to
+                # make honest (P15). Written from the folded stream, so it
+                # carries what telemetry knows and nothing it does not: the
+                # roster is absent, because the brief's answer lived only
+                # in a transcript that was never written.
+                _journal_crashed_session(run_dir, events, crashed, config.caps.journal_max_bytes)
             save_state(state, state_path)  # cache refresh from the fold
 
             if state.run_status == RUN_COMPLETE:
@@ -220,6 +233,7 @@ def run_session(
             return _run_one_session(
                 config=config,
                 adapter=adapter,
+                error_log=error_log,
                 harness_factory=harness_factory,
                 lens_factory=lens_factory,
                 trigger=trigger,
@@ -239,6 +253,7 @@ def _run_one_session(
     *,
     config: RunConfig,
     adapter: ModelAdapter,
+    error_log: ErrorLog,
     harness_factory: Callable[[], GameTools] | None,
     lens_factory: Callable[[], LensQuery] | None,
     trigger: str,
@@ -262,11 +277,16 @@ def _run_one_session(
         workspace_quota_bytes=config.workspace_quota_bytes,
         wake_min_minutes=config.wake_min_minutes,
         wake_max_minutes=config.wake_max_minutes,
+        wait_max_seconds=config.caps.wait_max_seconds,
         clock=clock,
         emit=lambda event, fields: writer.emit(event, session=session, **fields),
     )
 
-    def emit_session_start(hash_value: str, published: str | None = None) -> dict[str, Any]:
+    def emit_session_start(
+        hash_value: str,
+        published: str | None = None,
+        lens_provenance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         elapsed = 0.0
         if state.first_session_at is not None:
             elapsed = (clock() - datetime.fromisoformat(state.first_session_at)).total_seconds()
@@ -287,6 +307,10 @@ def _run_one_session(
         # different by construction (D1).
         if published is not None:
             fields["harness_tools_hash"] = published
+        # Which daemon actually served this session (D7). Operator-side
+        # only: session_start is not an agent-visible channel (P9, I1).
+        if lens_provenance:
+            fields.update(lens_provenance)
         return writer.emit("session_start", session=session, **fields)
 
     def emit_schedule(scaffold_tools: ScaffoldTools, carried_wake: str | None = None) -> None:
@@ -347,11 +371,16 @@ def _run_one_session(
     # an unreachable daemon is discovered by the brief and degrades there.
     lens = lens_factory() if lens_factory is not None else None
 
+    # Read before the session runs: this session appends its own entry at
+    # the end, and reading afterwards would measure the gap from itself.
+    previous_journal_end = journal.last_ended_at(run_dir)
+
     try:
         game_defs = list(game.tool_defs) if game is not None else []
         start_record = emit_session_start(
             tools_hash(game_defs + list(scaffold.tool_defs)),
             getattr(game, "harness_tools_hash", None),
+            _lens_provenance(lens),
         )
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
@@ -370,7 +399,6 @@ def _run_one_session(
             continuation_text=prompts["continue"],
             scaffold=scaffold,
             game=game,
-            lens=lens,
             telemetry=writer,
             session=session,
             params=config.params,
@@ -378,6 +406,7 @@ def _run_one_session(
             caps=config.caps,
             cumulative_usd=state.cumulative_usd,
             cumulative_tokens=state.cumulative_tokens,
+            error_log=error_log,
             **({"sleep": sleep} if sleep is not None else {}),
         )
         result = loop.run()
@@ -394,7 +423,29 @@ def _run_one_session(
         if result.repetition is not None:
             end_fields["repetition_rule"] = result.repetition.rule
             end_fields.update(result.repetition.fields)
-        writer.emit("session_end", session=session, **end_fields)
+        end_record = writer.emit("session_end", session=session, **end_fields)
+        # The session's own record, written whatever the model wrote for
+        # itself (P15). AFTER session_end so the entry's ended_at is the
+        # stream's own timestamp for the ending rather than a second
+        # reading of the clock, and BEFORE the transcript so an entry
+        # exists even if writing the transcript fails.
+        #
+        # `previous_ended_at` is read from the journal, not from the
+        # in-memory session: the whole point of the elapsed figure is that
+        # it survives a process that was not running in between.
+        journal.append(
+            run_dir,
+            journal.build_entry(
+                session=session,
+                started_at=start_record["ts"],
+                ended_at=end_record["ts"],
+                previous_ended_at=previous_journal_end,
+                tools=result.journal_tools,
+                tx_hashes=result.journal_tx_hashes,
+                roster=result.journal_roster,
+            ),
+            max_bytes=config.caps.journal_max_bytes,
+        )
         _write_transcript(run_dir, session, result.messages)
         state.cumulative_usd = result.cumulative_usd
         state.cumulative_tokens = result.cumulative_tokens
@@ -410,6 +461,113 @@ def _run_one_session(
             close = getattr(component, "close", None)
             if callable(close):
                 close()
+
+
+def _journal_crashed_session(
+    run_dir: Path,
+    events: list[dict[str, Any]],
+    session: int,
+    max_bytes: int,
+) -> None:
+    """Journal a session that died before it could journal itself (P15, P3).
+
+    Idempotent like every other part of recovery: a session already in the
+    journal is left alone, so a second pass writes nothing.
+
+    Built from the folded stream, which bounds what it can say. Tool
+    counts come from the session's own ``initiator: model`` rows and the
+    transaction hashes from their ``tx_hash`` / ``txs`` fields — both
+    exact. The roster is absent: the brief's answer was only ever in a
+    transcript, and a crashed session never wrote one.
+    """
+    if journal.has_session(run_dir, session):
+        return
+    rows = [e for e in events if e.get("session") == session]
+    started = next((e["ts"] for e in rows if e.get("event") == "session_start"), None)
+    ended = next(
+        (e["ts"] for e in reversed(rows) if e.get("event") == "session_end"),
+        started,
+    )
+    if started is None or ended is None:
+        return
+    tools: dict[str, int] = {}
+    tx_hashes: list[str] = []
+    for row in rows:
+        if row.get("event") != "tool_call" or row.get("initiator") != "model":
+            continue
+        name = row.get("tool")
+        if isinstance(name, str):
+            tools[name] = tools.get(name, 0) + 1
+        for candidate in [row.get("tx_hash"), *(_tx_hashes_of(row))]:
+            if isinstance(candidate, str) and candidate and candidate not in tx_hashes:
+                tx_hashes.append(candidate)
+    journal.append(
+        run_dir,
+        journal.build_entry(
+            session=session,
+            started_at=started,
+            ended_at=ended,
+            previous_ended_at=journal.last_ended_at(run_dir),
+            tools=tools,
+            tx_hashes=tx_hashes,
+        ),
+        max_bytes=max_bytes,
+    )
+
+
+def _tx_hashes_of(row: dict[str, Any]) -> list[Any]:
+    return [r.get("tx_hash") for r in row.get("txs") or () if isinstance(r, dict)]
+
+
+# The daemon query that answers "which lens served this run?" (SPEC D7).
+# A general query on the daemon's own registry, not a special path: it
+# takes no arguments, needs no mirror, and is answered during bootstrap
+# as readily as when live.
+_LENS_STATUS_QUERY = "status"
+
+
+def _lens_provenance(lens: LensQuery | None) -> dict[str, Any]:
+    """One operator-side `status` query: which daemon is serving (SPEC D7).
+
+    A run's live daemon version was recorded NOWHERE, so a host running a
+    different build than its manifest pins was invisible in the record and
+    could only be caught by looking at the host while the run was still
+    up. The roster brief's own envelope cannot answer this — its meta
+    carries block number, staleness and mode, and no identity at all — so
+    this is a second query, and the only one the scaffold makes that the
+    agent never sees any part of.
+
+    Never agent-visible, never injected, never a tool_call row: it lands
+    on session_start, which is telemetry (P9, I1).
+
+    Degrades to nothing. One attempt, no retry (X21), every failure
+    swallowed: a daemon that cannot answer must not cost a session, and
+    absence here is read as "not recorded", never as agreement with the
+    manifest's pin (N10).
+    """
+    if lens is None:
+        return {}
+    try:
+        envelope = lens.query(STATUS_QUERY)
+    except Exception:
+        # Deliberately broad, for the same reason P8's unnormalized catch
+        # is: no failure of a diagnostic read may reach the session.
+        return {}
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    config = data.get("config")
+    config = config if isinstance(config, dict) else {}
+    fields: dict[str, Any] = {}
+    if isinstance(data.get("version"), str):
+        fields["lens_version"] = data["version"]
+    if isinstance(data.get("upstreamPin"), str):
+        fields["lens_upstream_pin"] = data["upstreamPin"]
+    if isinstance(config.get("enrich"), bool):
+        fields["lens_enrich"] = config["enrich"]
+    if config.get("defaultOperator") is not None:
+        fields["lens_default_operator"] = str(config["defaultOperator"])
+    return fields
 
 
 def _load_prompts(run_dir: Path, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
@@ -468,6 +626,13 @@ def _message_dict(message: Message) -> dict[str, Any]:
                 {"id": c.id, "name": c.name, "args": c.args} for c in message.tool_calls
             ],
         }
+        if message.initiator is not None:
+            # The one key in a transcript that was never sent to the
+            # provider (P12). A session-start injection is a real assistant
+            # turn in context — that is what makes the model read it as a
+            # completed call — but it is not a turn the model produced, and
+            # without this nothing in the file says so.
+            entry["initiator"] = message.initiator
         if message.provider_state is not None:
             # Transcripts record messages as sent (I17); telemetry never
             # carries provider state.
@@ -477,12 +642,15 @@ def _message_dict(message: Message) -> dict[str, Any]:
             }
         return entry
     if isinstance(message, ToolResultMessage):
-        return {
+        result: dict[str, Any] = {
             "role": "tool_result",
             "tool_call_id": message.tool_call_id,
             "content": message.content,
             "is_error": message.is_error,
         }
+        if message.initiator is not None:
+            result["initiator"] = message.initiator
+        return result
     raise TypeError(f"unknown message type: {message!r}")
 
 

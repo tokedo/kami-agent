@@ -42,16 +42,16 @@ from pathlib import Path
 import pytest
 
 from kami_agent.adapters.anthropic import AnthropicAdapter
-from kami_agent.adapters.base import ToolDef
+from kami_agent.adapters.base import SamplingParams, ToolDef
 from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient, tools_hash
-from kami_agent.lens import LensClient, LensUnavailableError
+from kami_agent.lens import ROSTER_QUERY, STATUS_QUERY, LensClient, LensUnavailableError
 from kami_agent.loop import (
     BALANCE_TOOL,
-    BRIEF_QUERY,
     BRIEF_TOOL,
+    JOURNAL_TOOL,
     PLAN_PATH,
     PLAN_TOOL,
     GameToolResult,
@@ -162,9 +162,50 @@ _STEP_4 = (
 SMOKE_PROFILE = os.environ.get("KAMI_SMOKE_PROFILE", DEFAULT_PROFILE)
 
 # The session-start injections this run performs, in order (SPEC P1.12).
-INJECTED_TOOLS = [BRIEF_TOOL, BALANCE_TOOL] + (
-    [PLAN_TOOL] if profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING) else []
+# The journal read is last and runs on every profile.
+INJECTED_TOOLS = (
+    [BRIEF_TOOL, BALANCE_TOOL]
+    + ([PLAN_TOOL] if profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING) else [])
+    + [JOURNAL_TOOL]
 )
+
+
+def smoke_params():
+    """The sampling parameters this tier sends (SPEC D3).
+
+    Unset knobs leave the tier exactly as it was: ``max_tokens=4096``,
+    no temperature, no reasoning effort. The point of the knobs is that a
+    manifest's frozen params can be sent VERBATIM before a launch — the
+    tier previously sent adapter defaults, so a request shape the provider
+    rejects passed every pre-launch check and failed only in production.
+
+    Precedence: an explicit env knob, then the manifest's ``params:``
+    block, then the default.
+    """
+    manifest_params: dict = {}
+    manifest_path = os.environ.get("KAMI_SMOKE_MANIFEST")
+    if manifest_path:
+        import yaml
+
+        loaded = yaml.safe_load(Path(manifest_path).read_text(encoding="utf-8")) or {}
+        manifest_params = loaded.get("params") or {}
+
+    def pick(env_name, key, cast):
+        raw = os.environ.get(env_name)
+        if raw is not None and raw != "":
+            return cast(raw)
+        value = manifest_params.get(key)
+        return None if value is None else cast(value)
+
+    max_tokens = pick("KAMI_SMOKE_MAX_TOKENS", "max_tokens", int)
+    return SamplingParams(
+        max_tokens=4096 if max_tokens is None else max_tokens,
+        temperature=pick("KAMI_SMOKE_TEMPERATURE", "temperature", float),
+        reasoning_effort=pick("KAMI_SMOKE_REASONING_EFFORT", "reasoning_effort", str),
+    )
+
+
+SMOKE_PARAMS = smoke_params()
 
 # Test-only kickoff (the frozen production one is "Session start."). The
 # opening paragraph is load-bearing. The session-start injections put
@@ -232,11 +273,29 @@ EXPECTED_SEQUENCE = [
 ]
 
 
+# The roster tool the session-start brief calls (SPEC P1.12). The
+# committed fixture is the 2.2.0 surface, which predates it, and the
+# fixture deliberately stays there: it is the recorded surface of the
+# harness ref this repo pins today, and re-recording it is a release duty,
+# not a test convenience. So the fake ADDS this definition — the shape the
+# 3.0.0 surface serves — which keeps the recorded-surface assertions
+# measuring the recorded surface while still exercising the brief.
+ROSTER_DEF = ToolDef(
+    name=BRIEF_TOOL,
+    description=("Compact roster: one line per kami (index, state, HP) plus where the account is."),
+    input_schema={
+        "type": "object",
+        "properties": {"account_index": {"type": "integer", "default": -1}},
+    },
+)
+
+
 class RecordedFakeHarness:
     """Serves the recorded real tool surface; execution is simulated."""
 
     def __init__(self):
         surface = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        self.brief = _brief_fixture(BRIEF_KAMIS)
         self.tool_defs = [
             ToolDef(
                 name=t["name"],
@@ -245,10 +304,22 @@ class RecordedFakeHarness:
             )
             for t in surface["tools"]
         ]
-        self.recorded_hash = surface["tools_hash"]
+        if BRIEF_TOOL not in {t.name for t in self.tool_defs}:
+            self.tool_defs.append(ROSTER_DEF)
+        # This scaffold's serialization of the HARNESS tools alone. It is
+        # NOT a session's session_start.tools_hash, which also spans the
+        # scaffold surface — the two were both called `tools_hash` in this
+        # fixture until 0.6.0, and one name over two quantities produced a
+        # false-alarm class at run reconciliation (SPEC D1).
+        self.recorded_hash = surface["harness_only_tools_hash"]
         self.harness_tools_hash = surface.get("harness_published_tools_hash")
 
     def execute(self, name, args):
+        if name == BRIEF_TOOL:
+            # A real-shaped envelope: the brief is part of call 1, so a
+            # error record here would make the reported floor a
+            # measurement of an error record instead.
+            return GameToolResult(content=json.dumps(self.brief["envelope"], ensure_ascii=False))
         if not name.startswith(("get_", "list_")):
             raise ToolError(f"{name} is not available")
         return GameToolResult(content=json.dumps({"ok": True, "simulated": True, "tool": name}))
@@ -258,21 +329,29 @@ class RecordedFakeHarness:
 
 
 class RecordedFakeLens:
-    """Answers the brief's roster query from the committed fixture.
+    """Answers the operator-side provenance query (SPEC D7).
 
-    The answer has to be a real-shaped envelope or the floor it
-    contributes to is a measurement of an error record instead.
+    The daemon serves exactly one thing to the scaffold from 0.6.0: which
+    daemon it is. The roster moved onto the harness surface, so nothing
+    the AGENT sees comes through here any more.
     """
 
     def __init__(self):
-        self.brief = _brief_fixture(BRIEF_KAMIS)
         self.queries = []
 
     def query(self, name, args=None):
         self.queries.append((name, args))
-        if name != BRIEF_QUERY:
-            raise LensUnavailableError(f"the fixture serves only {BRIEF_QUERY!r}")
-        return self.brief["envelope"]
+        if name != STATUS_QUERY:
+            raise LensUnavailableError(f"the fixture serves only {STATUS_QUERY!r}")
+        return {
+            "data": {
+                "version": "0.4.0",
+                "upstreamPin": "fixture",
+                "config": {"enrich": False, "defaultOperator": 7},
+            },
+            "untrusted": [],
+            "meta": {"blockNumber": 8814052, "stale": False, "mode": "daemon"},
+        }
 
 
 class LiveLens:
@@ -395,6 +474,9 @@ def test_canned_session(provider, run_dir):
             # retry_max_attempts=8: backoff must outlast a 60 s free-tier quota
             # window (observed: gemini 429s for >31 s, the default-5 span).
             caps=LoopCaps(session_token_cap=150_000, session_tool_cap=12, retry_max_attempts=8),
+            # The manifest's own frozen params when one is named, so this
+            # tier exercises the request SHAPE a run will actually send.
+            params=SMOKE_PARAMS,
             budget_usd=5.0,
             scaffold_profile=SMOKE_PROFILE,
         )
@@ -467,11 +549,13 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     assert [e["tool"] for e in injections] == INJECTED_TOOLS, (
         f"{provider}: injections {[e['tool'] for e in injections]}, expected {INJECTED_TOOLS}"
     )
-    assert injections[0]["source"] == "lens"
+    # Both come off the harness from 0.6.0: the roster brief moved onto
+    # the tool surface, so `source` no longer separates the injections and
+    # the scaffold only ever pre-calls tools the agent could call itself
+    # (D1; X22 retired).
+    assert injections[0]["source"] == "harness"
     assert injections[1]["source"] == "harness"
-    assert BRIEF_TOOL not in {t.name for t in harness.tool_defs}
-    # The balance tool, unlike the brief, IS on the surface: the scaffold
-    # pre-called a tool the agent could call itself (D1, X22 does not apply).
+    assert BRIEF_TOOL in {t.name for t in harness.tool_defs}
     assert BALANCE_TOOL in {t.name for t in harness.tool_defs}
     assert tool_events[: len(injections)] == injections, (
         f"{provider}: the injections were not the first tool calls"
@@ -495,9 +579,12 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
         assert result["role"] == "tool_result"
     brief_content = transcript[2]["content"]
     balance_content = transcript[4]["content"]
-    plan_content = transcript[6]["content"] if len(INJECTED_TOOLS) > 2 else ""
-    if isinstance(lens, RecordedFakeLens):
-        assert brief_content == json.dumps(lens.brief["envelope"], ensure_ascii=False)
+    # The plan read is present only on `planning`; the journal read is
+    # always last, so the plan cannot be found by position from the end.
+    plan_content = transcript[6]["content"] if PLAN_TOOL in INJECTED_TOOLS else ""
+    journal_content = transcript[2 * len(INJECTED_TOOLS)]["content"]
+    if isinstance(harness, RecordedFakeHarness):
+        assert brief_content == json.dumps(harness.brief["envelope"], ensure_ascii=False)
 
     # Tier gate: all tool calls parsed natively → each canned step executed ok.
     executed = [e["tool"] for e in model_events if e["ok"]]
@@ -513,7 +600,15 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     ok_llm = [e for e in llm_events if not e.get("usage_unknown")]
     assert ok_llm, f"{provider}: no successful llm_call events"
     assert ok_llm[0]["input_tokens"] > 0
-    assert ok_llm[0]["output_tokens"] > 0
+    # Output tokens are asserted across the session, not on the first call.
+    # Gemini has twice returned a tool-call-only turn reporting ZERO output
+    # tokens — a provider flake, not a scaffold fault and not something any
+    # run depends on. What this gate is actually for is that usage
+    # accounting is real, so it is enough that the first call billed input
+    # and that the session produced output somewhere.
+    assert sum(e["output_tokens"] for e in ok_llm) > 0, (
+        f"{provider}: no output tokens in any successful call"
+    )
     session_end = next(e for e in events if e["event"] == "session_end")
     assert session_end["reason"] == "agent"
     assert session_end["session_cost_usd"] > 0
@@ -580,17 +675,21 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     # The brief is part of call 1, so it is part of the floor. Its size is a
     # function of roster size and nothing else — quote both, so a floor
     # measured at one roster converts to any other.
-    kami_count = lens.brief["kami_count"] if isinstance(lens, RecordedFakeLens) else "live"
+    kami_count = harness.brief["kami_count"] if isinstance(harness, RecordedFakeHarness) else "live"
     print(
         f"\nSMOKE[{provider}] model={model} "
         f"scaffold_profile={SMOKE_PROFILE} "
+        f"max_tokens={SMOKE_PARAMS.max_tokens} "
+        f"temperature={SMOKE_PARAMS.temperature} "
+        f"reasoning_effort={SMOKE_PARAMS.reasoning_effort} "
         f"fixed_floor_input_tokens={ok_llm[0]['input_tokens']} "
         f"surface_hash={tools_hash(list(harness.tool_defs))} "
         f"tools_hash={next(e for e in events if e['event'] == 'session_start')['tools_hash']} "
-        f"brief_query={BRIEF_QUERY} brief_ok={injections[0]['ok']} "
+        f"brief_tool={BRIEF_TOOL} brief_ok={injections[0]['ok']} "
         f"brief_chars={len(brief_content)} brief_kamis={kami_count} "
         f"balance_ok={injections[1]['ok']} balance_chars={balance_chars} "
         f"plan_file_chars={plan_file_chars} "
+        f"journal_chars={len(journal_content)} "
         f"system_chars={system_chars} orientation_chars={orientation_chars} "
         f"planning_chars={planning_chars} kickoff_chars={len(KICKOFF)} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
@@ -619,7 +718,7 @@ def test_recorded_surface_matches_hash():
         ToolDef(name=t["name"], description=t["description"], input_schema=t["input_schema"])
         for t in surface["tools"]
     ]
-    assert tools_hash(defs) == surface["tools_hash"]
+    assert tools_hash(defs) == surface["harness_only_tools_hash"]
 
 
 def test_brief_fixture_is_internally_consistent():
@@ -650,7 +749,9 @@ def test_brief_fixture_is_internally_consistent():
     assert doubled["envelope_chars"] > brief["envelope_chars"]
     # It must be the shape the brief actually asks for, and carry the
     # coverage the brief exists to deliver.
-    assert brief["query"] == BRIEF_QUERY
+    # The fixture records the DAEMON query name; the harness tool that
+    # wraps it is BRIEF_TOOL, and the envelope it returns is this one.
+    assert brief["query"] == ROSTER_QUERY
     assert set(brief["envelope"]) == {"data", "untrusted", "meta"}
     # The compact roster carries no authored strings at all, by design, so
     # its untrusted path list is empty and stays empty in name-free mode.
@@ -703,4 +804,4 @@ def test_recorded_surface_matches_the_live_harness():
         or t.input_schema != by_name[t.name]["input_schema"]
     ]
     assert not drifted, f"description/schema drift in: {drifted}"
-    assert tools_hash(live) == recorded["tools_hash"]
+    assert tools_hash(live) == recorded["harness_only_tools_hash"]

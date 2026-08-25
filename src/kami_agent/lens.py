@@ -44,12 +44,20 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 # The daemon's socket file name inside its data directory. Mirrors the
 # daemon's own constant and the harness client's default resolution, so
 # the brief and the harness's world-state tools cannot end up talking to
 # two different daemons on one host.
+# The daemon registry name of the compact roster. The scaffold reads it
+# directly only at bring-up (`init`'s connectivity check); a SESSION's
+# roster comes off the harness surface from 0.6.0 (loop.BRIEF_TOOL).
+ROSTER_QUERY = "roster"
+
+# The daemon's own identity query, answered before the mirror is built.
+STATUS_QUERY = "status"
+
 SOCKET_NAME = "kami-lens.sock"
 
 # Override for the resolved default (same variable the harness reads).
@@ -92,24 +100,35 @@ def resolve_socket_path(configured: str | None = None) -> str:
     return os.environ.get(LENS_SOCKET_ENV) or default_socket_path()
 
 
+@runtime_checkable
+class LensQuery(Protocol):
+    """The daemon surface the scaffold needs (implemented below).
+
+    One method, because from 0.6.0 the scaffold asks the daemon exactly
+    one thing of its own: which daemon it is (D7). Everything the AGENT
+    perceives — the roster included, which used to be read here — now
+    arrives through the harness.
+    """
+
+    def query(self, name: str, args: list[Any] | None = None) -> dict[str, Any]: ...
+
+
 class LensError(Exception):
     """A lens query did not produce an envelope.
 
-    ``as_record`` renders the failure as the minimal machine-shaped
-    record injected into the session in place of the envelope. Nothing
-    else about a failure is authored: for a query error both fields are
-    the daemon's, and for a transport failure only ``code`` is ours.
+    No longer rendered into anything the agent sees. Through 0.5.1 a
+    failure here was injected into the session as a machine-shaped record,
+    which made the transport code the single agent-visible string this
+    scaffold authored. From 0.6.0 the only query the scaffold makes is the
+    operator-side provenance read (D7), whose failure is recorded as
+    absence and shown to nobody — so the scaffold now authors no
+    agent-visible string at all.
     """
 
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
-
-    def as_record(self) -> str:
-        return json.dumps(
-            {"error": {"code": self.code, "message": self.message}}, ensure_ascii=False
-        )
 
 
 class LensQueryError(LensError):
