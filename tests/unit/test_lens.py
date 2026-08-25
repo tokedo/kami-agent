@@ -158,17 +158,12 @@ def test_query_error_passes_the_daemons_code_and_message_through(daemon):
         LensClient(d.path).query("roster")
     assert exc.value.code == "BAD_ARGS"
     assert exc.value.message == "account index must be an integer"
-    # The injected record is the daemon's words, not ours.
-    assert json.loads(exc.value.as_record()) == {
-        "error": {"code": "BAD_ARGS", "message": "account index must be an integer"}
-    }
 
 
 def test_absent_socket_is_unavailable_not_an_empty_answer(tmp_path):
     with pytest.raises(LensUnavailableError) as exc:
         LensClient(str(tmp_path / "nothing.sock")).query("roster")
     assert exc.value.code == CODE_UNAVAILABLE
-    assert json.loads(exc.value.as_record())["error"]["code"] == CODE_UNAVAILABLE
 
 
 def test_a_daemon_that_closes_without_answering_is_unavailable(daemon):
@@ -196,17 +191,22 @@ def test_an_unparseable_line_is_unavailable_not_a_crash(daemon):
     assert "unparseable JSON" in exc.value.message
 
 
-def test_every_failure_renders_the_same_record_shape(daemon):
-    """One shape for both classes: a reader never parses prose to tell them apart."""
+def test_both_failure_classes_carry_a_code_and_a_message(daemon):
+    """One shape for both classes: a reader never parses prose to tell them apart.
+
+    Neither reaches the agent any more — from 0.6.0 the scaffold's only
+    daemon query is the operator-side provenance read, whose failure is
+    recorded as absence (D7) — so this is a caller-facing contract now
+    rather than an agent-visible one.
+    """
     d = daemon(lambda req: (json.dumps({"id": 1, "ok": False}) + "\n").encode())
     with pytest.raises(LensQueryError) as query_error:
-        LensClient(d.path).query("roster")
+        LensClient(d.path).query("status")
     with pytest.raises(LensUnavailableError) as transport_error:
-        LensClient("/nonexistent/kami-lens.sock").query("roster")
+        LensClient("/nonexistent/kami-lens.sock").query("status")
     for exc in (query_error.value, transport_error.value):
-        record = json.loads(exc.as_record())
-        assert set(record) == {"error"}
-        assert set(record["error"]) == {"code", "message"}
+        assert isinstance(exc.code, str) and exc.code
+        assert isinstance(exc.message, str)
 
 
 # --- socket path resolution ----------------------------------------------------

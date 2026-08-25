@@ -1,8 +1,14 @@
 # Full live-harness smoke (README, Verification tier 4) against a REAL
 # kami-harness checkout at the pinned SHA. Never gates PRs: runs on manual
-# dispatch and a weekly cron. Run it manually before tagging a release and
-# on any harness pin bump — chain-RPC flakiness must not block unrelated
-# PRs, and the pinned harness cannot drift under CI.
+# dispatch ONLY. Run it manually before tagging a release and on any
+# harness pin bump — chain-RPC flakiness must not block unrelated PRs, and
+# the pinned harness cannot drift under CI.
+#
+# The weekly cron was removed at 0.6.0. It billed real provider calls on
+# org keys every Monday for a surface no live run was using, and a
+# provider flake mailed a red build nobody was going to act on. Re-enable
+# the schedule around a live window if a standing signal is wanted there;
+# outside one it is spend without a reader.
 #
 # Uses list_accounts as the read-only harness tool: the CI checkout has no
 # wallet or Kamibots API keys, so account-authenticated reads (get_nodes)
@@ -13,11 +19,24 @@ name: live-harness-smoke
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+
+# NOTE for the next harness release: this scaffold requires a surface
+# serving `lens_roster` and refuses loop construction without one (SPEC
+# D1). The pin below is 2.2.0, which predates that tool, so the canned
+# session in this workflow will refuse until this pin moves to the
+# harness release that adds it — and the committed fixture must be
+# re-recorded at the same ref (scripts/record_harness_surface.py). The
+# default per-PR smoke tier is unaffected: its fake harness serves the
+# tool from a synthetic definition.
 
 env:
-  HARNESS_PIN: ba62fc9f81ee383056b03cf7c496a3e94921d99c # 2.1.0 surface (ba62fc9)
+  # 2.2.0 (7c6a7ba). The tool SURFACE is byte-identical to 2.1.0's — same
+  # 101 tools, same descriptions and schemas, same registry mass, same
+  # published hash — because 2.2.0's change is to error RESULTS behind a
+  # runtime flag, not to the registry. The committed fixture was
+  # re-recorded at this ref (scripts/record_harness_surface.py) and the
+  # live-vs-recorded assertions below hold across the bump.
+  HARNESS_PIN: 7c6a7bab79e08dececdcfdcb2cf04e88e73e5958 # 2.2.0 surface (7c6a7ba)
 
 jobs:
   live:

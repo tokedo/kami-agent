@@ -133,6 +133,7 @@ def test_list_no_path_full_workspace_and_collapsed_reference(tools):
     assert listing.splitlines() == [
         "workspace/a/x.md 1",
         "workspace/b.md 4",
+        "journal/ 0 files, 0 bytes, read-only",
         "reference/ 2 files, 150 bytes, read-only",
     ]
 
@@ -141,6 +142,7 @@ def test_list_empty_workspace(tools):
     listing = tools.execute("workspace_list", {})
     assert listing.splitlines() == [
         "workspace/ (empty)",
+        "journal/ 0 files, 0 bytes, read-only",
         "reference/ 2 files, 150 bytes, read-only",
     ]
 
@@ -261,6 +263,7 @@ def test_tool_defs_cover_spec_surface():
         "set_next_wake",
         "get_status",
         "end_session",
+        "wait",
     }
     for tool in SCAFFOLD_TOOL_DEFS:
         assert tool.input_schema["type"] == "object"

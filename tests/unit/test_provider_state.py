@@ -253,8 +253,12 @@ def test_loop_copies_state_verbatim_without_inspecting(tmp_path):
         sleep=lambda s: None,
     )
     loop.run()
-    replayed = adapter.requests[1][1]
-    assert isinstance(replayed, AssistantMessage)
+    # The model's own turns, not the session-start injections the loop
+    # synthesizes ahead of them (P1.12) — those carry no provider state
+    # and never could.
+    replayed = next(
+        m for m in adapter.requests[1] if isinstance(m, AssistantMessage) and m.initiator is None
+    )
     assert replayed.provider_state is state  # the same object, uninspected
     # Telemetry never carries provider state (I17).
     for event in read_events(tmp_path / "t.jsonl"):

@@ -23,6 +23,14 @@ caps: # SPEC D3 (session_token_cap sized per model — no default)
   retry_max_attempts: 5
   tool_timeout_s: 120
   tool_result_max_bytes: 65536
+  wait_max_seconds: 300 # upper bound on ONE `wait` call (SPEC P10); the wait
+    # tool is exempt from the watchdog above, which exists to catch a hung
+    # harness call and would otherwise kill a wait that ran its full clamp.
+    # Worst-case in-session waiting is session_tool_cap x this — size the
+    # two together (SPEC P5, D1)
+  journal_max_bytes: 32768 # rolling bound on run/journal/sessions.jsonl (SPEC
+    # P15). Below tool_result_max_bytes on purpose: reading the WHOLE journal
+    # in one call is then never truncated
   repetition_identical_cap: 5 # repetition breaker: consecutive identical calls (same signature)
   repetition_window: 30 # repetition breaker: trailing-call window size
   repetition_min_distinct: 4 # repetition breaker: distinct-signature floor in a full window
@@ -65,13 +73,16 @@ harness: # spawned per session as a stdio child (SPEC D1)
   cwd: /opt/kami-harness
   handshake_timeout_s: 60
 
-# World-state daemon, read DIRECTLY by the session-start brief (SPEC D7).
-# The harness reads the same daemon over the same socket for every
-# world-state tool, so these must name the same one.
+# World-state daemon (SPEC D7). From 0.6.0 the scaffold reads it directly
+# for ONE thing: which daemon is serving, recorded on every session_start
+# so a host running a different build than this manifest pins is visible
+# in the record. Everything the agent perceives — the session-start
+# roster included — arrives through the harness, which reads the same
+# daemon over the same socket, so these must name the same one.
 # socket_path unset resolves KAMI_LENS_SOCKET, then the platform default.
-# The brief sends no account argument: the daemon fills it from its own
-# configured default operator, and until that is set the brief degrades
-# visibly every session, which is the expected early-run shape.
+# The roster tool sends no account argument: the daemon fills it from its
+# own configured default operator, and until that is set the brief
+# degrades visibly every session, which is the expected early-run shape.
 lens:
   socket_path: null
   timeout_s: 30

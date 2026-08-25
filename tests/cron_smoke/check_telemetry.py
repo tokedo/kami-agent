@@ -11,26 +11,47 @@ scheduled. Every event is re-validated against the telemetry schema.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
-from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, PLAN_PATH, PLAN_TOOL
+from kami_agent import journal
+from kami_agent.journal import JOURNAL_PATH
+from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, JOURNAL_TOOL, PLAN_PATH, PLAN_TOOL
 from kami_agent.telemetry import read_events, validate_event
 
 EXPECTED_END_REASONS = {"agent"}
 
 # The session-start injections each profile performs, in order (SPEC
-# P1.12): the roster from the daemon and the wallets' gas balances from the
-# harness on every profile, plus the plan file on `planning`.
+# P1.12): the roster from the daemon, the wallets' gas balances from the
+# harness and the previous session's journal entry on every profile, plus
+# the plan file on `planning`.
 INJECTIONS = {
-    "control": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
-    "orientation": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
-    "search": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
-    "pushed": [(BRIEF_TOOL, "lens"), (BALANCE_TOOL, "harness")],
+    "control": [
+        (BRIEF_TOOL, "harness"),
+        (BALANCE_TOOL, "harness"),
+        (JOURNAL_TOOL, "scaffold"),
+    ],
+    "orientation": [
+        (BRIEF_TOOL, "harness"),
+        (BALANCE_TOOL, "harness"),
+        (JOURNAL_TOOL, "scaffold"),
+    ],
+    "search": [
+        (BRIEF_TOOL, "harness"),
+        (BALANCE_TOOL, "harness"),
+        (JOURNAL_TOOL, "scaffold"),
+    ],
+    "pushed": [
+        (BRIEF_TOOL, "harness"),
+        (BALANCE_TOOL, "harness"),
+        (JOURNAL_TOOL, "scaffold"),
+    ],
     "planning": [
-        (BRIEF_TOOL, "lens"),
+        (BRIEF_TOOL, "harness"),
         (BALANCE_TOOL, "harness"),
         (PLAN_TOOL, "scaffold"),
+        (JOURNAL_TOOL, "scaffold"),
     ],
 }
 
@@ -75,9 +96,32 @@ def main() -> int:
     got = [(e["tool"], e["source"]) for e in injections]
     assert got == expected, f"{profile}: injections {got}, expected {expected}"
     for event in injections:
+        if event.get("path") == JOURNAL_PATH:
+            # Session 1 has no journal yet, and this job runs exactly one
+            # session — so the not-found result IS the expected shape here,
+            # the same one the plan read has on a fresh run (SPEC P1.12.3,
+            # X21). Asserted rather than skipped: a journal read that
+            # succeeded on session 1 would mean the file predates the run.
+            assert event["ok"] is False, "session 1 found a journal that should not exist"
+            assert JOURNAL_PATH in (event.get("error") or ""), event.get("error")
+            continue
         assert event["ok"] is True, f"{event['tool']} failed: {event.get('error')}"
-    plan_rows = [e for e in injections if e["tool"] == PLAN_TOOL]
-    assert all(e.get("path") == PLAN_PATH for e in plan_rows), "plan injection lost its path"
+    # Two injections are workspace_reads from 0.6.0, so each is identified
+    # by its path rather than by its tool name (SPEC P9).
+    paths = [e.get("path") for e in injections if e["tool"] == PLAN_TOOL]
+    expected_paths = [PLAN_PATH, JOURNAL_PATH] if profile == "planning" else [JOURNAL_PATH]
+    assert paths == expected_paths, f"{profile}: read injections at {paths}"
+    # And the session wrote its own entry before exiting (SPEC P15): the
+    # end-to-end proof that journaling survives a cron environment, which
+    # is what this job exists to check.
+    entries = journal.read_entries(run_dir)
+    assert [e["session"] for e in entries] == [1], f"journal entries: {entries}"
+    entry = entries[0]
+    assert entry["tools"], "the session journaled no tool calls"
+    # Facts only: never the ending reason, never accounting (SPEC P15, I1).
+    for forbidden in ("reason", "cost", "usd", "tokens", "budget"):
+        assert forbidden not in json.dumps(entry), f"journal entry leaks {forbidden!r}"
+
     kinds_before_first_llm = kinds[: kinds.index("llm_call")]
     assert kinds_before_first_llm.count("tool_call") == len(expected), (
         f"expected the {len(expected)} injections as the only tool_calls before the "
@@ -102,7 +146,7 @@ def main() -> int:
         "cron-smoke telemetry OK: "
         f"{len(events)} events, profile={profile}, "
         f"session_end reason={ends[0]['reason']}, "
-        f"injections={[e['tool'] for e in injections]} all ok, "
+        f"injections={[e['tool'] for e in injections]} as expected, "
         f"next wake in {schedules[0]['clamped_min']:g} min"
     )
     return 0

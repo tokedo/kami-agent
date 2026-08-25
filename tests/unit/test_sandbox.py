@@ -7,6 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from kami_agent.tools.errors import ToolError
 from kami_agent.tools.sandbox import SandboxError, resolve_path
 
 
@@ -125,3 +126,64 @@ def test_symlink_escaping_the_root_is_rejected(run_dir):
             resolve_path(run_dir, "workspace/sneaky")
     finally:
         link.unlink()
+
+
+# --- P11 through the TOOLS, not just the resolver ------------------------------
+#
+# The resolver tests above prove one leading `workspace/` segment is
+# stripped. What was never asserted is that every workspace tool agrees —
+# and a run-006 analysis concluded, from telemetry alone, that an arm had
+# split its notes across `notes/` and `workspace/notes/` as two parallel
+# trees. The archived workspace showed ONE tree: the same 102 writes had
+# simply been issued 41 times bare and 61 times prefixed, and the analysis
+# had grouped on `tool_call.path`, which is the agent's raw argument. The
+# claim held; the reading of it did not. These tests pin the claim at the
+# tool level so it can never quietly stop holding, and P9 now carries
+# `path_resolved` so the reading has a field that cannot mislead.
+
+
+def test_the_two_spellings_are_one_file_through_every_workspace_tool(run_dir):
+    from kami_agent.tools.scaffold import ScaffoldTools
+
+    tools = ScaffoldTools(run_dir)
+    tools.execute("workspace_write", {"path": "notes/session01.md", "content": "first"})
+    tools.execute("workspace_write", {"path": "workspace/notes/session01.md", "content": "second"})
+
+    # One write replaced the other: the prefixed spelling named the same file.
+    assert tools.execute("workspace_read", {"path": "notes/session01.md"}) == "second"
+    assert tools.execute("workspace_read", {"path": "workspace/notes/session01.md"}) == "second"
+
+    # One tree on disk, and one entry in the listing — never workspace/workspace/.
+    listing = tools.execute("workspace_list", {}).splitlines()
+    assert [line for line in listing if "session01" in line] == ["workspace/notes/session01.md 6"]
+    assert not (run_dir / "workspace" / "workspace").exists()
+
+    # Either spelling deletes it, and there is nothing left to delete.
+    tools.execute("workspace_delete", {"path": "workspace/notes/session01.md"})
+    with pytest.raises(ToolError):
+        tools.execute("workspace_read", {"path": "notes/session01.md"})
+
+
+def test_a_subtree_listing_agrees_across_both_spellings(run_dir):
+    from kami_agent.tools.scaffold import ScaffoldTools
+
+    tools = ScaffoldTools(run_dir)
+    tools.execute("workspace_write", {"path": "state/a.json", "content": "1"})
+    tools.execute("workspace_write", {"path": "workspace/state/b.json", "content": "22"})
+    bare = tools.execute("workspace_list", {"path": "state"})
+    prefixed = tools.execute("workspace_list", {"path": "workspace/state"})
+    assert bare == prefixed
+    assert bare.splitlines() == ["workspace/state/a.json 1", "workspace/state/b.json 2"]
+
+
+def test_telemetry_carries_both_the_argument_and_the_file_it_named(run_dir):
+    """`path` is what the agent typed; `path_resolved` is what it named (P9)."""
+    from kami_agent.tools.scaffold import ScaffoldTools
+
+    tools = ScaffoldTools(run_dir)
+    assert tools.resolve_rel("notes/x.md") == "workspace/notes/x.md"
+    assert tools.resolve_rel("workspace/notes/x.md") == "workspace/notes/x.md"
+    assert tools.resolve_rel("reference/gdd.md") == "reference/gdd.md"
+    # Nothing to resolve, nothing recorded.
+    assert tools.resolve_rel("/etc/passwd") is None
+    assert tools.resolve_rel("../../telemetry.jsonl") is None

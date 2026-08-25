@@ -39,6 +39,7 @@ BASE_NAMES = {
     "set_next_wake",
     "get_status",
     "end_session",
+    "wait",
 }
 
 GAME_DEFS = [

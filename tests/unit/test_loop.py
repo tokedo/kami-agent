@@ -19,6 +19,8 @@ from kami_agent.loop import (
     BALANCE_CALL_ID,
     BALANCE_TOOL,
     BRIEF_CALL_ID,
+    BRIEF_TOOL,
+    JOURNAL_CALL_ID,
     PLAN_CALL_ID,
     AgentLoop,
     GameToolResult,
@@ -34,12 +36,19 @@ PARAMS = SamplingParams(max_tokens=4096)
 KICKOFF = "Session start."
 CONTINUE = "Continue. To end this session, call end_session."
 
-# What the fake harness answers the session-start balance call with.
+# What the fake harness answers the two session-start injections with.
 BALANCE_JSON = '{"balances": {"main": {"owner_eth": "0.03", "operator_eth": "0.01"}}}'
+ROSTER_JSON = '{"data": {"kamis": [{"index": 1, "state": "RESTING", "hp": [5, 9]}]}, "meta": {}}'
 
 # The call ids of the session-start injections (SPEC P1.12): reads the
 # agent did not choose, excluded wherever a test is about what it did.
-INJECTED_CALL_IDS = frozenset({BRIEF_CALL_ID, BALANCE_CALL_ID, PLAN_CALL_ID})
+INJECTED_CALL_IDS = frozenset({BRIEF_CALL_ID, BALANCE_CALL_ID, PLAN_CALL_ID, JOURNAL_CALL_ID})
+
+# How many injected rows a loop built by make_loop below emits: no daemon
+# and no harness are configured, so the roster and balance reads are
+# skipped entirely, and the plan read belongs to the `planning` profile —
+# leaving the journal read, which every profile carries (SPEC P1.12).
+INJECTED_ROWS = 1
 
 
 def response(*tool_calls, text=None, stop=None, tokens=(1000, 100)):
@@ -73,14 +82,16 @@ class ScriptedAdapter:
 
 
 class FakeGame:
-    """A harness surface with one read tool and the balance tool.
+    """A harness surface with one read tool and the two injection tools.
 
-    The balance tool is here because the scaffold calls it once per session
-    before the first model call (SPEC P1.12, D1). ``execute`` serves that
-    call itself and routes everything else to ``act``, which is what
-    subclasses override — so a game that raises, stalls, or reverts does so
-    for the AGENT's calls without turning the session-start injection into
-    a second thing under test.
+    The roster and balance tools are here because the scaffold calls each
+    once per session before the first model call (SPEC P1.12, D1) — and
+    from 0.6.0 a surface without the roster tool is refused at loop
+    construction, so every fake harness must carry it. ``execute`` serves
+    both injections itself and routes everything else to ``act``, which is
+    what subclasses override — so a game that raises, stalls, or reverts
+    does so for the AGENT's calls without turning a session-start
+    injection into a second thing under test.
     """
 
     def __init__(self):
@@ -99,11 +110,21 @@ class FakeGame:
                     "properties": {"account": {"type": "string", "default": ""}},
                 },
             ),
+            ToolDef(
+                name=BRIEF_TOOL,
+                description="d",
+                input_schema={
+                    "type": "object",
+                    "properties": {"account_index": {"type": "integer", "default": -1}},
+                },
+            ),
         ]
 
     def execute(self, name, args):
         if name == BALANCE_TOOL:
             return GameToolResult(content=BALANCE_JSON)
+        if name == BRIEF_TOOL:
+            return GameToolResult(content=ROSTER_JSON)
         return self.act(name, args)
 
     def act(self, name, args):
@@ -160,6 +181,16 @@ def model_calls(run_dir):
     return [e for e in events_of(run_dir, "tool_call") if e["initiator"] == "model"]
 
 
+def agent_turns(messages):
+    """Messages minus the session-start injections (SPEC P1.12).
+
+    The injections are marked in the message objects themselves, which is
+    the same provenance the transcript carries (P12) — so a test about
+    what the AGENT did filters on the mark rather than on a position.
+    """
+    return [m for m in messages if getattr(m, "initiator", None) is None]
+
+
 def agent_results(request):
     """Tool results in one request that are answers to the agent's own calls."""
     return [
@@ -179,13 +210,16 @@ def test_kickoff_and_agent_end(run_dir):
     assert isinstance(result, SessionResult)
     assert result.reason == "agent"
     assert result.llm_calls == 1
-    assert result.tool_calls == 1
+    # One end_session the agent chose, plus the journal injection every
+    # profile carries (SPEC P1.12) — which counts as an emitted row and
+    # toward no cap (X20).
+    assert result.tool_calls == 1 + INJECTED_ROWS
     assert scaffold.end_reason == "done"
     first = adapter.requests[0]
-    assert first["messages"] == [UserMessage(text=KICKOFF)]
+    assert first["messages"][0] == UserMessage(text=KICKOFF)
     assert first["system"] == "system prompt"
     # Game tools first, scaffold tools second, deterministic order.
-    assert [t.name for t in first["tools"]][-7:] == [
+    assert [t.name for t in first["tools"]][-8:] == [
         "workspace_write",
         "workspace_read",
         "workspace_list",
@@ -193,6 +227,7 @@ def test_kickoff_and_agent_end(run_dir):
         "set_next_wake",
         "get_status",
         "end_session",
+        "wait",
     ]
 
 
@@ -204,8 +239,9 @@ def test_tool_roundtrip_and_transcript(run_dir):
     loop, _, _ = make_loop(run_dir, adapter)
     result = loop.run()
     assert result.reason == "agent"
-    # Second request carries assistant turn + tool result.
-    second = adapter.requests[1]["messages"]
+    # Second request carries the agent's assistant turn + its tool result,
+    # after the session-start injections.
+    second = agent_turns(adapter.requests[1]["messages"])
     assert second[0] == UserMessage(text=KICKOFF)
     assert isinstance(second[1], AssistantMessage)
     assert second[1].text == "Checking."
@@ -364,7 +400,7 @@ def test_batch_executes_in_order_and_skips_after_end_session(run_dir):
     loop, _, _ = make_loop(run_dir, adapter)
     result = loop.run()
     assert result.reason == "agent"
-    tool_events = events_of(run_dir, "tool_call")
+    tool_events = model_calls(run_dir)
     assert [e["tool"] for e in tool_events] == [
         "workspace_write",
         "end_session",
@@ -373,7 +409,8 @@ def test_batch_executes_in_order_and_skips_after_end_session(run_dir):
     ]
     assert [e.get("skipped", False) for e in tool_events] == [False, False, True, True]
     assert (run_dir / "workspace" / "a.md").exists()  # earlier intent did run
-    assert result.tool_calls == 4  # skipped intents are logged tool_call events
+    # Skipped intents are logged tool_call events; so is the injection.
+    assert result.tool_calls == 4 + INJECTED_ROWS
 
 
 def test_later_intents_see_earlier_effects(run_dir):
@@ -386,7 +423,8 @@ def test_later_intents_see_earlier_effects(run_dir):
     )
     loop, _, _ = make_loop(run_dir, adapter)
     loop.run()
-    results = [m for m in adapter.requests[1]["messages"] if isinstance(m, ToolResultMessage)]
+    turns = agent_turns(adapter.requests[1]["messages"])
+    results = [m for m in turns if isinstance(m, ToolResultMessage)]
     assert results[1].content == "seen"
 
 
@@ -404,10 +442,11 @@ def test_malformed_calls_return_error_results(run_dir):
     loop, _, _ = make_loop(run_dir, adapter)
     result = loop.run()
     assert result.reason == "agent"
-    results = [m for m in adapter.requests[1]["messages"] if isinstance(m, ToolResultMessage)]
+    turns = agent_turns(adapter.requests[1]["messages"])
+    results = [m for m in turns if isinstance(m, ToolResultMessage)]
     assert results[0].is_error and "unknown tool" in results[0].content
     assert results[1].is_error and "invalid arguments" in results[1].content
-    tool_events = events_of(run_dir, "tool_call")
+    tool_events = model_calls(run_dir)
     assert [e["ok"] for e in tool_events[:2]] == [False, False]
     assert "unknown tool: no_such_tool" == tool_events[0]["error"]
 
@@ -509,7 +548,7 @@ def test_context_guard_trips_post_call_and_is_silent(run_dir):
     result = loop.run()
     assert result.reason == "token_cap"
     # SIGKILL semantics: the tripping response's intents never execute.
-    assert events_of(run_dir, "tool_call") == []
+    assert model_calls(run_dir) == []
     assert result.llm_calls == 1
 
 
@@ -535,7 +574,7 @@ def test_tool_cap_ends_session(run_dir):
     loop, _, _ = make_loop(run_dir, adapter, session_tool_cap=2)
     result = loop.run()
     assert result.reason == "tool_cap"
-    assert len(events_of(run_dir, "tool_call")) == 2
+    assert len(model_calls(run_dir)) == 2
 
 
 def test_end_session_at_cap_is_still_agent(run_dir):
@@ -587,6 +626,32 @@ def test_non_retryable_error_ends_immediately(run_dir):
 # --- I16 result cap --------------------------------------------------------------
 
 
+def test_a_file_row_records_both_the_argument_and_the_file_it_named(run_dir):
+    """`path` is the agent's own text; `path_resolved` is the file (P9, P11).
+
+    Grouping on `path` made one tree look like two in a run-006 analysis,
+    because the same file was written under both spellings. Both are
+    recorded so neither reading has to be guessed at.
+    """
+    adapter = ScriptedAdapter(
+        response(
+            call("workspace_write", {"path": "notes/a.md", "content": "x"}, id_="w1"),
+            call("workspace_write", {"path": "workspace/notes/a.md", "content": "y"}, id_="w2"),
+            call("workspace_read", {"path": "/etc/passwd"}, id_="r3"),
+        ),
+        response(end_call()),
+    )
+    loop, _, _ = make_loop(run_dir, adapter)
+    loop.run()
+    rows = model_calls(run_dir)
+    assert [r["path"] for r in rows[:2]] == ["notes/a.md", "workspace/notes/a.md"]
+    # Two spellings, one file.
+    assert {r["path_resolved"] for r in rows[:2]} == {"workspace/notes/a.md"}
+    # Nothing resolved, nothing recorded — which is also when the call failed.
+    assert rows[2]["ok"] is False
+    assert "path_resolved" not in rows[2]
+
+
 def test_big_read_truncated_with_reread_hint(run_dir):
     (run_dir / "workspace").mkdir(exist_ok=True)
     (run_dir / "workspace" / "big.md").write_text("z" * 500)
@@ -596,11 +661,12 @@ def test_big_read_truncated_with_reread_hint(run_dir):
     )
     loop, _, _ = make_loop(run_dir, adapter, tool_result_max_bytes=100)
     loop.run()
-    results = [m for m in adapter.requests[1]["messages"] if isinstance(m, ToolResultMessage)]
+    turns = agent_turns(adapter.requests[1]["messages"])
+    results = [m for m in turns if isinstance(m, ToolResultMessage)]
     assert results[0].content.startswith("z" * 100)
     assert "showing the first 100 bytes of 500" in results[0].content
     assert "workspace_read(path='workspace/big.md', offset, length)" in results[0].content
-    event = events_of(run_dir, "tool_call")[0]
+    event = model_calls(run_dir)[0]
     assert event["truncated"] is True
     assert event["original_bytes"] == 500
     assert event["path"] == "workspace/big.md"
@@ -732,8 +798,8 @@ def test_token_cap_carries_final_turn_wake_intent(run_dir):
     # Validated and clamped exactly as normal; no tool_call event, no
     # tool-result message — the agent never observes the carried execution.
     assert (scaffold.requested_wake_min, scaffold.clamped_wake_min) == (45, 45.0)
-    assert events_of(run_dir, "tool_call") == []
-    assert not any(isinstance(m, ToolResultMessage) for m in result.messages)
+    assert model_calls(run_dir) == []
+    assert not any(isinstance(m, ToolResultMessage) for m in agent_turns(result.messages))
 
 
 def test_tool_cap_carries_unexecuted_wake_from_tripping_batch(run_dir):
@@ -749,7 +815,7 @@ def test_tool_cap_carries_unexecuted_wake_from_tripping_batch(run_dir):
     assert result.reason == "tool_cap"
     assert result.carried_wake == "applied"
     assert scaffold.clamped_wake_min == 30.0
-    assert len(events_of(run_dir, "tool_call")) == 2  # the carried intent emits none
+    assert len(model_calls(run_dir)) == 2  # the carried intent emits none
 
 
 def test_last_unexecuted_wake_wins_and_overrides_executed_one(run_dir):
@@ -906,9 +972,13 @@ def test_harness_scaffold_name_collision_rejected(run_dir):
     class ShadowGame(FakeGame):
         def __init__(self):
             super().__init__()
-            self.tool_defs = [
+            # The base surface is kept and one shadowing name added: this
+            # test is about a SCAFFOLD-name collision, and stripping the
+            # roster tool would trip a different check with a different
+            # message before this one was reached.
+            self.tool_defs.append(
                 ToolDef(name="get_status", description="d", input_schema={"type": "object"})
-            ]
+            )
 
     with pytest.raises(ValueError, match="shadow"):
         make_loop(run_dir, ScriptedAdapter(), game=ShadowGame())
@@ -943,8 +1013,9 @@ def test_skipped_intents_also_get_an_identity(run_dir):
     loop, _, _ = make_loop(run_dir, ScriptedAdapter(response(*calls)), game=FakeGame())
     loop.run()
     rows = model_calls(run_dir)
-    # The scaffold's own session-start read took call_seq 1.
-    assert [r["call_seq"] for r in rows] == [2, 3]
+    # The scaffold's own session-start reads took call_seq 1 (the roster),
+    # 2 (the wallets' gas balances) and 3 (the journal entry).
+    assert [r["call_seq"] for r in rows] == [4, 5]
     assert rows[1]["skipped"] is True
 
 

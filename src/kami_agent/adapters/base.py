@@ -52,17 +52,37 @@ class ProviderState:
 
 @dataclass(frozen=True, slots=True)
 class AssistantMessage:
+    """One assistant turn.
+
+    ``initiator`` names who produced the turn: None for the model's own
+    turns, ``"scaffold"`` for the session-start injections the loop
+    synthesizes (SPEC P1.12). It is **transcript provenance only** — no
+    adapter reads it, so the bytes sent to the provider are identical
+    with or without it. Without it a synthesized turn is
+    indistinguishable from a model turn in a transcript, and anything
+    counting assistant rows as model turns over-counts by the number of
+    injections (P12).
+    """
+
     text: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     provider_state: ProviderState | None = None
+    initiator: str | None = None
     role: Literal["assistant"] = "assistant"
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultMessage:
+    """One tool result.
+
+    ``initiator`` is the same transcript-only provenance the assistant
+    turn carries, on the result half of an injected pair (P12).
+    """
+
     tool_call_id: str
     content: str
     is_error: bool = False
+    initiator: str | None = None
     role: Literal["tool_result"] = "tool_result"
 
 
@@ -152,6 +172,18 @@ class AdapterResponse:
     request_id: str | None = None
 
 
+# What of a provider error message survives into the telemetry row (SPEC
+# P9). The on-disk error log keeps a longer cut (P14); this bound exists
+# because llm_call rows are read in bulk and a provider that echoes a
+# request back would otherwise bloat every row of an outage.
+ERROR_TEXT_TELEMETRY_CHARS = 200
+
+# What survives into the on-disk error artifact (SPEC P14). Long enough to
+# hold a real provider message with its detail intact, bounded so a
+# hostile or runaway payload cannot fill a disk one line at a time.
+ERROR_TEXT_LOG_CHARS = 4096
+
+
 class AdapterError(Exception):
     """A provider call failed, normalized for the loop's retry policy.
 
@@ -162,6 +194,22 @@ class AdapterError(Exception):
     ``request_id`` carries the provider's identifier for the failed call
     where the SDK exposes one on the error, so a failed-but-billed
     attempt is as traceable as a successful one.
+
+    ``error_type`` and ``error_text`` carry **the provider's own words**
+    about what went wrong: the error-type token the API returned
+    (``insufficient_quota``, ``invalid_request_error``,
+    ``RESOURCE_EXHAUSTED``) and its human-readable message. Both are None
+    when the failure happened before any provider answer existed — a
+    connection reset has no type and no message the provider authored.
+    They exist because a run-wide provider outage used to produce error
+    rows carrying a request id and nothing else, which cannot answer the
+    first question anyone asks after an incident: what did the provider
+    say?
+
+    ``error_text`` is the message ONLY. Adapters never fold the request
+    payload into it: the SDKs' own ``str(exc)`` for a status error embeds
+    the whole response body, and quoting a body back into a row that is
+    read in bulk is how a diagnostic field becomes an unreadable one.
     """
 
     def __init__(
@@ -171,11 +219,49 @@ class AdapterError(Exception):
         retryable: bool,
         status_code: int | None = None,
         request_id: str | None = None,
+        error_type: str | None = None,
+        error_text: str | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
         self.request_id = request_id
+        self.error_type = error_type
+        self.error_text = error_text
+
+    def text_for_telemetry(self) -> str | None:
+        """``error_text`` cut to what an llm_call row carries (P9)."""
+        return _cut(self.error_text, ERROR_TEXT_TELEMETRY_CHARS)
+
+    def text_for_log(self) -> str | None:
+        """``error_text`` cut to what the on-disk error log carries (P14)."""
+        return _cut(self.error_text, ERROR_TEXT_LOG_CHARS)
+
+
+def _cut(text: str | None, limit: int) -> str | None:
+    if text is None:
+        return None
+    return text[:limit]
+
+
+def provider_message(body: object, fallback: str, *, nested: bool = False) -> str:
+    """The provider's own message out of an SDK error body, if it has one.
+
+    ``nested`` selects the shape whose body wraps the error one level
+    down (``{"error": {"message": ...}}``, Anthropic) rather than being
+    the error object itself (OpenAI, whose client unwraps it before
+    constructing the exception). Falls back to the exception's own
+    message when the body is not a mapping at all — a 502 from a proxy
+    serves HTML, not JSON, and that HTML is still the best answer to
+    "what did the provider say".
+    """
+    if isinstance(body, dict):
+        inner = body.get("error") if nested else body
+        if isinstance(inner, dict):
+            message = inner.get("message")
+            if isinstance(message, str) and message:
+                return message
+    return fallback
 
 
 @runtime_checkable

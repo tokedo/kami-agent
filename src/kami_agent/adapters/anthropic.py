@@ -41,6 +41,7 @@ from kami_agent.adapters.base import (
     ToolResultMessage,
     Usage,
     UserMessage,
+    provider_message,
 )
 
 # Provider stop reasons → canonical enum (SPEC P8). "stop_sequence" cannot
@@ -302,14 +303,30 @@ def _normalize_stop_reason(value: str | None) -> StopReason:
 
 def _classify_error(exc: anthropic.APIError) -> AdapterError:
     if isinstance(exc, anthropic.APIConnectionError):  # includes APITimeoutError
-        return AdapterError(f"anthropic connection error: {exc}", retryable=True)
+        # No provider answer exists, so there is no provider type and no
+        # provider message: the transport's own text is all there is.
+        return AdapterError(
+            f"anthropic connection error: {exc}",
+            retryable=True,
+            error_text=f"{type(exc).__name__}: {exc}",
+        )
     if isinstance(exc, anthropic.APIStatusError):
         status = exc.status_code
         retryable = status in (408, 429) or status >= 500
+        # exc.type is the SDK's own parse of body["error"]["type"]; the
+        # message comes from the same nested object, NOT from exc.message,
+        # which is "Error code: N - {whole body}" and would echo the body
+        # into every row (P8).
         return AdapterError(
             f"anthropic API error {status}: {exc.message}",
             retryable=retryable,
             status_code=status,
             request_id=getattr(exc, "request_id", None),
+            error_type=getattr(exc, "type", None),
+            error_text=provider_message(getattr(exc, "body", None), exc.message, nested=True),
         )
-    return AdapterError(f"anthropic error: {exc}", retryable=False)
+    return AdapterError(
+        f"anthropic error: {exc}",
+        retryable=False,
+        error_text=f"{type(exc).__name__}: {exc}",
+    )

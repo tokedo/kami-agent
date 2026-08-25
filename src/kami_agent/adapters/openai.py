@@ -38,6 +38,7 @@ from kami_agent.adapters.base import (
     ToolResultMessage,
     Usage,
     UserMessage,
+    provider_message,
 )
 
 _STOP_REASONS: dict[str | None, StopReason] = {
@@ -194,14 +195,30 @@ def _normalize_stop_reason(value: str | None) -> StopReason:
 
 def _classify_error(exc: openai.OpenAIError) -> AdapterError:
     if isinstance(exc, openai.APIConnectionError):  # includes APITimeoutError
-        return AdapterError(f"openai connection error: {exc}", retryable=True)
+        # No provider answer, so no provider type and no provider message.
+        return AdapterError(
+            f"openai connection error: {exc}",
+            retryable=True,
+            error_text=f"{type(exc).__name__}: {exc}",
+        )
     if isinstance(exc, openai.APIStatusError):
         status = exc.status_code
         retryable = status in (408, 429) or status >= 500
+        # The OpenAI client unwraps body["error"] before constructing the
+        # exception, so exc.body IS the error object and exc.type is
+        # already the token that names the class of failure
+        # ("insufficient_quota", "invalid_request_error"). exc.message is
+        # "Error code: N - {whole body}" and is the fallback only (P8).
         return AdapterError(
             f"openai API error {status}: {exc.message}",
             retryable=retryable,
             status_code=status,
             request_id=getattr(exc, "request_id", None),
+            error_type=getattr(exc, "type", None),
+            error_text=provider_message(getattr(exc, "body", None), exc.message),
         )
-    return AdapterError(f"openai error: {exc}", retryable=False)
+    return AdapterError(
+        f"openai error: {exc}",
+        retryable=False,
+        error_text=f"{type(exc).__name__}: {exc}",
+    )

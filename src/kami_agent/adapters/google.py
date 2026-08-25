@@ -94,7 +94,12 @@ class GoogleAdapter:
         except genai_errors.APIError as exc:
             raise _classify_error(exc) from exc
         except httpx.HTTPError as exc:
-            raise AdapterError(f"google connection error: {exc}", retryable=True) from exc
+            # No provider answer, so no provider type and no provider message.
+            raise AdapterError(
+                f"google connection error: {exc}",
+                retryable=True,
+                error_text=f"{type(exc).__name__}: {exc}",
+            ) from exc
         return _normalize(response)
 
 
@@ -239,6 +244,15 @@ def _normalize_stop_reason(finish_reason: Any, has_tool_calls: bool) -> StopReas
 def _classify_error(exc: genai_errors.APIError) -> AdapterError:
     status = exc.code
     retryable = status in (408, 429) or (status or 0) >= 500
+    # The genai SDK parses the message out of the error body for us, so
+    # exc.message is already the provider's own words with no body echo.
+    # exc.status is the canonical status token ("RESOURCE_EXHAUSTED",
+    # "INVALID_ARGUMENT") — this provider's answer to "what type of
+    # error", on the same footing as the other two providers' type field.
     return AdapterError(
-        f"google API error {status}: {exc.message}", retryable=retryable, status_code=status
+        f"google API error {status}: {exc.message}",
+        retryable=retryable,
+        status_code=status,
+        error_type=getattr(exc, "status", None),
+        error_text=exc.message,
     )

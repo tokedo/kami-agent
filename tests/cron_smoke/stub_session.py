@@ -91,6 +91,20 @@ class StubLensDaemon:
                 # else answers with an error, as the daemon would.
                 if request.get("query") == "roster":
                     reply = {"id": request.get("id"), "ok": True, **ROSTER_ENVELOPE}
+                elif request.get("query") == "status":
+                    # The one query the SCAFFOLD still makes of the daemon
+                    # (SPEC D7): which daemon is serving this session.
+                    reply = {
+                        "id": request.get("id"),
+                        "ok": True,
+                        "data": {
+                            "version": "0.4.0",
+                            "upstreamPin": "8302734d",
+                            "config": {"enrich": False, "defaultOperator": 7},
+                        },
+                        "untrusted": [],
+                        "meta": {"blockNumber": 8814052, "stale": False, "mode": "daemon"},
+                    }
                 else:
                     reply = {
                         "id": request.get("id"),

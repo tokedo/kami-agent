@@ -231,9 +231,10 @@ def test_run_session_command_end_to_end(tmp_path, manifest_path, monkeypatch, ca
     assert [e["event"] for e in records] == [
         "run_start",
         "session_start",
-        # The session-start brief, attempted against a daemon that is not
-        # running here. It degrades visibly rather than vanishing (X21): a
-        # run that expected a brief and got none must say so.
+        # No harness is configured in this manifest, so the roster and
+        # balance injections are skipped entirely — with no surface there
+        # is nothing to ask (SPEC X20). The journal read remains: it needs
+        # neither a daemon nor a harness (P15).
         "tool_call",
         "llm_request",
         "llm_call",
@@ -241,11 +242,12 @@ def test_run_session_command_end_to_end(tmp_path, manifest_path, monkeypatch, ca
         "session_end",
         "schedule_next",
     ]
-    brief = records[2]
-    assert brief["source"] == "lens"
-    assert brief["initiator"] == "scaffold"
-    assert brief["ok"] is False
-    assert json.loads(brief["error"])["error"]["code"] == "LENS_UNAVAILABLE"
+    journal_read = records[2]
+    assert journal_read["source"] == "scaffold"
+    assert journal_read["initiator"] == "scaffold"
+    # Session 1 has no journal yet: the ordinary not-found result, which
+    # is the visible shape a fresh run is supposed to have (P15, X21).
+    assert journal_read["ok"] is False
 
 
 def test_status_prints_state(tmp_path, manifest_path, capsys):

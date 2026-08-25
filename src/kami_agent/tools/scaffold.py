@@ -16,19 +16,35 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from kami_agent.adapters.base import ToolDef
+from kami_agent.journal import JOURNAL_ROOT
 from kami_agent.tools.errors import ToolError
-from kami_agent.tools.sandbox import resolve_path
+from kami_agent.tools.sandbox import SandboxError, resolve_path
 from kami_agent.tools.search import ReferenceIndex, clamp_k
 
 DEFAULT_WORKSPACE_QUOTA_BYTES = 10 * 1024 * 1024
 DEFAULT_WAKE_MIN_MINUTES = 5.0
 DEFAULT_WAKE_MAX_MINUTES = 24 * 60.0
+
+# Upper bound on one `wait` call (caps.wait_max_seconds, SPEC P5, P10).
+# Sized as a COOLDOWN primitive and nothing larger: the world's kami
+# cooldowns run to roughly three minutes, so five minutes covers one with
+# margin while staying far below any plausible session length. Waiting
+# BETWEEN sessions is set_next_wake's job and always was.
+DEFAULT_WAIT_MAX_SECONDS = 300.0
+
+# How much of workspace/plan.md the session-start injection shows on the
+# `planning` profile (SPEC P1.12.3, P13). A code constant rather than a
+# manifest knob on purpose: prompts/planning.txt STATES this number, and a
+# frozen asset cannot state a number an operator is free to change. Pinned
+# to the asset by a unit test, exactly as the wake bounds above are (I5).
+PLAN_FILE_MAX_BYTES = 8192
 
 # --- scaffold profiles (SPEC D3) ----------------------------------------------
 #
@@ -142,6 +158,23 @@ SCAFFOLD_TOOL_DEFS: list[ToolDef] = [
             "required": ["reason"],
         },
     ),
+    # Mechanism only, on the search_reference / set_next_wake pattern: what
+    # it does and that values outside the range are clamped — never a word
+    # about when passing time is worth doing (I3). The clamp is stated for
+    # the same reason set_next_wake states its own: a bound the agent can
+    # observe by hitting it is better named than discovered.
+    ToolDef(
+        name="wait",
+        description=(
+            "Pause for a number of seconds, then return. Nothing else happens "
+            "during the pause. Values outside the allowed range are clamped."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"seconds": {"type": "number"}},
+            "required": ["seconds"],
+        },
+    ),
 ]
 
 SCAFFOLD_TOOL_NAMES = frozenset(tool.name for tool in SCAFFOLD_TOOL_DEFS)
@@ -226,9 +259,11 @@ class ScaffoldTools:
         workspace_quota_bytes: int = DEFAULT_WORKSPACE_QUOTA_BYTES,
         wake_min_minutes: float = DEFAULT_WAKE_MIN_MINUTES,
         wake_max_minutes: float = DEFAULT_WAKE_MAX_MINUTES,
+        wait_max_seconds: float = DEFAULT_WAIT_MAX_SECONDS,
         budget_visible: bool = False,
         budget_remaining_usd: float | None = None,
         clock: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], None] | None = None,
         emit: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.run_dir = Path(run_dir)
@@ -239,15 +274,21 @@ class ScaffoldTools:
         self.workspace_quota_bytes = workspace_quota_bytes
         self.wake_min_minutes = wake_min_minutes
         self.wake_max_minutes = wake_max_minutes
+        self.wait_max_seconds = wait_max_seconds
         # Mechanism for a future budget-visible configuration; pinned False —
         # enabling it is a deliberate code change, not a config flip (X10, I1).
         self.budget_visible = budget_visible
         self.budget_remaining_usd = budget_remaining_usd
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._sleep = sleep or time.sleep
         self._emit = emit or (lambda event, fields: None)
 
         self.workspace_root = self.run_dir / "workspace"
         self.reference_root = self.run_dir / "reference"
+        # Scaffold-owned, read-only to the agent (P15). Not created here:
+        # it appears when the first session is journaled, and until then
+        # the file index says so rather than showing an empty tree.
+        self.journal_root = self.run_dir / JOURNAL_ROOT
         self.workspace_root.mkdir(parents=True, exist_ok=True)
 
         self.requested_wake_min: float | None = None
@@ -263,6 +304,10 @@ class ScaffoldTools:
         # the loop to record on that call's telemetry row (P9). Same
         # accumulate-on-the-instance pattern as the wake and end flags.
         self.last_search: tuple[str, int] | None = None
+        # (requested, actual) seconds of the last wait call, for the same
+        # reason and by the same mechanism (P9): waiting must be
+        # analyzable, and only the tool knows what it was asked for.
+        self.last_wait: tuple[float, float] | None = None
 
     def execute(self, name: str, args: dict[str, Any]) -> str:
         if name not in self.tool_names:
@@ -278,7 +323,10 @@ class ScaffoldTools:
     def workspace_write(self, path: str, content: str) -> str:
         resolved, root = resolve_path(self.run_dir, path)
         if root != "workspace":
-            raise ToolError("workspace_write only writes under workspace/; reference/ is read-only")
+            raise ToolError(
+                "workspace_write only writes under workspace/; "
+                "reference/ and journal/ are read-only"
+            )
         if resolved == self.workspace_root.resolve() or resolved.is_dir():
             raise ToolError(f"path is a directory: {path!r}")
         data = content.encode("utf-8")
@@ -321,6 +369,12 @@ class ScaffoldTools:
             lines = self._tree_lines(self.workspace_root, "workspace")
             if not lines:
                 lines = ["workspace/ (empty)"]
+            # The journal is listed as a file with its size, not collapsed
+            # to a summary the way reference/ is: it is one small file, and
+            # the index is the ONLY place it is named. Nothing anywhere
+            # tells the agent to read it — a listed path with a byte count
+            # is a fact, and advice is not the scaffold's to give (I3).
+            lines.extend(self._journal_lines())
             lines.append(self._reference_summary())
             return "\n".join(lines)
         resolved, _root = resolve_path(self.run_dir, path)
@@ -335,7 +389,8 @@ class ScaffoldTools:
         resolved, root = resolve_path(self.run_dir, path)
         if root != "workspace":
             raise ToolError(
-                "workspace_delete only deletes under workspace/; reference/ is read-only"
+                "workspace_delete only deletes under workspace/; "
+                "reference/ and journal/ are read-only"
             )
         if resolved.is_dir():
             raise ToolError(f"path is a directory, not a file: {path!r}")
@@ -381,6 +436,34 @@ class ScaffoldTools:
         self.clamped_wake_min = clamped
         return f"Next session in {clamped:g} minutes."
 
+    def wait(self, seconds: float) -> str:
+        """Block for up to ``wait_max_seconds``, then return (SPEC P10).
+
+        The scaffold's only in-session time primitive. It exists because
+        the world has cooldowns of a couple of minutes and the agent had
+        no way to pass wall time inside a session at all: the alternatives
+        it was left with were filler calls and polling the same value
+        until the repetition breaker ended the session — the breaker
+        firing on the ONLY waiting strategy the scaffold offered.
+
+        Clamped, not rejected, exactly as ``set_next_wake`` is, and the
+        result names the seconds actually slept so a clamp is observable
+        rather than silent. A negative request clamps to zero: "do not
+        wait" is a coherent thing to have asked for.
+        """
+        try:
+            requested = float(seconds)
+        except (TypeError, ValueError) as exc:
+            raise ToolError("seconds must be a number") from exc
+        if math.isnan(requested) or math.isinf(requested):
+            raise ToolError("seconds must be a finite number")
+        clamped = min(max(requested, 0.0), self.wait_max_seconds)
+        start = time.perf_counter()
+        self._sleep(clamped)
+        actual = time.perf_counter() - start
+        self.last_wait = (requested, actual)
+        return f"Waited {clamped:g} seconds."
+
     def get_status(self) -> str:
         # Exactly these fields and nothing else (I1): no budget, spend,
         # token counts, elapsed-run figures, or T_max.
@@ -412,6 +495,27 @@ class ScaffoldTools:
             return []
         files = sorted(p for p in root.rglob("*") if p.is_file())
         return [f"{prefix}/{p.relative_to(root)} {p.stat().st_size}" for p in files]
+
+    def _journal_lines(self) -> list[str]:
+        lines = self._tree_lines(self.journal_root, JOURNAL_ROOT)
+        return lines or [f"{JOURNAL_ROOT}/ 0 files, 0 bytes, read-only"]
+
+    def resolve_rel(self, path: str) -> str | None:
+        """Run-dir-relative form of an agent-supplied path, or None.
+
+        What the sandbox actually resolved a path to, for telemetry
+        (``tool_call.path_resolved``, P9): the raw argument is what the
+        agent typed, which is not the same thing and must not be read as
+        if it were. None when the path does not resolve at all.
+        """
+        try:
+            resolved, _root = resolve_path(self.run_dir, path)
+        except SandboxError:
+            return None
+        try:
+            return self._rel(resolved)
+        except ValueError:
+            return None
 
     def _reference_summary(self) -> str:
         if not self.reference_root.is_dir():
