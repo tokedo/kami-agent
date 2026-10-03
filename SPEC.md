@@ -29,7 +29,10 @@ and reviews.
 `kami-agent run-session --run-dir DIR` executes at most one session and
 exits. It returns exactly one outcome (printed on stdout, `runner.py`):
 `lock_held` | `not_due` | `already_complete` | `run_complete` |
-`session_aborted` | `session_ran`.
+`session_aborted` | `session_ran`. The one exception is an attempt
+refused at the pairing check (step 9, new at 0.7.0): it writes one
+`session_refused` event and exits non-zero with the refusal on stderr,
+printing no outcome.
 
 Ordered steps, as implemented:
 
@@ -51,16 +54,28 @@ Ordered steps, as implemented:
    before the spawn below on purpose — a run directory that cannot
    deliver its profile's asset raises here, naming the missing file,
    before any child, any telemetry, or any `session_start` exists. The
-   claimed session number (step 7) is spent; nothing else is.
+   number claimed at step 7 lives only in the `state.json` cache: nothing
+   in the stream carries it, and the counter is folded from the stream
+   (P3), so the next attempt claims the same number again. (Through 0.6.0
+   this step said the number was "spent"; the fold never made it so.)
 9. **Spawn the harness child** and handshake (D1). Failure → a
    `session_start` / `session_end reason=errors` pair with zero model
    calls, a default-source `schedule_next`, and `session_aborted`.
    **Pairing check** (D1, new at 0.7.0): a harness whose handshake states
    `schema_version` MAJOR ≥ 4 but whose standing text did not reach the
-   runner is refused right here — the child is closed, nothing is
-   emitted, no model is called, and `run-session` exits non-zero with a
-   plain message. The claimed session number (step 7) is spent; nothing
-   else is, exactly as with a missing prompt asset (step 8).
+   runner is refused right here, and the refusal is **visible**: exactly
+   one `session_refused` event (P9) records the reason, the refusal
+   message verbatim, the trigger and the refused harness's version and
+   registry hash. Nothing else is written for the attempt — no
+   `session_start`, no `schedule_next`, no model call — the child is
+   closed, and `run-session` exits non-zero with the same plain message.
+   **The attempt consumes no session number**: the event carries the last
+   number the run used (0 before the first), so the fold (P3) is
+   unchanged, and the cache's claim from step 7 is given back. Under a
+   scheduler a misconfigured pairing is therefore one `session_refused`
+   line per poll — a visible loop, not a silent one — and the first
+   session that does start gets the number the refused attempts would
+   have had.
 10. **Emit `session_start`** carrying `tools_hash` of the loaded surface,
     the `scaffold_profile` this run pins, when the manifest pins one the
     harness `presentation_mode`, and what the handshake stated: the
@@ -568,6 +583,7 @@ enforced), `run_id`, `session`, `event`.
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
 | `session_end` | `reason` (P5 enum), `llm_calls`, `tool_calls`, `session_cost_usd`, `session_tokens` | `repetition_rule`, `repetition_signature`, `repetition_tool`, `repetition_count`, `repetition_window`, `repetition_distinct`, `repetition_signatures[]` |
 | `run_complete` | `reason` (`budget`\|`t_max`\|`manual`), `totals{sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd}` | — |
+| `session_refused` (0.7.0) | `reason` (`standing_text_missing`), `message`, `trigger` (`scheduled`\|`manual`) | `harness_schema_version`, `harness_tools_hash` |
 
 Reader notes (stable semantics):
 
@@ -751,6 +767,18 @@ Reader notes (stable semantics):
   recorded as absence rather than guessed at.
 - `schedule_next` appears exactly once per session, `wake_default` case
   included.
+- **`session_refused` is an attempt that never became a session** (new
+  at 0.7.0, P1 step 9). Its `session` is the last session number the run
+  USED — the convention `run_complete` follows — so folding max(session)
+  is unaffected and no number is consumed; the attempt has no
+  `session_start`, `session_end` or `schedule_next`, and recovery never
+  sees it as a crash. One line per refused attempt. `reason:
+  standing_text_missing` means the harness stated `schema_version` MAJOR
+  ≥ 4 — a harness that says the untrusted-data rule only in its
+  handshake — and none of its standing text reached the session.
+  `message` is the refusal exactly as `run-session` printed it. A monitor
+  reading only `telemetry.jsonl` should alert on any `session_refused`:
+  under a scheduler they repeat every poll until the deployment is fixed.
 - `session_end reason=crash` is synthetic (P3).
 - Telemetry is not an agent-visible channel: budget fields recorded here
   never reach the agent.
@@ -1602,7 +1630,7 @@ the same daemon over the same socket.
 | I33 | **`wait` blocks within its bound, is clamped rather than rejected, is recorded as a requested/actual pair, is exempt from the repetition breaker and from nothing else, and still consumes `session_tool_cap`** | `tests/unit/test_wait.py` — surface and wording (`::test_it_is_on_the_base_surface_of_every_profile`, `::test_the_description_is_mechanism_only`), clamping (`::test_a_request_over_the_bound_is_clamped_and_the_clamp_is_visible`, `::test_a_negative_request_clamps_to_zero`, `::test_non_finite_and_non_numeric_requests_are_errors`), telemetry (`::test_both_durations_are_recorded_so_waiting_is_analyzable`, `::test_a_wait_that_never_reached_the_handler_records_no_durations`), and the two consequences (`::test_repeated_waits_never_trip_the_repetition_breaker`, `::test_a_repeated_non_wait_call_still_trips_it`, `::test_waits_still_consume_the_session_tool_cap`, `::test_the_watchdog_gives_wait_its_own_bound`, `::test_a_wait_longer_than_the_tool_timeout_still_completes`) |
 | I34 | **Every session is journaled whatever the model writes, the entry names no ending reason and no accounting, the file is bounded so a whole read never truncates, and the last entry reaches the next session as an ordinary re-readable slice** | `tests/unit/test_journal.py` — the entry (`::test_the_entry_carries_the_facts_a_successor_needs`, `::test_no_previous_entry_means_no_elapsed_figure_rather_than_zero`, `::test_the_entry_never_names_the_apparatus`, `::test_a_flood_of_transactions_cannot_crowd_out_every_other_session`), retention (`::test_retention_drops_oldest_entries_and_keeps_the_file_readable_whole`, `::test_the_newest_entry_is_kept_even_when_it_alone_exceeds_the_bound`, `::test_has_session_makes_a_second_write_detectable`), the tree (`::test_the_journal_is_readable_and_not_writable`, `::test_the_file_index_names_the_journal_with_its_size`, `::test_the_journal_does_not_count_against_the_workspace_quota`), the injection (`::test_the_last_entry_is_injected_as_a_readable_byte_slice`, `::test_the_first_session_gets_the_ordinary_not_found_result`, `::test_the_journal_injection_bounds_nothing_the_agent_does`) |
 | I35 | **Which lens daemon served a session is recorded on every `session_start`, never asserted against the manifest, and never reaches the agent** | `tests/unit/test_lens_provenance.py::test_the_serving_daemons_identity_lands_on_session_start`, `::test_the_enrichment_flag_makes_a_mis_provisioned_rung_detectable`, `::test_a_daemon_that_cannot_answer_costs_nothing`, `::test_a_daemon_serving_a_shape_we_did_not_expect_records_what_it_can`, `::test_no_daemon_means_no_provenance_and_no_query`, `::test_provenance_is_never_an_agent_visible_channel` |
-| I36 | **The harness's standing text reaches the model verbatim on every session, on every profile and through every provider adapter; it is fingerprinted, never copied, on `session_start`; a harness that sends none changes nothing; and a 4.x harness whose text did not arrive starts no session** | `tests/unit/test_standing_text.py` — the field (`::test_line_one_alone_still_parses_and_carries_no_text`, `::test_a_hash_only_handshake_still_parses`, `::test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim`, `::test_the_remainder_is_not_reflowed_or_stripped`, `::test_tokens_are_read_from_line_one_only`, `::test_the_client_exposes_the_handshake_of_a_real_child`), the prompt (`::test_the_standing_text_is_in_the_system_prompt_of_every_profile`, `::test_no_text_means_the_prompt_is_exactly_what_it_was`, `::test_the_text_is_on_every_call_of_the_session`, `::test_the_text_never_enters_the_tool_surface_or_its_hash`), the wire (`::test_every_provider_adapter_sends_it_in_its_system_slot`, three real adapters × five profiles), the record (`::test_session_start_records_the_texts_fingerprint_and_size`, `::test_no_text_records_no_fingerprint_but_still_the_version`, `::test_the_text_is_never_in_telemetry_itself`), the refusal (`::test_a_4x_harness_whose_text_did_not_arrive_starts_no_session`, `::test_a_wrapper_that_drops_the_text_is_refused`, `::test_only_that_combination_is_refused`, `::test_bring_up_refuses_the_same_pairing_with_the_same_plain_message`, `::test_run_session_exits_with_the_plain_message_not_a_traceback`); end to end under a cron environment against a stand-in serving a 4.x handshake (`tests/cron_smoke/check_telemetry.py`); natively per provider in the tri-provider tier once the recorded surface carries the text |
+| I36 | **The harness's standing text reaches the model verbatim on every session, on every profile and through every provider adapter; it is fingerprinted, never copied, on `session_start`; a harness that sends none changes nothing; and a 4.x harness whose text did not arrive starts no session — visibly, as one `session_refused` event per attempt, consuming no session number** | `tests/unit/test_standing_text.py` — the field (`::test_line_one_alone_still_parses_and_carries_no_text`, `::test_a_hash_only_handshake_still_parses`, `::test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim`, `::test_the_remainder_is_not_reflowed_or_stripped`, `::test_tokens_are_read_from_line_one_only`, `::test_the_client_exposes_the_handshake_of_a_real_child`), the prompt (`::test_the_standing_text_is_in_the_system_prompt_of_every_profile`, `::test_no_text_means_the_prompt_is_exactly_what_it_was`, `::test_the_text_is_on_every_call_of_the_session`, `::test_the_text_never_enters_the_tool_surface_or_its_hash`), the wire (`::test_every_provider_adapter_sends_it_in_its_system_slot`, three real adapters × five profiles), the record (`::test_session_start_records_the_texts_fingerprint_and_size`, `::test_no_text_records_no_fingerprint_but_still_the_version`, `::test_the_text_is_never_in_telemetry_itself`), the refusal (`::test_a_4x_harness_whose_text_did_not_arrive_starts_no_session`, `::test_a_wrapper_that_drops_the_text_is_refused`, `::test_only_that_combination_is_refused`, `::test_bring_up_refuses_the_same_pairing_with_the_same_plain_message`, `::test_run_session_exits_with_the_plain_message_not_a_traceback`), the refusal's record (`::test_the_refusal_is_readable_from_telemetry_alone`, `::test_a_refused_attempt_consumes_no_session_number`, `::test_a_malformed_published_hash_cannot_mask_the_refusal`, `tests/unit/test_telemetry.py::test_a_malformed_refusal_is_rejected`); end to end under a cron environment against a stand-in serving a 4.x handshake (`tests/cron_smoke/check_telemetry.py`); natively per provider in the tri-provider tier once the recorded surface carries the text |
 | I37 | **Result shapes new at harness 4.0.0 / lens 1.0.0 neither crash nor mis-record**: incomplete rows, `INCOMPLETE` / `NOT_APPLIED`, time-boxed loop results, a `notice` first key, and the not-executed / lane-blocked / cancelled outcomes reach the model verbatim and are recorded as no terminal state rather than a wrong one | `tests/unit/test_shape_tolerance.py` (classification, hash lifting, receipts and the journal roster on each shape, through a session) |
 
 ---

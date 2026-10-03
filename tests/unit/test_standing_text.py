@@ -50,7 +50,7 @@ from kami_agent.harness import (
 )
 from kami_agent.loop import GameToolResult, LoopCaps
 from kami_agent.runner import SESSION_RAN, RunConfig, _load_prompts, run_session
-from kami_agent.state import load_state
+from kami_agent.state import crashed_session, fold_telemetry, load_state
 from kami_agent.telemetry import read_events, validate_event
 from kami_agent.tools.scaffold import PROFILES, ScaffoldTools
 
@@ -257,9 +257,11 @@ def config_for(run_dir, profile="control"):
     )
 
 
-def run(run_dir, harness, adapter=None, profile="control"):
+def run(run_dir, harness, adapter=None, profile="control", trigger="scheduled"):
     adapter = adapter or ScriptedAdapter()
-    outcome = run_session(config_for(run_dir, profile), adapter, harness_factory=lambda: harness)
+    outcome = run_session(
+        config_for(run_dir, profile), adapter, harness_factory=lambda: harness, trigger=trigger
+    )
     return outcome, adapter
 
 
@@ -525,7 +527,7 @@ def test_the_text_is_never_in_telemetry_itself(run_dir):
 
 @pytest.mark.parametrize("version", ["4.0.0", "4.2.1", "5.0.0-rc1", "4"])
 def test_a_4x_harness_whose_text_did_not_arrive_starts_no_session(run_dir, version):
-    """Refused before any telemetry and any model call, with a plain message."""
+    """Refused before session_start and any model call, with a plain message."""
     harness = Harness(standing_text="", schema_version=version)
     adapter = ScriptedAdapter()
     with pytest.raises(HarnessPairingError) as excinfo:
@@ -538,8 +540,57 @@ def test_a_4x_harness_whose_text_did_not_arrive_starts_no_session(run_dir, versi
     assert events(run_dir, "session_start") == []
     assert harness.executed == [], "no injection may run in a refused session"
     assert harness.closed, "the harness child must not be left running"
-    # The claimed number is spent and nothing else is (as with a missing asset).
-    assert load_state(run_dir / "state.json").session_counter == 1
+    # Nothing but the refusal itself was written for the attempt.
+    stream = list(read_events(run_dir / "telemetry.jsonl"))
+    assert [e["event"] for e in stream] == ["session_refused"]
+    # And no session number was consumed, in the stream or in the cache.
+    assert stream[0]["session"] == 0
+    assert load_state(run_dir / "state.json").session_counter == 0
+
+
+def test_the_refusal_is_readable_from_telemetry_alone(run_dir):
+    """A monitor that reads only telemetry.jsonl sees what was refused and why."""
+    with pytest.raises(HarnessPairingError) as excinfo:
+        run(run_dir, Harness(standing_text="", schema_version="4.0.0"))
+    (refused,) = events(run_dir, "session_refused")
+    validate_event(refused)
+    assert refused["reason"] == "standing_text_missing"
+    assert refused["message"] == str(excinfo.value)
+    assert refused["harness_schema_version"] == "4.0.0"
+    assert refused["harness_tools_hash"] == REGISTRY_HASH
+    assert refused["trigger"] == "scheduled"
+
+
+def test_a_refused_attempt_consumes_no_session_number(run_dir):
+    """Under a scheduler every poll may be refused; none of them uses up a number.
+
+    The counter is folded as max(session) over the stream (P3), so each
+    refusal carries the last number the run USED, and the next session that
+    does start gets the number the refused attempts would have had.
+    """
+    assert run(run_dir, Harness(schema_version="3.7.0"))[0] == SESSION_RAN
+    # Manual starts: the wake gate would otherwise answer not_due.
+    for _ in range(2):
+        with pytest.raises(HarnessPairingError):
+            run(run_dir, Harness(standing_text="", schema_version="4.0.0"), trigger="manual")
+        assert load_state(run_dir / "state.json").session_counter == 1
+    good = Harness(standing_text=STANDING, schema_version="4.0.0")
+    assert run(run_dir, good, trigger="manual")[0] == SESSION_RAN
+    assert [e["session"] for e in events(run_dir, "session_start")] == [1, 2]
+    assert [e["session"] for e in events(run_dir, "session_refused")] == [1, 1]
+    stream = list(read_events(run_dir / "telemetry.jsonl"))
+    assert fold_telemetry(stream).session_counter == 2
+    # A refusal is not a session: no schedule, no end, no crash for recovery.
+    assert len(events(run_dir, "schedule_next")) == 2
+    assert crashed_session(stream) is None
+
+
+def test_a_malformed_published_hash_cannot_mask_the_refusal(run_dir):
+    harness = Harness(standing_text="", schema_version="4.0.0", tools_hash="not-a-hash")
+    with pytest.raises(HarnessPairingError):
+        run(run_dir, harness)
+    (refused,) = events(run_dir, "session_refused")
+    assert "harness_tools_hash" not in refused
 
 
 def test_a_wrapper_that_drops_the_text_is_refused(run_dir):
@@ -548,6 +599,7 @@ def test_a_wrapper_that_drops_the_text_is_refused(run_dir):
     with pytest.raises(HarnessPairingError):
         run(run_dir, Wrapper(inner))
     assert inner.closed
+    assert [e["reason"] for e in events(run_dir, "session_refused")] == ["standing_text_missing"]
 
 
 @pytest.mark.parametrize(
@@ -609,7 +661,10 @@ def test_run_session_exits_with_the_plain_message_not_a_traceback(tmp_path, monk
         cli.main(["run-session", "--run-dir", str(run_dir), "--manual"])
     assert isinstance(excinfo.value.code, str)
     assert excinfo.value.code.startswith("refusing to start:")
-    assert [e["event"] for e in read_events(run_dir / "telemetry.jsonl")] == ["run_start"]
+    stream = list(read_events(run_dir / "telemetry.jsonl"))
+    assert [e["event"] for e in stream] == ["run_start", "session_refused"]
+    assert stream[1]["message"] == excinfo.value.code
+    assert stream[1]["trigger"] == "manual"
 
 
 def test_run_session_through_the_cli_shows_a_real_childs_text(tmp_path, monkeypatch):

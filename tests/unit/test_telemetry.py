@@ -31,6 +31,7 @@ SPEC_EVENT_TYPES = {
     "schedule_next",
     "session_end",
     "run_complete",
+    "session_refused",
 }
 
 # One representative payload per P9 event type, optional fields included.
@@ -120,6 +121,13 @@ EXAMPLE_PAYLOADS = {
             "cumulative_tokens": 2100000,
             "overspend_usd": 0.03,
         },
+    },
+    "session_refused": {
+        "reason": "standing_text_missing",
+        "message": "refusing to start: kami-harness 4.0.0 states its standing text ...",
+        "trigger": "scheduled",
+        "harness_schema_version": "4.0.0",
+        "harness_tools_hash": "7fc11fe95b85ebeed4f898e774c50833cd63314d56c3ed18b5afa56989f75262",
     },
 }
 
@@ -342,6 +350,21 @@ def test_session_start_carries_the_handshake_fields(writer):
     )
     for key, value in STANDING_FIELDS.items():
         assert record[key] == value
+
+
+@pytest.mark.parametrize(
+    "drop, override",
+    [
+        ("message", {}),
+        ("trigger", {}),
+        (None, {"reason": "something_else"}),  # closed enum
+        (None, {"tools_hash": "sha256:aa"}),  # a refusal is not a session_start
+    ],
+)
+def test_a_malformed_refusal_is_rejected(writer, drop, override):
+    payload = {k: v for k, v in EXAMPLE_PAYLOADS["session_refused"].items() if k != drop}
+    with pytest.raises(EventValidationError):
+        writer.emit("session_refused", session=3, **{**payload, **override})
 
 
 @pytest.mark.parametrize(

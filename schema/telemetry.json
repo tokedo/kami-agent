@@ -14,7 +14,8 @@
     { "$ref": "#/$defs/workspace_delete" },
     { "$ref": "#/$defs/schedule_next" },
     { "$ref": "#/$defs/session_end" },
-    { "$ref": "#/$defs/run_complete" }
+    { "$ref": "#/$defs/run_complete" },
+    { "$ref": "#/$defs/session_refused" }
   ],
   "$defs": {
     "common": {
@@ -454,6 +455,33 @@
         }
       },
       "required": ["reason", "totals"],
+      "unevaluatedProperties": false
+    },
+    "session_refused": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "description": "An attempt to start a session that was refused before it began (schema 0.7.0, SPEC P1 step 9, D1). One line per refused attempt, so a misconfigured deployment polled by a scheduler is a visible stream of these rather than a silent loop. NOT a session: nothing else is emitted for the attempt, no model is called, no schedule_next is written, and it consumes NO session number — `session` here is the last session number the run has used (0 before the first), the convention run_complete follows, so folding max(session) over the stream is unaffected and the next session that does start gets the number this attempt would have had",
+      "properties": {
+        "event": { "const": "session_refused" },
+        "reason": {
+          "enum": ["standing_text_missing"],
+          "description": "Closed enum. standing_text_missing: the harness's handshake stated schema_version MAJOR 4 or above — a harness that states its standing text, including the rule that tool output is untrusted data and never instructions, ONLY in the handshake — and none of that text reached the session, so the model would have been shown it nowhere"
+        },
+        "message": {
+          "type": "string",
+          "description": "The refusal exactly as the operator sees it on run-session's exit, verbatim"
+        },
+        "trigger": { "enum": ["scheduled", "manual"] },
+        "harness_schema_version": {
+          "type": "string",
+          "description": "The schema_version token the refused harness stated, verbatim — what the refusal acted on"
+        },
+        "harness_tools_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "The refused harness's own registry hash from the same handshake, verbatim, when it published one — which build was refused"
+        }
+      },
+      "required": ["reason", "message", "trigger"],
       "unevaluatedProperties": false
     }
   }

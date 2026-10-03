@@ -38,6 +38,9 @@ python -c "from kami_agent.supervisor import install_cron; \
 ## What to pull off a host, and in what order (SPEC P14, P15)
 
 - `/srv/run/telemetry.jsonl` — the source of truth for all accounting.
+  Any `session_refused` line in it means sessions are not starting at all
+  (SPEC P1 step 9): under the scheduler it repeats every poll until the
+  deployment is fixed, so alert on it.
 - `/srv/run/errors.jsonl` — **pull this first after any incident.** One
   line per failed provider call, written at the moment of the failure with
   the provider's own status, error type and message. It exists because a

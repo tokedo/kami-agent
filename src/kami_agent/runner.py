@@ -16,13 +16,15 @@ are a pure filesystem read, and a profile whose pinned asset is missing
 from the run directory is a mis-provisioned arm, which must fail loudly
 and leave no half-started session behind. The same is true of a harness
 that states its standing text only in the handshake and did not deliver
-it (D1): it is refused right after the spawn, before ``session_start``.
+it (D1): it is refused right after the spawn, before ``session_start``,
+leaving one ``session_refused`` line and consuming no session number.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -40,7 +42,7 @@ from kami_agent.adapters.base import (
 )
 from kami_agent.errorlog import ERRORS_FILENAME, ErrorLog
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
-from kami_agent.harness import HarnessError, check_pairing, tools_hash
+from kami_agent.harness import HarnessError, HarnessPairingError, check_pairing, tools_hash
 from kami_agent.lens import STATUS_QUERY, LensQuery
 from kami_agent.loop import (
     CARRIED_APPLIED,
@@ -77,6 +79,11 @@ SESSION_ABORTED = "session_aborted"
 
 TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_MANUAL = "manual"
+
+# session_refused reasons (SPEC P9; closed enum in the schema).
+REFUSED_STANDING_TEXT_MISSING = "standing_text_missing"
+
+_BARE_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass
@@ -390,13 +397,37 @@ def _run_one_session(
         # the handshake, for its whole surface — from 4.0.0 including the
         # rule that tool output is untrusted data, not instructions, which
         # no tool description carries any more. A harness that owes that
-        # text and did not deliver it is refused here, before any
-        # telemetry and any model call, rather than run with the rule
-        # shown nowhere (the claimed session number is spent, as with a
-        # missing prompt asset).
+        # text and did not deliver it is refused here, before session_start
+        # and any model call, rather than run with the rule shown nowhere.
         standing_text = _standing_text_of(game)
         schema_version = _schema_version_of(game)
-        check_pairing(schema_version, standing_text)
+        try:
+            check_pairing(schema_version, standing_text)
+        except HarnessPairingError as exc:
+            # Visible, and not a session. One `session_refused` line per
+            # refused attempt, so a scheduler polling a misconfigured
+            # deployment produces a readable stream of refusals instead of
+            # a silent sterile loop. It carries the LAST session number the
+            # run used, not the one claimed for this attempt: the counter is
+            # folded as max(session) over the stream (P3), so this attempt
+            # consumes no number, and the cache claimed above is given back
+            # so `status` agrees with the stream.
+            refused_fields: dict[str, Any] = {
+                "reason": REFUSED_STANDING_TEXT_MISSING,
+                "message": str(exc),
+                "trigger": trigger,
+            }
+            if schema_version is not None:
+                refused_fields["harness_schema_version"] = schema_version
+            published = getattr(game, "harness_tools_hash", None)
+            # Shape-checked here, unlike on session_start: a value the schema
+            # would reject must not turn the refusal into a validation error.
+            if isinstance(published, str) and _BARE_SHA256.fullmatch(published):
+                refused_fields["harness_tools_hash"] = published
+            writer.emit("session_refused", session=session - 1, **refused_fields)
+            state.session_counter = session - 1
+            save_state(state, state_path)
+            raise
 
         game_defs = list(game.tool_defs) if game is not None else []
         start_record = emit_session_start(

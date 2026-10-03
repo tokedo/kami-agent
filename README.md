@@ -116,7 +116,9 @@ every session's system prompt — after its own frozen prompt, before the
 file index — and records the text's sha256 and length on `session_start`.
 If a 4.x harness's text does not arrive (a broken build, or something
 between the harness and the scaffold dropping it), the scaffold refuses to
-start with a plain message instead of running without it. Against an older
+start with a plain message instead of running without it, and writes one
+`session_refused` line to telemetry for each refused attempt — which uses
+up no session number. Against an older
 harness it injects nothing and sends exactly the prompt 0.6.0 sent.
 Contract: [SPEC.md](SPEC.md) D1.
 
