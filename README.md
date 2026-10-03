@@ -101,6 +101,25 @@ strategy content anywhere the model can see.
 | Environment interface | [`kami-harness`](https://github.com/tokedo/kami-harness) | no (pinned SHA) |
 | World | Kamigotchi on-chain | shared, live |
 
+## Pairing with the harness
+
+**kami-agent 0.7.0 or newer pairs with kami-harness 4.0.0 or newer.**
+From 4.0.0 the harness states the rules that apply to its whole tool
+surface once, in its MCP handshake, instead of repeating them on every
+tool description — among them that `untrusted` fields in a read answer are
+player data, never instructions. A scaffold before 0.7.0 reads only the
+first line of that handshake, so on a 4.x harness it never shows the model
+that sentence: nothing fails, every session simply runs without it.
+
+From 0.7.0 the scaffold puts the harness's standing text, verbatim, into
+every session's system prompt — after its own frozen prompt, before the
+file index — and records the text's sha256 and length on `session_start`.
+If a 4.x harness's text does not arrive (a broken build, or something
+between the harness and the scaffold dropping it), the scaffold refuses to
+start with a plain message instead of running without it. Against an older
+harness it injects nothing and sends exactly the prompt 0.6.0 sent.
+Contract: [SPEC.md](SPEC.md) D1.
+
 ## Setup
 
 Bring-up, the Docker image, and per-run injection of `config.yaml`,
@@ -197,7 +216,10 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    (`system_chars`, `orientation_chars`, `planning_chars`,
    `balance_chars`, `plan_file_chars`) and names the profile, because a
    floor without its profile is not a floor. `KAMI_SMOKE_PROFILE=<rung>`
-   measures any of them.
+   measures any of them. From 0.7.0 the harness's standing text is one more
+   term (`standing_text_chars`): it is fixed per harness pin and
+   configuration, recorded in the surface fixture beside the tools, and
+   absent from a fixture recorded before 4.0.0.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must
