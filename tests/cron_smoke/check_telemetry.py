@@ -11,9 +11,12 @@ scheduled. Every event is re-validated against the telemetry schema.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
+
+from stub_session import STANDING_TEXT
 
 from kami_agent import journal
 from kami_agent.journal import JOURNAL_PATH
@@ -81,6 +84,16 @@ def main() -> int:
         f"session_start recorded profile {starts[0]['scaffold_profile']!r}, ran {profile!r}"
     )
 
+    # The harness's standing text reached this session (SPEC D1, P9): the
+    # stand-in states a 4.x handshake, and session_start fingerprints the
+    # text that went into the system prompt — never the text itself.
+    assert starts[0].get("harness_schema_version") == "4.0.0", starts[0]
+    expected_sha = hashlib.sha256(STANDING_TEXT.encode("utf-8")).hexdigest()
+    assert starts[0].get("harness_standing_text_sha256") == expected_sha, (
+        "session_start does not fingerprint the standing text the harness sent"
+    )
+    assert starts[0].get("harness_standing_text_chars") == len(STANDING_TEXT)
+
     # The session-start injections (SPEC P1.12, D1, D7): scaffold-initiated
     # reads issued before the first model call — the roster over the daemon's
     # real socket, the wallets' gas balances through the harness child, and on
@@ -146,6 +159,7 @@ def main() -> int:
         "cron-smoke telemetry OK: "
         f"{len(events)} events, profile={profile}, "
         f"session_end reason={ends[0]['reason']}, "
+        f"standing text {starts[0]['harness_standing_text_chars']} chars, "
         f"injections={[e['tool'] for e in injections]} as expected, "
         f"next wake in {schedules[0]['clamped_min']:g} min"
     )
