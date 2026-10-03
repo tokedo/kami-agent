@@ -598,7 +598,11 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     balance_content = transcript[4]["content"]
     # The plan read is present only on `planning`; the journal read is
     # always last, so the plan cannot be found by position from the end.
-    plan_content = transcript[6]["content"] if PLAN_TOOL in INJECTED_TOOLS else ""
+    # Keyed on the PROFILE, not on PLAN_TOOL's presence: the plan and the
+    # journal are both workspace_read, so that test was true on every
+    # profile and reported the journal entry as the plan file below.
+    has_plan = profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING)
+    plan_content = transcript[6]["content"] if has_plan else ""
     journal_content = transcript[2 * len(INJECTED_TOOLS)]["content"]
     if isinstance(harness, RecordedFakeHarness):
         assert brief_content == json.dumps(harness.brief["envelope"], ensure_ascii=False)
