@@ -11,6 +11,7 @@ from kami_agent.adapters.anthropic import AnthropicAdapter
 from kami_agent.adapters.base import AdapterResponse, StopReason, ToolCall, Usage
 from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
+from kami_agent.harness import HARNESS_DEV_PIN_SHA
 from kami_agent.telemetry import read_events, validate_event
 
 EXAMPLE = Path(__file__).parents[2] / "manifests" / "example.yaml"
@@ -89,7 +90,8 @@ def test_init_creates_run_layout_and_run_start(tmp_path, manifest_path, capsys):
     assert [e["event"] for e in events] == ["run_start"]
     validate_event(events[0])
     assert events[0]["manifest_hash"] == cli.load_manifest(manifest_path)["_manifest_hash"]
-    assert events[0]["harness_sha"].startswith("ba62fc9")
+    # The example manifest's pin and the client's dev pin name one harness.
+    assert events[0]["harness_sha"].startswith(HARNESS_DEV_PIN_SHA)
     out = capsys.readouterr().out
     assert "initialized" in out
 

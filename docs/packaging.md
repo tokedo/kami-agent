@@ -103,7 +103,11 @@ for that next to the harness and this scaffold. It raises its own Node
 heap limit to fit, which needs **Node 22.15 or newer**; on Node 20 set
 `NODE_OPTIONS=--max-old-space-size=6144` yourself. A restart that resumes
 from its saved world needs far less. Its `status` answer reports the heap
-limit it ended up with and who chose it.
+limit it ended up with and who chose it. **Keep its data directory's path
+short:** the query socket is `<data-dir>/kami-lens.sock`, and lens 1.0.0
+refuses (`SOCKET_PATH_TOO_LONG`) a socket path the OS would truncate —
+over 103 bytes on macOS, 107 on Linux — rather than bind one no client
+could find; the harness and this scaffold connect to that same path.
 
 ## The harness's nonce ledger needs a persistent volume (kami-harness 4.0.0)
 

@@ -5,7 +5,7 @@ The model-agnostic reference agent scaffold for
 frontier models into Kamigotchi, a live on-chain world, and measures what
 they do under controlled conditions.
 
-**Status: v0.5.1.** [SPEC.md](SPEC.md) is the contract registry — what the
+**Status: v0.7.0.** [SPEC.md](SPEC.md) is the contract registry — what the
 scaffold provides, what it depends on, the invariants and how each one is
 enforced, and the behaviors that are accepted by design.
 
@@ -207,7 +207,13 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    again. The fixture that measured the old shape also measured it
    wrongly — compact bytes for a path that pretty-printed, and an
    envelope `meta` block the daemon never served — so pre-0.4.0 floors
-   describe a shape no model ever saw.
+   describe a shape no model ever saw. **The same happened again from 0.6.0
+   to 0.7.0:** the brief moved onto the harness, whose MCP server
+   serializes it at indent=2, while this tier kept serving and measuring
+   the compact form — about half the bytes a real session carried. From
+   0.7.0 it serves exactly what the harness serves, against a fixture
+   rebuilt to the kami-lens 1.0.0 envelope, so brief terms do not compare
+   across 0.7.0.
 
    **Floors do not compare across profiles either, from 0.5.0.** Call-1
    context now depends on the rung: every profile adds the gas-balance
