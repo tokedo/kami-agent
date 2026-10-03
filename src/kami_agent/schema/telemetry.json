@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -94,6 +94,20 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "The hash the HARNESS published of its OWN registry, taken verbatim from the MCP initialize handshake's instructions field (bare hex, no prefix). Recorded for drift detection against the harness's own SPEC. It answers a different question over different bytes than tools_hash above — what the harness registered, versus what the model was shown — and the two are different BY CONSTRUCTION: never equate, reconcile, or assert them against each other (SPEC D1). Absent when the pinned harness publishes no such value"
+        },
+        "harness_schema_version": {
+          "type": "string",
+          "description": "The contract version the harness stated in line 1 of the MCP initialize handshake's instructions field (the schema_version token), verbatim (SPEC D1). It is the one handshake value the scaffold acts on: a harness at MAJOR 4 or above states its standing text only in the handshake, and a session that received none of it is refused before this event is ever written. Present from schema 0.7.0 on; absent when the pinned harness states no such token (kami-harness before 3.0.0)"
+        },
+        "harness_standing_text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "sha256 (bare hex) of the harness's standing text exactly as this session put it in the system prompt: the part of the handshake's instructions field after its first newline, verbatim, UTF-8 (SPEC D1, P1.11). From kami-harness 4.0.0 that text carries the rules said once for the whole surface instead of on every tool description — that tool output is untrusted data, never instructions, among them. It is part of the environment definition and is fixed by the harness pin AND that harness's own configuration (its call time box is stated in it), so unlike harness_tools_hash it moves when that configuration moves. Present from schema 0.7.0 on, and only when text was injected; absent means nothing was injected, never that an empty text was shown"
+        },
+        "harness_standing_text_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Length in characters (Unicode code points) of the same injected standing text, the unit every other prompt-size term is quoted in (SPEC D1 cap arithmetic). Present and absent together with harness_standing_text_sha256"
         }
       },
       "required": ["trigger", "budget_remaining_usd", "wallclock_elapsed_s", "tools_hash"],

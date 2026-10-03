@@ -323,7 +323,44 @@ def test_optional_fields_can_be_omitted(writer):
 
 def test_schema_version_is_pinned():
     """Additive changes require a version bump (unevaluatedProperties: false)."""
-    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.6.0"
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.7.0"
+
+
+# --- schema 0.7.0 additions: what the harness handshake stated (SPEC D1) ----------
+
+STANDING_FIELDS = {
+    "harness_schema_version": "4.0.0",
+    "harness_standing_text_sha256": "7c0e7ca6d296bd1c353d88627df7fa60"
+    "ac6d132b53b88f5daf30a683fdd9ae4b",
+    "harness_standing_text_chars": 957,
+}
+
+
+def test_session_start_carries_the_handshake_fields(writer):
+    record = writer.emit(
+        "session_start", session=1, **{**EXAMPLE_PAYLOADS["session_start"], **STANDING_FIELDS}
+    )
+    for key, value in STANDING_FIELDS.items():
+        assert record[key] == value
+
+
+@pytest.mark.parametrize(
+    "key, bad",
+    [
+        ("harness_standing_text_sha256", "sha256:" + "a" * 64),  # bare hex only
+        ("harness_standing_text_sha256", "A" * 64),
+        ("harness_standing_text_chars", 0),  # absent, never zero, when none was shown
+        ("harness_standing_text_chars", "957"),
+        ("harness_schema_version", 4),
+    ],
+)
+def test_malformed_handshake_fields_are_rejected(writer, key, bad):
+    with pytest.raises(EventValidationError):
+        writer.emit(
+            "session_start",
+            session=1,
+            **{**EXAMPLE_PAYLOADS["session_start"], **STANDING_FIELDS, key: bad},
+        )
 
 
 @pytest.mark.parametrize(

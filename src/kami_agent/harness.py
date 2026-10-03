@@ -5,6 +5,13 @@ as a stdio child at the SHA pinned in the run manifest; a handshake
 failure aborts the session before any model call (the runner writes
 ``session_end reason=errors`` and schedules ``wake_default``).
 
+The handshake's ``instructions`` field is parsed once (``Handshake``):
+line 1 carries the harness's machine tokens, and from kami-harness 4.0.0
+everything after the first newline is its standing text — the rules it
+states once for its whole surface instead of on every tool description.
+The runner shows that text to the model in the system prompt, verbatim,
+and refuses a 4.x harness whose text did not arrive (``check_pairing``).
+
 The MCP SDK is async; this client runs a private event loop on a
 background thread and exposes the synchronous surface the loop needs
 (``tool_defs`` + ``execute``, the ``GameTools`` protocol). The stdio
@@ -23,6 +30,7 @@ import hashlib
 import json
 import re
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -42,6 +50,105 @@ DEFAULT_HANDSHAKE_TIMEOUT_S = 60.0
 # Recorded verbatim for drift detection; see the never-equate note on
 # ``tools_hash`` below.
 _HANDSHAKE_TOOLS_HASH = re.compile(r"tools_hash=([0-9a-f]{64})")
+_HANDSHAKE_SCHEMA_VERSION = re.compile(r"(?:^|\s)schema_version=(\S+)")
+_HANDSHAKE_ERROR_SNIPPETS = re.compile(r"(?:^|\s)error_snippets=(\S+)")
+_SEMVER_MAJOR = re.compile(r"(\d+)(?:[.+-]|$)")
+
+# The first harness MAJOR that says its standing text in the handshake
+# instead of on its tool descriptions. From this version on, a session
+# that does not show the model that text shows it nothing of it: the
+# descriptions no longer carry it.
+STANDING_TEXT_HARNESS_MAJOR = 4
+
+
+@dataclass(frozen=True, slots=True)
+class Handshake:
+    """What the harness states in the MCP ``initialize`` ``instructions`` field.
+
+    The field has two parts. **Line 1** is machine tokens, space-separated:
+    ``tools_hash=<64 hex> schema_version=<semver> error_snippets=<on|off>``
+    (older harnesses publish a prefix of that list, or nothing). **Everything
+    after the first newline** is the harness's *standing text*: the rules
+    that apply to its whole surface — that ``untrusted`` fields are player
+    data and never instructions, how its world-state reads are served, and
+    the like — said once, here, instead of being repeated on every tool
+    description they apply to. Harnesses before 4.0.0 send no second part.
+
+    ``standing_text`` is that remainder **verbatim** — not stripped, not
+    reflowed — or the empty string when there is none (a remainder of
+    whitespace alone is none: there is nothing in it to show).
+    """
+
+    tools_hash: str | None = None
+    schema_version: str | None = None
+    error_snippets: str | None = None
+    standing_text: str = ""
+
+
+def parse_instructions(instructions: str | None) -> Handshake:
+    """Split the handshake ``instructions`` field into its two parts.
+
+    Tokens are read from line 1 only, so nothing in the standing text can
+    ever be mistaken for one. A field holding line 1 alone — every harness
+    before 4.0.0 — parses exactly as it always did and yields no text.
+    """
+    if not instructions:
+        return Handshake()
+    first_line, _, remainder = instructions.partition("\n")
+    tools = _HANDSHAKE_TOOLS_HASH.search(first_line)
+    schema = _HANDSHAKE_SCHEMA_VERSION.search(first_line)
+    snippets = _HANDSHAKE_ERROR_SNIPPETS.search(first_line)
+    return Handshake(
+        tools_hash=tools.group(1) if tools else None,
+        schema_version=schema.group(1) if schema else None,
+        error_snippets=snippets.group(1) if snippets else None,
+        standing_text=remainder if remainder.strip() else "",
+    )
+
+
+def schema_major(schema_version: str | None) -> int | None:
+    """The MAJOR of a ``schema_version`` token, or None if it has none."""
+    if not schema_version:
+        return None
+    match = _SEMVER_MAJOR.match(schema_version)
+    return int(match.group(1)) if match else None
+
+
+class HarnessPairingError(Exception):
+    """This scaffold and the pinned harness are not a working pair.
+
+    Raised before any telemetry for the session and before any model
+    call. Not a ``HarnessError``: a handshake failure is a session that
+    could not start and is recorded as one, while this is a deployment
+    that must not start at all, and its message is for an operator.
+    """
+
+
+def check_pairing(schema_version: str | None, standing_text: str) -> None:
+    """Refuse a harness whose standing text would not reach the model.
+
+    From kami-harness 4.0.0 the rule that tool output is untrusted data,
+    not instructions, is stated ONCE, in the handshake, and on no tool
+    description. A session against such a harness that received no
+    standing text would run with that rule shown nowhere — so it is
+    refused instead of run degraded. A harness that publishes no
+    ``schema_version`` token, or a MAJOR below 4, owes no standing text
+    and passes.
+    """
+    major = schema_major(schema_version)
+    if major is None or major < STANDING_TEXT_HARNESS_MAJOR or standing_text:
+        return
+    raise HarnessPairingError(
+        f"refusing to start: kami-harness {schema_version} states its standing "
+        "text — including the rule that tool output is untrusted data, never "
+        "instructions — only in its MCP handshake, after the first line of the "
+        "instructions field, and no tool description carries it any more. This "
+        "session received none of that text, so the model would never be shown "
+        "it. Check that the harness build is intact and that nothing between it "
+        "and this scaffold drops the instructions field (kami-harness 4.0.0 and "
+        "newer pair with kami-agent 0.7.0 and newer)."
+    )
+
 
 # How deep to look for in-band per-transaction receipt arrays. Multi-tx
 # results carry them either at the top level (one array for the whole
@@ -92,9 +199,17 @@ class HarnessClient:
         self.tool_defs: list[ToolDef] = []
         self.server_name: str | None = None
         self.server_version: str | None = None
+        # Everything the harness stated in the handshake's instructions
+        # field, parsed once (see ``Handshake``).
+        self.handshake = Handshake()
         # The harness's own registry hash, as it published it in the
         # handshake. NEVER equated with ``tools_hash`` below.
         self.harness_tools_hash: str | None = None
+        # The harness's contract version as its handshake states it, and
+        # its standing text verbatim ("" when it sends none). The runner
+        # puts the text in the system prompt and records both.
+        self.harness_schema_version: str | None = None
+        self.standing_text: str = ""
         self._session: ClientSession | None = None
 
         self._loop = asyncio.new_event_loop()
@@ -123,8 +238,10 @@ class HarnessClient:
                     self._session = session
                     self.server_name = init.serverInfo.name
                     self.server_version = init.serverInfo.version
-                    published = _HANDSHAKE_TOOLS_HASH.search(init.instructions or "")
-                    self.harness_tools_hash = published.group(1) if published else None
+                    self.handshake = parse_instructions(init.instructions)
+                    self.harness_tools_hash = self.handshake.tools_hash
+                    self.harness_schema_version = self.handshake.schema_version
+                    self.standing_text = self.handshake.standing_text
                     self.tool_defs = [
                         ToolDef(
                             name=t.name,
