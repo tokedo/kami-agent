@@ -31,6 +31,7 @@ SPEC_EVENT_TYPES = {
     "schedule_next",
     "session_end",
     "run_complete",
+    "session_refused",
 }
 
 # One representative payload per P9 event type, optional fields included.
@@ -120,6 +121,13 @@ EXAMPLE_PAYLOADS = {
             "cumulative_tokens": 2100000,
             "overspend_usd": 0.03,
         },
+    },
+    "session_refused": {
+        "reason": "standing_text_missing",
+        "message": "refusing to start: kami-harness 4.0.0 states its standing text ...",
+        "trigger": "scheduled",
+        "harness_schema_version": "4.0.0",
+        "harness_tools_hash": "7fc11fe95b85ebeed4f898e774c50833cd63314d56c3ed18b5afa56989f75262",
     },
 }
 
@@ -323,12 +331,71 @@ def test_optional_fields_can_be_omitted(writer):
 
 def test_schema_version_is_pinned():
     """Additive changes require a version bump (unevaluatedProperties: false)."""
-    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.6.0"
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.7.0"
+
+
+# --- schema 0.7.0 additions: what the harness handshake stated (SPEC D1) ----------
+
+STANDING_FIELDS = {
+    "harness_schema_version": "4.0.0",
+    "harness_standing_text_sha256": "7c0e7ca6d296bd1c353d88627df7fa60"
+    "ac6d132b53b88f5daf30a683fdd9ae4b",
+    "harness_standing_text_chars": 957,
+}
+
+
+def test_session_start_carries_the_handshake_fields(writer):
+    record = writer.emit(
+        "session_start", session=1, **{**EXAMPLE_PAYLOADS["session_start"], **STANDING_FIELDS}
+    )
+    for key, value in STANDING_FIELDS.items():
+        assert record[key] == value
+
+
+@pytest.mark.parametrize(
+    "drop, override",
+    [
+        ("message", {}),
+        ("trigger", {}),
+        (None, {"reason": "something_else"}),  # closed enum
+        (None, {"tools_hash": "sha256:aa"}),  # a refusal is not a session_start
+    ],
+)
+def test_a_malformed_refusal_is_rejected(writer, drop, override):
+    payload = {k: v for k, v in EXAMPLE_PAYLOADS["session_refused"].items() if k != drop}
+    with pytest.raises(EventValidationError):
+        writer.emit("session_refused", session=3, **{**payload, **override})
+
+
+@pytest.mark.parametrize(
+    "key, bad",
+    [
+        ("harness_standing_text_sha256", "sha256:" + "a" * 64),  # bare hex only
+        ("harness_standing_text_sha256", "A" * 64),
+        ("harness_standing_text_chars", 0),  # absent, never zero, when none was shown
+        ("harness_standing_text_chars", "957"),
+        ("harness_schema_version", 4),
+    ],
+)
+def test_malformed_handshake_fields_are_rejected(writer, key, bad):
+    with pytest.raises(EventValidationError):
+        writer.emit(
+            "session_start",
+            session=1,
+            **{**EXAMPLE_PAYLOADS["session_start"], **STANDING_FIELDS, key: bad},
+        )
 
 
 @pytest.mark.parametrize(
     "state",
-    ["confirmed_success", "reverted", "unconfirmed", "validation_rejected", "batch_error"],
+    [
+        "confirmed_success",
+        "reverted",
+        "unconfirmed",
+        "validation_rejected",
+        "batch_error",
+        "not_executed",
+    ],
 )
 def test_every_terminal_state_is_accepted(writer, state):
     record = writer.emit(

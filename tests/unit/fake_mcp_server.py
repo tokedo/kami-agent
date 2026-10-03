@@ -22,11 +22,22 @@ harness reports per-transaction receipts at: one array for the whole
 call, and one per row inside a batch's result list. ``error_payload``
 reproduces a tool that reports failure by RETURNING it rather than
 raising it, which is the shape ``result_error_shaped`` exists to name.
+
+The handshake's ``instructions`` field is whatever
+``FAKE_HARNESS_INSTRUCTIONS`` holds in this process's environment, and
+absent when it is unset — a stand-in for a harness before 3.0.0, which
+published nothing there. A test that wants a 4.x handshake (a token line,
+then the standing text after the first newline) passes one in.
 """
+
+import os
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("fake-kami-harness")
+mcp = FastMCP(
+    "fake-kami-harness",
+    instructions=os.environ.get("FAKE_HARNESS_INSTRUCTIONS") or None,
+)
 
 
 @mcp.tool()

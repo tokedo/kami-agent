@@ -37,7 +37,7 @@ from kami_agent.adapters.base import ModelAdapter, SamplingParams, UserMessage
 from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
 from kami_agent.governor import PriceTable
-from kami_agent.harness import HarnessClient
+from kami_agent.harness import HarnessClient, HarnessPairingError, check_pairing
 from kami_agent.lens import ROSTER_QUERY, LensClient, LensQueryError, LensUnavailableError
 from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, LoopCaps
 from kami_agent.runner import RunConfig, run_session
@@ -304,8 +304,20 @@ def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
         return "harness: not configured (skipped)", []
     client = factory()
     try:
+        # The pairing rule (D1): a harness that states its standing text
+        # only in the handshake must have delivered it. Refused here, at
+        # bring-up, with the same plain message every session would give.
+        try:
+            check_pairing(client.harness_schema_version, client.standing_text)
+        except HarnessPairingError as exc:
+            raise SystemExit(str(exc)) from exc
         names = [t.name for t in client.tool_defs]
         line = f"harness ok ({client.server_name} {client.server_version}, {len(names)} tools)"
+        if client.standing_text:
+            line += (
+                f"; standing text {len(client.standing_text)} chars "
+                "(shown in every session's system prompt)"
+            )
         if BALANCE_TOOL in names:
             line += f"; {BALANCE_TOOL} present (session-start gas balances)"
         else:
@@ -398,14 +410,19 @@ def cmd_run_session(args: argparse.Namespace) -> int:
     manifest = load_manifest(run_dir / "config.yaml")
     config = build_run_config(manifest, run_dir)
     adapter = build_adapter(manifest)
-    outcome = run_session(
-        config,
-        adapter,
-        harness_factory=harness_factory(manifest),
-        lens_factory=lens_factory(manifest),
-        trigger="manual" if args.manual else "scheduled",
-        disable_supervisor=uninstall_cron,
-    )
+    try:
+        outcome = run_session(
+            config,
+            adapter,
+            harness_factory=harness_factory(manifest),
+            lens_factory=lens_factory(manifest),
+            trigger="manual" if args.manual else "scheduled",
+            disable_supervisor=uninstall_cron,
+        )
+    except HarnessPairingError as exc:
+        # A plain message and a non-zero exit, not a traceback: this is an
+        # operator's deployment to fix, and nothing ran (D1).
+        raise SystemExit(str(exc)) from exc
     print(outcome)
     return 0
 

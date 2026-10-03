@@ -1,29 +1,47 @@
 {
   "_provenance": [
     "Synthetic, NOT a recording: the roster is invented, its shape is not.",
-    "Every field and nesting level matches the compact roster schema the",
-    "kami-lens daemon validates its own answers against, and envelope_chars",
-    "is measured the way the scaffold serializes it — compactly, since the",
-    "scaffold owns that serialization on the direct-lens path.",
+    "Shape built at kami-lens 1.0.0 (0ffc8a7) from the daemon's own sources,",
+    "no daemon queried: data matches src/queries/schemas/roster.json (the",
+    "account block's levelUpReady and skillPoints have been required since",
+    "lens 0.5.0 and were missing here), and meta has exactly the keys, in",
+    "the order, src/queries/envelope.ts builds: servedAt, blockNumber,",
+    "stale, mode, reconciledThrough, appliedThrough, asOf (block,",
+    "projectedAtSec and the four clock-sample fields of a live daemon).",
+    "incompleteRows and suppressed are absent, as on an answer with no",
+    "incomplete row and nothing withheld.",
+    "SERVED FORM: from 0.6.0 the brief is a harness tool, and the harness's",
+    "MCP server (FastMCP) serializes a dict result with indent=2. That is",
+    "what reaches the model, so envelope_chars and kami_chars_each are",
+    "measured on it, and the recorded-surface fake serves it. Through",
+    "0.6.0 this fixture was measured, and served, compactly — about half",
+    "the bytes a real session carried — so smoke floors quoted before",
+    "0.7.0 understate the brief term and do not compare.",
     "Roster size is the one free parameter and the brief's context cost is",
     "linear in it: envelope_chars and kami_chars_each convert a floor",
     "measured here to any other roster, and KAMI_SMOKE_BRIEF_KAMIS",
-    "re-measures it directly. Re-record from a live daemon when one is available.",
-    "PRE-0.4.0 NOTE: the fixture this replaces measured a party report as",
-    "compact JSON, while the live path pretty-printed it at indent=2, and",
-    "carried a meta block the daemon never serves. Floors quoted from it",
-    "measured a shape that never reached a model; they do not compare."
+    "re-measures it directly."
   ],
   "query": "roster",
   "args": [],
+  "serialization": "indent=2 (the harness's MCP server)",
   "kami_count": 12,
-  "envelope_chars": 853,
-  "kami_chars_each": 55,
+  "envelope_chars": 2146,
+  "kami_chars_each": 124,
   "envelope": {
     "data": {
       "account": {
         "index": 4271,
-        "roomIndex": 11
+        "roomIndex": 11,
+        "levelUpReady": [
+          1080
+        ],
+        "skillPoints": [
+          [
+            1119,
+            1
+          ]
+        ]
       },
       "kamis": [
         {
@@ -129,7 +147,17 @@
       "servedAt": "2026-08-07T12:00:00.000Z",
       "blockNumber": 8814052,
       "stale": false,
-      "mode": "daemon"
+      "mode": "daemon",
+      "reconciledThrough": 8814040,
+      "appliedThrough": 8814051,
+      "asOf": {
+        "block": 8814052,
+        "projectedAtSec": 1786104000,
+        "clockSampleBlock": 8813991,
+        "clockSampleBlockTime": 1786103870,
+        "clockOffsetMs": -11800,
+        "clockSampleAgoMs": 142000
+      }
     }
   }
 }

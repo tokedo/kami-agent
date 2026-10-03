@@ -21,7 +21,11 @@ caps: # SPEC D3 (session_token_cap sized per model — no default)
   session_tool_cap: 50
   max_consecutive_errors: 5
   retry_max_attempts: 5
-  tool_timeout_s: 120
+  tool_timeout_s: 120 # watchdog on ONE tool call (SPEC P2). Must stay above
+    # the harness's own call box, KAMI_CALL_BUDGET_S (default 90, kami-harness
+    # 4.0.0), with margin for the last receipt: a watchdog that fires first
+    # tells the model the call failed while the harness is still running it.
+    # Raise the two together (docs/packaging.md)
   tool_result_max_bytes: 65536
   wait_max_seconds: 300 # upper bound on ONE `wait` call (SPEC P10); the wait
     # tool is exempt from the watchdog above, which exists to catch a hung
@@ -72,6 +76,11 @@ harness: # spawned per session as a stdio child (SPEC D1)
   args: [executor/server.py]
   cwd: /opt/kami-harness
   handshake_timeout_s: 60
+  # kami-harness 4.0.0+ (pairs with kami-agent 0.7.0+): its handshake carries
+  # standing text every session shows the model, and its nonce ledger must sit
+  # on a persistent volume — KAMI_LANE_DIR, set by the packaged image to
+  # /srv/run/harness-lanes (docs/packaging.md). The scaffold passes its own
+  # environment through to this child; an `env:` map here wins over it.
 
 # World-state daemon (SPEC D7). From 0.6.0 the scaffold reads it directly
 # for ONE thing: which daemon is serving, recorded on every session_start
@@ -90,6 +99,6 @@ lens:
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: ba62fc9f81ee383056b03cf7c496a3e94921d99c # kami-harness 2.1.0
-  lens_sha: 0551b87d21ea446e9a85b1afca20f8c3e45da8d7 # kami-lens 0.3.0
+  harness_sha: 55cdf9f18ec9c4f4b07a587b8adbb6215f766cf5 # kami-harness 4.0.0 (pairs with kami-agent 0.7.0+)
+  lens_sha: 0ffc8a734082bc9ee74ec381178b4320fe323aad # kami-lens 1.0.0
   gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # repo cleanup only; game content byte-identical to c2c5a1b

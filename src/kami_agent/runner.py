@@ -14,12 +14,17 @@ reuse a session number — is preserved.
 The profile's prompt assets are read before that spawn (P1, P13): they
 are a pure filesystem read, and a profile whose pinned asset is missing
 from the run directory is a mis-provisioned arm, which must fail loudly
-and leave no half-started session behind.
+and leave no half-started session behind. The same is true of a harness
+that states its standing text only in the handshake and did not deliver
+it (D1): it is refused right after the spawn, before ``session_start``,
+leaving one ``session_refused`` line and consuming no session number.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -37,7 +42,7 @@ from kami_agent.adapters.base import (
 )
 from kami_agent.errorlog import ERRORS_FILENAME, ErrorLog
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
-from kami_agent.harness import HarnessError, tools_hash
+from kami_agent.harness import HarnessError, HarnessPairingError, check_pairing, tools_hash
 from kami_agent.lens import STATUS_QUERY, LensQuery
 from kami_agent.loop import (
     CARRIED_APPLIED,
@@ -74,6 +79,11 @@ SESSION_ABORTED = "session_aborted"
 
 TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_MANUAL = "manual"
+
+# session_refused reasons (SPEC P9; closed enum in the schema).
+REFUSED_STANDING_TEXT_MISSING = "standing_text_missing"
+
+_BARE_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass
@@ -286,6 +296,7 @@ def _run_one_session(
         hash_value: str,
         published: str | None = None,
         lens_provenance: dict[str, Any] | None = None,
+        harness_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         elapsed = 0.0
         if state.first_session_at is not None:
@@ -307,6 +318,12 @@ def _run_one_session(
         # different by construction (D1).
         if published is not None:
             fields["harness_tools_hash"] = published
+        # The contract version the harness stated, and the fingerprint of
+        # the standing text it sent — which this session put in the
+        # system prompt verbatim (D1). Part of the environment definition,
+        # pinned with the harness, so it is recorded beside its hash.
+        if harness_provenance:
+            fields.update(harness_provenance)
         # Which daemon actually served this session (D7). Operator-side
         # only: session_start is not an agent-visible channel (P9, I1).
         if lens_provenance:
@@ -376,19 +393,65 @@ def _run_one_session(
     previous_journal_end = journal.last_ended_at(run_dir)
 
     try:
+        # The harness's standing text (D1): the rules it states once, in
+        # the handshake, for its whole surface — from 4.0.0 including the
+        # rule that tool output is untrusted data, not instructions, which
+        # no tool description carries any more. A harness that owes that
+        # text and did not deliver it is refused here, before session_start
+        # and any model call, rather than run with the rule shown nowhere.
+        standing_text = _standing_text_of(game)
+        schema_version = _schema_version_of(game)
+        try:
+            check_pairing(schema_version, standing_text)
+        except HarnessPairingError as exc:
+            # Visible, and not a session. One `session_refused` line per
+            # refused attempt, so a scheduler polling a misconfigured
+            # deployment produces a readable stream of refusals instead of
+            # a silent sterile loop. It carries the LAST session number the
+            # run used, not the one claimed for this attempt: the counter is
+            # folded as max(session) over the stream (P3), so this attempt
+            # consumes no number, and the cache claimed above is given back
+            # so `status` agrees with the stream.
+            refused_fields: dict[str, Any] = {
+                "reason": REFUSED_STANDING_TEXT_MISSING,
+                "message": str(exc),
+                "trigger": trigger,
+            }
+            if schema_version is not None:
+                refused_fields["harness_schema_version"] = schema_version
+            published = getattr(game, "harness_tools_hash", None)
+            # Shape-checked here, unlike on session_start: a value the schema
+            # would reject must not turn the refusal into a validation error.
+            if isinstance(published, str) and _BARE_SHA256.fullmatch(published):
+                refused_fields["harness_tools_hash"] = published
+            writer.emit("session_refused", session=session - 1, **refused_fields)
+            state.session_counter = session - 1
+            save_state(state, state_path)
+            raise
+
         game_defs = list(game.tool_defs) if game is not None else []
         start_record = emit_session_start(
             tools_hash(game_defs + list(scaffold.tool_defs)),
             getattr(game, "harness_tools_hash", None),
             _lens_provenance(lens),
+            _harness_provenance(schema_version, standing_text),
         )
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
 
         # 5. Build context: frozen system prompt + this profile's pinned
-        # appendices + the file index (P1.10) — full workspace/ tree,
-        # reference/ collapsed to one entry.
-        system = "\n\n".join([*prompts["system_parts"], scaffold.workspace_list()])
+        # appendices + the harness's standing text, verbatim, when it sent
+        # any + the file index (P1.11) — full workspace/ tree, reference/
+        # collapsed to one entry. The standing text sits after the
+        # scaffold's own frozen text and before the one part that changes
+        # between sessions, so everything fixed for the run is one prefix.
+        system = "\n\n".join(
+            [
+                *prompts["system_parts"],
+                *([standing_text] if standing_text else []),
+                scaffold.workspace_list(),
+            ]
+        )
 
         # 6–7. Kickoff + agent loop.
         loop = AgentLoop(
@@ -517,6 +580,45 @@ def _journal_crashed_session(
 
 def _tx_hashes_of(row: dict[str, Any]) -> list[Any]:
     return [r.get("tx_hash") for r in row.get("txs") or () if isinstance(r, dict)]
+
+
+def _standing_text_of(game: GameTools | None) -> str:
+    """The harness's standing text, verbatim, or "" (D1).
+
+    Read off the game tools as an optional attribute: a stand-in or a
+    wrapper that does not carry it yields "" — and if it does carry the
+    harness's schema version, ``check_pairing`` refuses that combination
+    against a 4.x harness rather than letting the text go missing.
+    """
+    text = getattr(game, "standing_text", "") if game is not None else ""
+    return text if isinstance(text, str) else ""
+
+
+def _schema_version_of(game: GameTools | None) -> str | None:
+    version = getattr(game, "harness_schema_version", None) if game is not None else None
+    return version if isinstance(version, str) else None
+
+
+def _harness_provenance(schema_version: str | None, standing_text: str) -> dict[str, Any]:
+    """session_start fields for what the handshake stated (D1, P9).
+
+    The standing text is recorded by fingerprint and length, never by
+    content: it is fixed by the harness pin and that harness's own
+    configuration (its call time box is stated in it), so the hash
+    identifies it the way ``harness_tools_hash`` identifies the registry —
+    and, unlike the registry hash, it moves when that configuration does.
+    Absent when nothing was injected; absence never means an empty text
+    was shown.
+    """
+    fields: dict[str, Any] = {}
+    if schema_version is not None:
+        fields["harness_schema_version"] = schema_version
+    if standing_text:
+        fields["harness_standing_text_sha256"] = hashlib.sha256(
+            standing_text.encode("utf-8")
+        ).hexdigest()
+        fields["harness_standing_text_chars"] = len(standing_text)
+    return fields
 
 
 # The daemon query that answers "which lens served this run?" (SPEC D7).

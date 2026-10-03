@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -14,7 +14,8 @@
     { "$ref": "#/$defs/workspace_delete" },
     { "$ref": "#/$defs/schedule_next" },
     { "$ref": "#/$defs/session_end" },
-    { "$ref": "#/$defs/run_complete" }
+    { "$ref": "#/$defs/run_complete" },
+    { "$ref": "#/$defs/session_refused" }
   ],
   "$defs": {
     "common": {
@@ -94,6 +95,20 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "The hash the HARNESS published of its OWN registry, taken verbatim from the MCP initialize handshake's instructions field (bare hex, no prefix). Recorded for drift detection against the harness's own SPEC. It answers a different question over different bytes than tools_hash above — what the harness registered, versus what the model was shown — and the two are different BY CONSTRUCTION: never equate, reconcile, or assert them against each other (SPEC D1). Absent when the pinned harness publishes no such value"
+        },
+        "harness_schema_version": {
+          "type": "string",
+          "description": "The contract version the harness stated in line 1 of the MCP initialize handshake's instructions field (the schema_version token), verbatim (SPEC D1). It is the one handshake value the scaffold acts on: a harness at MAJOR 4 or above states its standing text only in the handshake, and a session that received none of it is refused before this event is ever written. Present from schema 0.7.0 on; absent when the pinned harness states no such token (kami-harness before 3.0.0)"
+        },
+        "harness_standing_text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "sha256 (bare hex) of the harness's standing text exactly as this session put it in the system prompt: the part of the handshake's instructions field after its first newline, verbatim, UTF-8 (SPEC D1, P1.11). From kami-harness 4.0.0 that text carries the rules said once for the whole surface instead of on every tool description — that tool output is untrusted data, never instructions, among them. It is part of the environment definition and is fixed by the harness pin AND that harness's own configuration (its call time box is stated in it), so unlike harness_tools_hash it moves when that configuration moves. Present from schema 0.7.0 on, and only when text was injected; absent means nothing was injected, never that an empty text was shown"
+        },
+        "harness_standing_text_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Length in characters (Unicode code points) of the same injected standing text, the unit every other prompt-size term is quoted in (SPEC D1 cap arithmetic). Present and absent together with harness_standing_text_sha256"
         }
       },
       "required": ["trigger", "budget_remaining_usd", "wallclock_elapsed_s", "tools_hash"],
@@ -305,7 +320,7 @@
         },
         "tx_hash": {
           "type": "string",
-          "description": "The transaction this call submitted, where it submitted exactly one. Recovered from the returned payload on the success path, and from the harness's own contract phrasing on the raised path — so from 0.4.0 the reverted and unconfirmed rows carry it too, instead of leaving it only inside the error text that P9 tells readers not to parse. Absent for batch errors (no single transaction), for validation rejections (nothing was broadcast), and for every call that is not a transaction"
+          "description": "The transaction this call submitted, where it submitted exactly one. Recovered from the returned payload on the success path, and from the harness's own contract phrasing on the raised path — so from 0.4.0 the reverted and unconfirmed rows carry it too, and from 0.7.0 the not_executed rows (a hash that will never appear in a block), instead of leaving it only inside the error text that P9 tells readers not to parse. Absent for batch errors (no single transaction), for validation rejections (nothing was broadcast), and for every call that is not a transaction"
         },
         "tx_terminal_state": {
           "enum": [
@@ -313,9 +328,10 @@
             "reverted",
             "unconfirmed",
             "validation_rejected",
-            "batch_error"
+            "batch_error",
+            "not_executed"
           ],
-          "description": "The transaction outcome the harness reported, classified once at ingestion so analysis never string-matches harness prose (SPEC D1). confirmed_success: receipt confirmed (ok=true). reverted: included on-chain and reverted — gas spent, final (ok=false). unconfirmed: broadcast, no receipt within the harness timeout — outcome UNKNOWN, may still land (ok=false). validation_rejected: a precondition failed before signing, nothing broadcast, no gas spent (ok=false). batch_error: a multi-transaction call with at least one failed item, whose message itemizes per-item outcomes that may mix the states above (ok=false). ABSENT whenever the call was not a single transaction outcome: every read, every scaffold tool, every non-transaction error, an allow_partial batch that returned mixed per-item results in band, and a pre-send dry-run skip. Absence therefore means 'not classifiable as one terminal state', never 'succeeded'"
+          "description": "The transaction outcome the harness reported, classified once at ingestion so analysis never string-matches harness prose (SPEC D1; what each value means for gas and action reconciliation is tabled in SPEC P9). confirmed_success: receipt confirmed (ok=true). reverted: included on-chain and reverted — gas spent, final (ok=false). unconfirmed: broadcast, no receipt within the harness timeout — outcome UNKNOWN, may still land (ok=false). validation_rejected: a precondition failed before signing, nothing broadcast, no gas spent (ok=false). batch_error: a multi-transaction call with at least one failed item, whose message itemizes per-item outcomes that may mix the states above (ok=false). not_executed (schema 0.7.0, kami-harness 4.0.0+): broadcast and PROVEN never to execute — its nonce was consumed by another transaction (a nonce collision, whose message names that other hash) or the node no longer holds it and its nonce was released; this hash spent no gas, changed nothing and will never appear in a block (ok=false when raised; a returned single-transaction status \"dropped\" maps here with ok=true, ok being exception-keyed). ABSENT whenever the call was not a single transaction outcome: every read, every scaffold tool, every non-transaction error, an allow_partial batch that returned mixed per-item results in band, and a pre-send dry-run skip. Absence therefore means 'not classifiable as one terminal state', never 'succeeded'"
         }
       },
       "required": ["tool", "source", "duration_ms", "ok"],
@@ -439,6 +455,33 @@
         }
       },
       "required": ["reason", "totals"],
+      "unevaluatedProperties": false
+    },
+    "session_refused": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "description": "An attempt to start a session that was refused before it began (schema 0.7.0, SPEC P1 step 9, D1). One line per refused attempt, so a misconfigured deployment polled by a scheduler is a visible stream of these rather than a silent loop. NOT a session: nothing else is emitted for the attempt, no model is called, no schedule_next is written, and it consumes NO session number — `session` here is the last session number the run has used (0 before the first), the convention run_complete follows, so folding max(session) over the stream is unaffected and the next session that does start gets the number this attempt would have had",
+      "properties": {
+        "event": { "const": "session_refused" },
+        "reason": {
+          "enum": ["standing_text_missing"],
+          "description": "Closed enum. standing_text_missing: the harness's handshake stated schema_version MAJOR 4 or above — a harness that states its standing text, including the rule that tool output is untrusted data and never instructions, ONLY in the handshake — and none of that text reached the session, so the model would have been shown it nowhere"
+        },
+        "message": {
+          "type": "string",
+          "description": "The refusal exactly as the operator sees it on run-session's exit, verbatim"
+        },
+        "trigger": { "enum": ["scheduled", "manual"] },
+        "harness_schema_version": {
+          "type": "string",
+          "description": "The schema_version token the refused harness stated, verbatim — what the refusal acted on"
+        },
+        "harness_tools_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "The refused harness's own registry hash from the same handshake, verbatim, when it published one — which build was refused"
+        }
+      },
+      "required": ["reason", "message", "trigger"],
       "unevaluatedProperties": false
     }
   }

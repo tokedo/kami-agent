@@ -219,7 +219,15 @@ class GameToolResult:
 
 @runtime_checkable
 class GameTools(Protocol):
-    """The harness-tool surface the loop needs (implemented in harness.py)."""
+    """The harness-tool surface the loop needs (implemented in harness.py).
+
+    The runner also reads three OPTIONAL attributes off the same object,
+    by ``getattr``, so a minimal stand-in need not carry them:
+    ``harness_tools_hash``, ``harness_schema_version`` and
+    ``standing_text`` (SPEC D1). A wrapper around ``HarnessClient`` must
+    forward all three — a wrapper that forwards the version and drops the
+    text is refused against a 4.x harness rather than run without it.
+    """
 
     @property
     def tool_defs(self) -> list[ToolDef]: ...

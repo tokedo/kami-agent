@@ -27,12 +27,26 @@ serialization to the scaffold's compact one. Both cut it; together they
 cut it by roughly an order of magnitude at a given roster size, and they
 flatten its slope in roster size by about as much again.
 
+FLOORS DO NOT COMPARE ACROSS 0.7.0 EITHER, for the brief term. From 0.6.0
+the brief is a harness tool, and the harness's MCP server serializes it at
+indent=2; this tier kept serving and measuring the compact form until
+0.7.0, which understated the brief by about half. It now serves exactly
+what the harness serves (served_form), against a fixture rebuilt to the
+kami-lens 1.0.0 envelope.
+
 FLOORS DO NOT COMPARE ACROSS PROFILES EITHER, from 0.5.0. Call-1 context
 now depends on the rung: every profile adds the gas-balance injection, the
 rungs at or above `orientation` add a pinned prompt appendix, and
 `planning` adds another appendix plus the plan file — whose size is the
 AGENT's to decide, bounded only by tool_result_max_bytes. The report below
 prints each term separately for that reason.
+
+FROM 0.7.0 THE SYSTEM PROMPT ALSO CARRIES THE HARNESS'S STANDING TEXT —
+the part of its handshake after the first line, verbatim (SPEC D1, P1.11).
+It is fixed per harness pin and configuration, it is recorded in the
+surface fixture beside the tools, and the report quotes it as its own term
+(`standing_text_chars`). A fixture recorded before 4.0.0 carries none, and
+the floor is then what it was.
 """
 
 import json
@@ -258,7 +272,7 @@ def _brief_fixture(kami_count=0):
             resized.append(kami)
         brief["envelope"]["data"]["kamis"] = resized
         brief["kami_count"] = kami_count
-        brief["envelope_chars"] = len(json.dumps(brief["envelope"], ensure_ascii=False))
+        brief["envelope_chars"] = len(served_form(brief["envelope"]))
     return brief
 
 
@@ -273,13 +287,24 @@ EXPECTED_SEQUENCE = [
 ]
 
 
-# The roster tool the session-start brief calls (SPEC P1.12). The
-# committed fixture is the 2.2.0 surface, which predates it, and the
-# fixture deliberately stays there: it is the recorded surface of the
-# harness ref this repo pins today, and re-recording it is a release duty,
-# not a test convenience. So the fake ADDS this definition — the shape the
-# 3.0.0 surface serves — which keeps the recorded-surface assertions
-# measuring the recorded surface while still exercising the brief.
+def served_form(envelope):
+    """The brief exactly as the pinned harness serves it to the scaffold.
+
+    From 0.6.0 the brief is a harness tool, and the harness's MCP server
+    (FastMCP) turns a dict result into text with pydantic's JSON encoder at
+    indent=2 — so that, not a compact dump, is what reaches the model, and
+    what the floor must measure. Through 0.6.0 this tier served and measured
+    the compact form, about half the bytes a real session carried.
+    """
+    import pydantic_core
+
+    return pydantic_core.to_json(envelope, fallback=str, indent=2).decode()
+
+
+# The roster tool the session-start brief calls (SPEC P1.12). Every recorded
+# surface from kami-harness 3.0.0 on serves it, the committed 4.0.0 fixture
+# included; a fixture recorded before 3.0.0 did not, and for one the fake
+# ADDS this definition — the shape 3.0.0 serves — so the brief still runs.
 ROSTER_DEF = ToolDef(
     name=BRIEF_TOOL,
     description=("Compact roster: one line per kami (index, state, HP) plus where the account is."),
@@ -313,13 +338,18 @@ class RecordedFakeHarness:
         # false-alarm class at run reconciliation (SPEC D1).
         self.recorded_hash = surface["harness_only_tools_hash"]
         self.harness_tools_hash = surface.get("harness_published_tools_hash")
+        # What the handshake stated besides the hash (SPEC D1): the version
+        # token and the standing text, which the runner puts in the system
+        # prompt verbatim. Absent from a fixture recorded before 0.7.0.
+        self.harness_schema_version = surface["harness"].get("schema_version")
+        self.standing_text = surface.get("standing_text") or ""
 
     def execute(self, name, args):
         if name == BRIEF_TOOL:
             # A real-shaped envelope: the brief is part of call 1, so a
             # error record here would make the reported floor a
             # measurement of an error record instead.
-            return GameToolResult(content=json.dumps(self.brief["envelope"], ensure_ascii=False))
+            return GameToolResult(content=served_form(self.brief["envelope"]))
         if not name.startswith(("get_", "list_")):
             raise ToolError(f"{name} is not available")
         return GameToolResult(content=json.dumps({"ok": True, "simulated": True, "tool": name}))
@@ -385,6 +415,11 @@ class ReadOnlyHarness:
         self._client = client
         self.tool_defs = client.tool_defs
         self.harness_tools_hash = client.harness_tools_hash
+        # Forwarded, or the session would run without the harness's
+        # standing text — and against a 4.x harness the runner refuses a
+        # wrapper that drops it (SPEC D1).
+        self.harness_schema_version = client.harness_schema_version
+        self.standing_text = client.standing_text
 
     def execute(self, name, args):
         if not name.startswith(("get_", "list_")):
@@ -581,10 +616,14 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     balance_content = transcript[4]["content"]
     # The plan read is present only on `planning`; the journal read is
     # always last, so the plan cannot be found by position from the end.
-    plan_content = transcript[6]["content"] if PLAN_TOOL in INJECTED_TOOLS else ""
+    # Keyed on the PROFILE, not on PLAN_TOOL's presence: the plan and the
+    # journal are both workspace_read, so that test was true on every
+    # profile and reported the journal entry as the plan file below.
+    has_plan = profile_at_least(SMOKE_PROFILE, PROFILE_PLANNING)
+    plan_content = transcript[6]["content"] if has_plan else ""
     journal_content = transcript[2 * len(INJECTED_TOOLS)]["content"]
     if isinstance(harness, RecordedFakeHarness):
-        assert brief_content == json.dumps(harness.brief["envelope"], ensure_ascii=False)
+        assert brief_content == served_form(harness.brief["envelope"])
 
     # Tier gate: all tool calls parsed natively → each canned step executed ok.
     executed = [e["tool"] for e in model_events if e["ok"]]
@@ -621,10 +660,20 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     # The workspace write landed.
     assert (run_dir / "workspace" / "smoke.md").read_text(encoding="utf-8") == "smoke ok"
 
+    # The harness's standing text reached the session record as what it is
+    # (SPEC D1, P9): fingerprinted on session_start, never copied into it.
+    session_start = next(e for e in events if e["event"] == "session_start")
+    if harness.standing_text:
+        assert session_start["harness_standing_text_chars"] == len(harness.standing_text)
+    else:
+        assert "harness_standing_text_chars" not in session_start
+
     # Apparatus leak check (I1) over every agent-visible string: system prompt +
     # file index, kickoff/continuation, tool names/descriptions/schemas,
-    # and the full transcript (assistant + tool results as sent).
+    # the harness's standing text, and the full transcript (assistant +
+    # tool results as sent).
     visible = [
+        harness.standing_text,
         (run_dir / "prompts" / "system.txt").read_text(encoding="utf-8"),
         (run_dir / "prompts" / "orientation.txt").read_text(encoding="utf-8"),
         (run_dir / "prompts" / "planning.txt").read_text(encoding="utf-8"),
@@ -692,6 +741,7 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
         f"journal_chars={len(journal_content)} "
         f"system_chars={system_chars} orientation_chars={orientation_chars} "
         f"planning_chars={planning_chars} kickoff_chars={len(KICKOFF)} "
+        f"standing_text_chars={len(harness.standing_text)} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
         f"session_tokens={session_end['session_tokens']} "
         f"session_cache_read={session_cache_read} "
@@ -735,13 +785,15 @@ def test_brief_fixture_is_internally_consistent():
     envelope = brief["envelope"]
     empty = {**envelope, "data": {**envelope["data"], "kamis": []}}
     assert brief["kami_count"] == len(kamis)
-    # Measured the way the SCAFFOLD serializes it: compactly. The pre-0.4.0
-    # fixture measured compact bytes for a path that pretty-printed, so its
-    # floors described a shape no model ever saw.
-    assert brief["envelope_chars"] == len(json.dumps(envelope, ensure_ascii=False))
+    # Measured on the form that reaches the model: the harness's MCP server
+    # serializes the envelope at indent=2. The pre-0.4.0 fixture measured
+    # compact bytes for a path that pretty-printed, and from 0.6.0 to 0.7.0
+    # this one did the same again — both times the floor described a shape
+    # no model ever saw.
+    assert brief["serialization"] == "indent=2 (the harness's MCP server)"
+    assert brief["envelope_chars"] == len(served_form(envelope))
     assert brief["kami_chars_each"] == round(
-        (len(json.dumps(envelope, ensure_ascii=False)) - len(json.dumps(empty, ensure_ascii=False)))
-        / len(kamis)
+        (len(served_form(envelope)) - len(served_form(empty))) / len(kamis)
     )
     # Resizing keeps the envelope schema-shaped and the per-kami cost linear.
     doubled = _brief_fixture(2 * len(kamis))
@@ -756,7 +808,37 @@ def test_brief_fixture_is_internally_consistent():
     # The compact roster carries no authored strings at all, by design, so
     # its untrusted path list is empty and stays empty in name-free mode.
     assert brief["envelope"]["untrusted"] == []
-    assert set(brief["envelope"]["meta"]) == {"servedAt", "blockNumber", "stale", "mode"}
+    # The kami-lens 1.0.0 envelope (src/queries/envelope.ts), keys AND order:
+    # order is part of the bytes the model reads. incompleteRows and
+    # suppressed are absent because no row is incomplete and nothing was
+    # withheld; asOf carries the clock-sample fields a live daemon has.
+    assert list(brief["envelope"]["meta"]) == [
+        "servedAt",
+        "blockNumber",
+        "stale",
+        "mode",
+        "reconciledThrough",
+        "appliedThrough",
+        "asOf",
+    ]
+    assert list(brief["envelope"]["meta"]["asOf"]) == [
+        "block",
+        "projectedAtSec",
+        "clockSampleBlock",
+        "clockSampleBlockTime",
+        "clockOffsetMs",
+        "clockSampleAgoMs",
+    ]
+    assert brief["envelope"]["meta"]["asOf"]["block"] == brief["envelope"]["meta"]["blockNumber"]
+    # The lens 1.0.0 roster schema (src/queries/schemas/roster.json): the
+    # account block's two leveling sets are required, and every row of a
+    # roster the mirror could complete carries hp.
+    assert set(brief["envelope"]["data"]["account"]) == {
+        "index",
+        "roomIndex",
+        "levelUpReady",
+        "skillPoints",
+    }
     for kami in kamis:
         assert set(kami) == {"index", "state", "hp"}
         assert len(kami["hp"]) == 2
@@ -805,3 +887,10 @@ def test_recorded_surface_matches_the_live_harness():
     ]
     assert not drifted, f"description/schema drift in: {drifted}"
     assert tools_hash(live) == recorded["harness_only_tools_hash"]
+    # And the standing text the handshake states is the recorded one, byte
+    # for byte: it is in every session's system prompt (SPEC D1).
+    if "standing_text" in recorded:
+        assert harness.standing_text == recorded["standing_text"], (
+            "standing text drift: the live harness sends different bytes than "
+            "the fixture recorded (a different commit, or a different call box)"
+        )

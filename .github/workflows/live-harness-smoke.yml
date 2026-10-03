@@ -11,32 +11,24 @@
 # outside one it is spend without a reader.
 #
 # Uses list_accounts as the read-only harness tool: the CI checkout has no
-# wallet or Kamibots API keys, so account-authenticated reads (get_nodes)
-# are exercised only in operator-run local smokes (KAMI_SMOKE_HARNESS=real
-# with a real roster).
+# wallet keys, so account-bound reads are exercised only in operator-run
+# local smokes (KAMI_SMOKE_HARNESS=real with a real roster).
 
 name: live-harness-smoke
 
 on:
   workflow_dispatch:
 
-# NOTE for the next harness release: this scaffold requires a surface
-# serving `lens_roster` and refuses loop construction without one (SPEC
-# D1). The pin below is 2.2.0, which predates that tool, so the canned
-# session in this workflow will refuse until this pin moves to the
-# harness release that adds it — and the committed fixture must be
-# re-recorded at the same ref (scripts/record_harness_surface.py). The
-# default per-PR smoke tier is unaffected: its fake harness serves the
-# tool from a synthetic definition.
-
 env:
-  # 2.2.0 (7c6a7ba). The tool SURFACE is byte-identical to 2.1.0's — same
-  # 101 tools, same descriptions and schemas, same registry mass, same
-  # published hash — because 2.2.0's change is to error RESULTS behind a
-  # runtime flag, not to the registry. The committed fixture was
-  # re-recorded at this ref (scripts/record_harness_surface.py) and the
-  # live-vs-recorded assertions below hold across the bump.
-  HARNESS_PIN: 7c6a7bab79e08dececdcfdcb2cf04e88e73e5958 # 2.2.0 surface (7c6a7ba)
+  # 4.0.0 (55cdf9f): 100 tools, harness tools_hash 907899dc...b2be, and a
+  # handshake whose standing text this scaffold shows the model (SPEC D1;
+  # kami-agent 0.7.0+ pairs with 4.0.0+). The committed fixture was
+  # re-recorded at this ref under Python 3.13
+  # (scripts/record_harness_surface.py), standing text included, and the
+  # live-vs-recorded assertions below compare that text byte for byte. No
+  # kami-lens daemon runs here, so the roster brief degrades to the
+  # harness's own unavailability error, as tier 4 always has.
+  HARNESS_PIN: 55cdf9f18ec9c4f4b07a587b8adbb6215f766cf5 # kami-harness 4.0.0 (55cdf9f)
 
 jobs:
   live:

@@ -1,7 +1,7 @@
 ---
 module: kami-agent
-version: 2.3
-describes: v0.6.0
+version: 2.4
+describes: v0.7.0
 ---
 
 # kami-agent — Contract Registry
@@ -29,7 +29,10 @@ and reviews.
 `kami-agent run-session --run-dir DIR` executes at most one session and
 exits. It returns exactly one outcome (printed on stdout, `runner.py`):
 `lock_held` | `not_due` | `already_complete` | `run_complete` |
-`session_aborted` | `session_ran`.
+`session_aborted` | `session_ran`. The one exception is an attempt
+refused at the pairing check (step 9, new at 0.7.0): it writes one
+`session_refused` event and exits non-zero with the refusal on stderr,
+printing no outcome.
 
 Ordered steps, as implemented:
 
@@ -51,17 +54,40 @@ Ordered steps, as implemented:
    before the spawn below on purpose — a run directory that cannot
    deliver its profile's asset raises here, naming the missing file,
    before any child, any telemetry, or any `session_start` exists. The
-   claimed session number (step 7) is spent; nothing else is.
+   number claimed at step 7 lives only in the `state.json` cache: nothing
+   in the stream carries it, and the counter is folded from the stream
+   (P3), so the next attempt claims the same number again. (Through 0.6.0
+   this step said the number was "spent"; the fold never made it so.)
 9. **Spawn the harness child** and handshake (D1). Failure → a
    `session_start` / `session_end reason=errors` pair with zero model
    calls, a default-source `schedule_next`, and `session_aborted`.
+   **Pairing check** (D1, new at 0.7.0): a harness whose handshake states
+   `schema_version` MAJOR ≥ 4 but whose standing text did not reach the
+   runner is refused right here, and the refusal is **visible**: exactly
+   one `session_refused` event (P9) records the reason, the refusal
+   message verbatim, the trigger and the refused harness's version and
+   registry hash. Nothing else is written for the attempt — no
+   `session_start`, no `schedule_next`, no model call — the child is
+   closed, and `run-session` exits non-zero with the same plain message.
+   **The attempt consumes no session number**: the event carries the last
+   number the run used (0 before the first), so the fold (P3) is
+   unchanged, and the cache's claim from step 7 is given back. Under a
+   scheduler a misconfigured pairing is therefore one `session_refused`
+   line per poll — a visible loop, not a silent one — and the first
+   session that does start gets the number the refused attempts would
+   have had.
 10. **Emit `session_start`** carrying `tools_hash` of the loaded surface,
-    the `scaffold_profile` this run pins, and, when the manifest pins
-    one, the harness `presentation_mode` (D1).
+    the `scaffold_profile` this run pins, when the manifest pins one the
+    harness `presentation_mode`, and what the handshake stated: the
+    harness's own registry hash, its `schema_version`, and the sha256 and
+    length of the standing text this session shows the model (D1, P9).
 11. **Build context**: system prompt = the base string + the profile's
-    appendices + `\n\n` + the file index (full `workspace/` tree with
-    byte sizes, `reference/` collapsed to one `N files, N bytes,
-    read-only` line).
+    appendices + **the harness's standing text, verbatim, when it sent
+    any** (D1) + the file index (full `workspace/` tree with byte sizes,
+    `reference/` collapsed to one `N files, N bytes, read-only` line),
+    the parts joined by `\n\n`. A harness that sends no standing text
+    (every harness before 4.0.0) adds nothing — the prompt is byte for
+    byte what 0.6.0 composed.
 12. **Kickoff**: the first user message is the frozen constant
     `prompts/kickoff.txt`. No dynamic content, no digits.
 13. **Session-start injections** (P1.12, below): the roster, the wallets'
@@ -536,7 +562,7 @@ class ModelAdapter(Protocol):
 
 `run/telemetry.jsonl`, one JSON object per line, append-only. Machine
 contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
-`version: 0.6.0`, shipped inside the wheel as package data and kept
+`version: 0.7.0`, shipped inside the wheel as package data and kept
 byte-identical to the repo copy. Every event is validated **before** it
 is written; an invalid event raises and never lands. Unknown fields are
 rejected (`unevaluatedProperties: false`), so additive changes require a
@@ -548,7 +574,7 @@ enforced), `run_id`, `session`, `event`.
 | event | required | optional |
 |---|---|---|
 | `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
-| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `scaffold_profile`, `presentation_mode`, `harness_tools_hash`, `lens_version`, `lens_upstream_pin`, `lens_enrich`, `lens_default_operator` |
+| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `scaffold_profile`, `presentation_mode`, `harness_tools_hash`, `harness_schema_version`, `harness_standing_text_sha256`, `harness_standing_text_chars`, `lens_version`, `lens_upstream_pin`, `lens_enrich`, `lens_default_operator` |
 | `llm_request` | `request_seq` | — |
 | `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response`, `request_seq`, `phantom`, `provider_request_id`, `error_status`, `error_type`, `error_text`, `cache_write_5m_tokens`, `cache_write_1h_tokens` |
 | `tool_call` | `tool`, `source` (`harness`\|`scaffold`\|`lens`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `call_seq`, `path` + `path_resolved` (file tools), `query` + `hits` (`search_reference`), `wait_requested_s` + `wait_actual_s` (`wait`), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state`, `txs[]`, `result_error_shaped`, `provider_call_id`, `provider_call_id_duplicate`, `lens_stale`, `lens_block` |
@@ -557,6 +583,7 @@ enforced), `run_id`, `session`, `event`.
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
 | `session_end` | `reason` (P5 enum), `llm_calls`, `tool_calls`, `session_cost_usd`, `session_tokens` | `repetition_rule`, `repetition_signature`, `repetition_tool`, `repetition_count`, `repetition_window`, `repetition_distinct`, `repetition_signatures[]` |
 | `run_complete` | `reason` (`budget`\|`t_max`\|`manual`), `totals{sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd}` | — |
+| `session_refused` (0.7.0) | `reason` (`standing_text_missing`), `message`, `trigger` (`scheduled`\|`manual`) | `harness_schema_version`, `harness_tools_hash` |
 
 Reader notes (stable semantics):
 
@@ -682,6 +709,20 @@ Reader notes (stable semantics):
   (bare hex). It answers a different question over different bytes than
   `tools_hash`, and the two are different by construction: never equate,
   reconcile, or assert them against each other (D1).
+- **`harness_standing_text_sha256` / `harness_standing_text_chars`**
+  (new at 0.7.0) fingerprint the harness's standing text exactly as this
+  session put it in the system prompt — sha256 (bare hex) of its UTF-8
+  bytes, and its length in characters, the unit every floor term is
+  quoted in (D1, P1.11). They appear together and **only when text was
+  injected**: absence means nothing was injected, never that an empty
+  text was shown. The text itself is never in telemetry. It is fixed by
+  the harness pin **and that harness's own configuration** — it states
+  the harness's call time box — so unlike `harness_tools_hash` it moves
+  when that configuration does; two arms with equal registry hashes and
+  different standing-text hashes were shown different environments.
+  `harness_schema_version` is the handshake's own `schema_version` token,
+  verbatim — the value the pairing check (D1) acted on — absent when the
+  harness states none (kami-harness before 3.0.0).
 - `llm_request` is a write-ahead marker, not a call (P3). It carries no
   usage and **must never be folded into accounting**: one exists per
   model request, so counting them doubles every total. An `llm_request`
@@ -689,18 +730,55 @@ Reader notes (stable semantics):
   run; in a live stream it means the request is in flight.
 - `tool_call.tx_terminal_state` names the transaction outcome the
   harness reported — `confirmed_success` | `reverted` | `unconfirmed` |
-  `validation_rejected` | `batch_error` — classified once at ingestion
-  so downstream analysis never string-matches harness prose. It is
-  **absent** whenever the call was not one transaction outcome: reads,
-  scaffold tools, non-transaction errors, in-band partial batches, and
-  pre-send dry-run skips. Absence means *not classifiable as one
-  terminal state*, never *succeeded*.
+  `validation_rejected` | `batch_error` | `not_executed` (new at 0.7.0)
+  — classified once at ingestion so downstream analysis never
+  string-matches harness prose. It is **absent** whenever the call was
+  not one transaction outcome: reads, scaffold tools, non-transaction
+  errors (a blocked nonce lane and a cancelled call included), in-band
+  partial batches and multi-step results, and pre-send dry-run skips.
+  Absence means *not classifiable as one terminal state*, never
+  *succeeded*.
+
+  **What each value means for someone reconciling an arm's gas and
+  action counts afterwards.** "On-chain" is whether the hash will ever be
+  in a block; "gas" is whether this hash spent any; "action" is whether
+  the world changed.
+
+  | value | on-chain | gas | action | how to reconcile it |
+  |---|---|---|---|---|
+  | `confirmed_success` | mined, status 1 | spent | happened | count it once; the hash is in a block |
+  | `reverted` | mined, status 0 | spent (the harness reports `gas_used`) | did not happen | count the gas, not the action; the hash is in a block |
+  | `unconfirmed` | not known at report time | maybe | maybe | the only open state: resolve it on chain by its hash. It may still mine later — the harness keeps it in its ledger and a later call may report it in a `notice` |
+  | `not_executed` | **never** — proven: its nonce was consumed by another hash (a nonce collision; the message names that hash) or the node dropped it and its nonce was released | none by this hash | did not happen | count neither gas nor action for this hash, and do not look for it on chain. After a nonce collision the CONSUMING hash may well be in a block, signed by this harness or by another sender on the same key — count that one by its own row or on chain, never as this call |
+  | `validation_rejected` | nothing signed or sent | none | did not happen | no hash exists |
+  | `batch_error` | per item | per item | per item | no single hash: read the per-item outcomes in the message and the rows in `txs[]` |
+  | absent | — | — | — | not one transaction outcome: reconcile from `txs[]`, whose rows carry the harness's own per-row `status` — `success`, `reverted`, `unconfirmed`, `dropped` (= `not_executed`) — verbatim |
+
+  `ok` stays exception-keyed beside all of these: a raised not-executed
+  transaction is `ok: false`; a returned single-transaction row whose
+  `status` is `dropped` is `not_executed` with `ok: true`. The hash a
+  `not_executed` row carries in `tx_hash` is the call's own transaction —
+  lifted so a hash-keyed reconciliation knows it will never appear in a
+  block — never the hash that consumed its nonce. Streams written before
+  0.7.0 recorded these as absent.
 - `session_start.presentation_mode` is the mode the manifest pinned and
   the scaffold passed to the harness child. Absent when the manifest
   pinned none, in which case the harness applied its own default —
   recorded as absence rather than guessed at.
 - `schedule_next` appears exactly once per session, `wake_default` case
   included.
+- **`session_refused` is an attempt that never became a session** (new
+  at 0.7.0, P1 step 9). Its `session` is the last session number the run
+  USED — the convention `run_complete` follows — so folding max(session)
+  is unaffected and no number is consumed; the attempt has no
+  `session_start`, `session_end` or `schedule_next`, and recovery never
+  sees it as a crash. One line per refused attempt. `reason:
+  standing_text_missing` means the harness stated `schema_version` MAJOR
+  ≥ 4 — a harness that says the untrusted-data rule only in its
+  handshake — and none of its standing text reached the session.
+  `message` is the refusal exactly as `run-session` printed it. A monitor
+  reading only `telemetry.jsonl` should alert on any `session_refused`:
+  under a scheduler they repeat every poll until the deployment is fixed.
 - `session_end reason=crash` is synthetic (P3).
 - Telemetry is not an agent-visible channel: budget fields recorded here
   never reach the agent.
@@ -889,7 +967,9 @@ run/
   prompt assets (P13, whatever the profile), creates `workspace/` and
   `transcripts/`, runs connectivity checks (chain RPC, mainnet RPC with
   `eth_chainId == 1`, provider API, MCP handshake — which also reports
-  whether the pinned surface carries the balance tool, D1), emits
+  whether the pinned surface carries the balance tool and how long the
+  harness's standing text is, and exits with the pairing message when a
+  4.x harness's standing text did not arrive, D1), emits
   `run_start`. **There is no key path through
   init**: it never generates, imports, or writes key material.
   `--skip-connectivity` skips the four checks (and leaves
@@ -956,6 +1036,15 @@ Dynamic content is never prompt text. Balances and plan contents are
 **injected context** (P1.12), which keeps every prompt asset a fixed
 artifact that a byte-exact test can freeze.
 
+**One part of the system prompt is not a scaffold asset** (new at
+0.7.0): the harness's standing text (D1), placed between the profile's
+appendices and the file index. It is the harness's own wording, pinned
+with the harness and fingerprinted on every `session_start`; it is not
+frozen here, not materialized by `init`, and not this repository's to
+reword (X31). The unit tier's byte-exact and vocabulary tests cover what
+this repository authors; the tri-provider tier scans the standing text
+with every other agent-visible string of a real session (I1).
+
 **Three assets moved at 0.6.0**, and each is an era difference that a run
 record must disclose rather than absorb:
 
@@ -978,12 +1067,15 @@ carries the base prompt plus this profile's appendices plus the file
 index plus the tool surface plus the injections, so a floor measured on
 one rung is not a floor on another. The smoke tier prints the terms
 separately — `system_chars`, `orientation_chars`, `planning_chars`,
-`balance_chars`, `plan_file_chars`, `journal_chars` — for exactly that
-reason, and the plan-file term is the one the *agent* controls
-(P1.12.3). **Floors do not compare across 0.6.0** in either direction:
-the base surface gained a tool, the system prompt lost two sentences, the
-file index gained a journal line, and call-1 context gained a fourth
-injection.
+`balance_chars`, `plan_file_chars`, `journal_chars`, and from 0.7.0
+`standing_text_chars` — for exactly that reason, and the plan-file term
+is the one the *agent* controls (P1.12.3). **Floors do not compare across
+0.6.0** in either direction: the base surface gained a tool, the system
+prompt lost two sentences, the file index gained a journal line, and
+call-1 context gained a fourth injection. **Nor across a harness pin that
+moves the standing text**: at 4.0.0 the system prompt gains it while the
+tool surface sheds the sentences it replaced, so a floor measured on one
+side of that pin says nothing about the other.
 
 Excluded by construction on **every** profile: budget, cost, tokens,
 compute limits, run duration, session caps, forced truncation, the
@@ -1158,8 +1250,10 @@ answer lived only in a transcript, and a crashed session never wrote one.
 - The tool surface is read at session start via MCP `list_tools` and
   used as given: names, descriptions, and input schemas are passed to
   the provider unmodified.
-- **Identity is recorded, not negotiated.** There is no
-  `SCHEMA_VERSION`-style version handshake. Two artifacts stand in:
+- **Identity is recorded, not negotiated.** There is no version
+  negotiation: the handshake's `schema_version` token is read for exactly
+  one decision — the pairing check below — and is otherwise recorded.
+  Two artifacts stand in for identity:
   `pins.harness_sha` from the manifest, recorded on `run_start`
   (operator-asserted, **not** verified against the running child), and
   `tools_hash` — `sha256` over the sorted `(name, description,
@@ -1195,7 +1289,9 @@ answer lived only in a transcript, and a crashed session never wrote one.
   raising it; either way the outcome is classified once, at ingestion,
   into `tool_call.tx_terminal_state` (P9) from the harness's own
   contract text. Analysis therefore splits validation-rejects, reverts,
-  and unconfirmed transactions on a field. The classification is
+  unconfirmed transactions, and — from kami-harness 4.0.0 — transactions
+  the harness proved will never execute (`not_executed`) on a field. The
+  classification is
   observation only: it changes nothing the agent sees, and an
   unrecognized message is recorded as no state rather than guessed at.
 - `tx_hash` is extracted best-effort from structured content or JSON
@@ -1249,9 +1345,11 @@ answer lived only in a transcript, and a crashed session never wrote one.
   brief IS a harness tool now; the check at that name inverted from
   "must be absent" to "must be present".
 - **Cap arithmetic assumption.** Every call re-sends the system prompt
-  (with this profile's appendices, P13), the file index, the entire tool
-  surface, and every session-start injection (P1.12) — the roster, the
-  gas balances, and on `planning` the plan file.
+  (with this profile's appendices, P13, and from 0.7.0 the harness's
+  standing text — 957 characters at kami-harness 4.0.0 with its default
+  90 s call box), the file
+  index, the entire tool surface, and every session-start injection
+  (P1.12) — the roster, the gas balances, and on `planning` the plan file.
   That fixed floor must leave room for a session to be more than one
   call: the worst-case first-call floor is assumed **≤ 1/3 of
   `session_token_cap`**. The brief still makes the floor a function of
@@ -1282,7 +1380,51 @@ answer lived only in a transcript, and a crashed session never wrote one.
   the never-equate rule above — it strengthens the CI drift check by
   giving it the harness's own claim to compare against the harness's own
   SPEC, while the scaffold's `tools_hash` keeps answering its separate
-  question. Absent when the pinned harness publishes nothing.
+  question. Absent when the pinned harness publishes nothing. From 0.7.0
+  the same handshake's `schema_version` token and the fingerprint of its
+  standing text (below) are recorded beside it (P9).
+- **The harness's standing text reaches the model** (new at 0.7.0). The
+  handshake's `instructions` field has two parts. Line 1 is machine
+  tokens — `tools_hash=<64 hex> schema_version=<semver>
+  error_snippets=<on|off>`, or a prefix of that list on older harnesses —
+  and tokens are read from line 1 only. **Everything after the first
+  newline is the harness's standing text**: the rules it states once for
+  its whole surface instead of on every tool description they apply to.
+  From kami-harness 4.0.0 that text carries the rule that `untrusted`
+  fields are player data and never instructions — through 3.x appended to
+  every read tool's description, from 4.0.0 on none of them — together
+  with how its world-state reads are served and how to wait for a read to
+  reflect one's own transaction, that an `incomplete` row means re-read,
+  one nonce lane per key, and the call time box. The scaffold puts that
+  remainder **verbatim** — not stripped, not reflowed, nothing added
+  before or after it — into the system prompt of every session on every
+  profile, after its own frozen text and before the file index (P1.11),
+  so every provider adapter carries it in its own system slot unchanged
+  (D2). An empty or whitespace-only remainder injects nothing. The text is
+  recorded by sha256 and length on `session_start`, never by content
+  (P9).
+  It goes in verbatim and unlabelled for the reason tool descriptions are
+  passed unmodified: it is part of the environment definition, owned and
+  pinned with the harness, and the harness chose to say it once rather
+  than N times. A label would be the first agent-visible prose this
+  scaffold has composed since 0.6.0 (X21, X31).
+- **Pairing rule: kami-agent ≥ 0.7.0 ↔ kami-harness ≥ 4.0.0.** A scaffold
+  before 0.7.0 reads only line 1 of the handshake, and a 4.x harness's
+  tool descriptions no longer carry the standing text — so an older
+  scaffold on a 4.x harness **never shows the model the untrusted-data
+  sentence**, or anything else of that text. Nothing fails; every arm just
+  runs without it. In the other direction this scaffold runs unchanged
+  against a harness before 4.0.0: there is no remainder, nothing is
+  injected, and the prompt is byte for byte what 0.6.0 sent. The scaffold
+  enforces the half it can see: when the handshake states
+  `schema_version` MAJOR ≥ 4 and the runner received **no** standing text
+  — the field was stripped, the build is broken, or a wrapper around the
+  client forwarded the version and dropped the text — it **refuses to
+  start** (P1 step 9) with a plain message instead of running degraded,
+  and `init`'s harness check refuses the same pairing at bring-up. A
+  harness that states no `schema_version` (before 3.0.0) or a MAJOR below
+  4 owes no text and passes. Like the roster requirement, this is a
+  precondition checked once per session, not drift detection (N10).
 - **Context-guard headroom** (same owner): because the guard is checked
   post-call, one full turn lands in context before the next check.
   Headroom below the model's context window must cover
@@ -1454,7 +1596,7 @@ the same daemon over the same socket.
 
 | # | claim | enforcement |
 |---|---|---|
-| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — including the two surfaces added at 0.6.0: the `wait` tool's strings and **the session journal**, whose entries carry no ending reason (the P5 silence contract) and no accounting of any kind (P15) — system prompt, prompt appendices, tool descriptions, tool results, error messages, or `get_status`. **In-world resources are not apparatus**: gas and the ETH that pays it are world facts (P7.4), so "cost(s) gas" is carved out of the vocabulary scan and nothing else is; the wallets' ETH balances reach the agent as world state through a tool result, while the dollar budget stays unreachable and `budget_visible` stays pinned false (X10) | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all **five** frozen assets, with the `\bcosts? gas\b` carve-out), `::test_the_gas_sentence_states_the_resource_and_where_it_is_shown`, `tests/unit/test_profiles.py::test_no_apparatus_leaks_in_any_profiles_tool_strings` (every profile's surface), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`, `tests/unit/test_journal.py::test_the_entry_never_names_the_apparatus`, `tests/unit/test_wait.py::test_the_description_is_mechanism_only`; tri-provider smoke re-scans every agent-visible string of a real session |
+| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — including the two surfaces added at 0.6.0: the `wait` tool's strings and **the session journal**, whose entries carry no ending reason (the P5 silence contract) and no accounting of any kind (P15) — system prompt, prompt appendices, tool descriptions, tool results, error messages, or `get_status`. **In-world resources are not apparatus**: gas and the ETH that pays it are world facts (P7.4), so "cost(s) gas" is carved out of the vocabulary scan and nothing else is; the wallets' ETH balances reach the agent as world state through a tool result, while the dollar budget stays unreachable and `budget_visible` stays pinned false (X10) | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all **five** frozen assets, with the `\bcosts? gas\b` carve-out), `::test_the_gas_sentence_states_the_resource_and_where_it_is_shown`, `tests/unit/test_profiles.py::test_no_apparatus_leaks_in_any_profiles_tool_strings` (every profile's surface), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`, `tests/unit/test_journal.py::test_the_entry_never_names_the_apparatus`, `tests/unit/test_wait.py::test_the_description_is_mechanism_only`; tri-provider smoke re-scans every agent-visible string of a real session, the harness's standing text included (0.7.0) |
 | I2 | Budget and t_max are checked **only** at session boundaries; no in-flight session is ever terminated for either | single `boundary_check` call site in `runner.run_session`; `tests/unit/test_governor.py` (budget, t_max, precedence, overspend), `tests/unit/test_runner.py::test_budget_boundary_completes_run`, `::test_t_max_boundary` |
 | I3 | Zero strategy content in the scaffold, the prompts, or the profile appendices — mechanics and rules only. The orientation appendix states what the core loop *is* and never what to do; `search_reference`'s description states what it searches and never when to search | `tests/unit/test_prompts.py::test_frozen_strings_are_exactly_as_reviewed`, `::test_profile_appendices_are_exactly_as_reviewed` (byte-exact; any reword must be re-frozen in the same commit), `tests/unit/test_search.py::test_the_tool_description_is_mechanism_only` + the I1 scans + review discipline on every agent-visible string |
 | I4 | Forced endings are silent: no warning message, no final model call, no tool result, no `tool_call` event for the carried wake | `tests/unit/test_loop.py::test_context_guard_trips_post_call_and_is_silent`, `tests/unit/test_repetition.py::test_trip_is_silent_and_ends_like_tool_cap`, the carried-wake suite (`test_token_cap_carries_final_turn_wake_intent` … `test_cap_without_wake_intent_carries_nothing`) |
@@ -1475,7 +1617,7 @@ the same daemon over the same socket.
 | I19 | Tool schemas stay inside the subset all three providers accept | `tests/unit/test_scaffold_tools.py::test_tool_defs_cover_spec_surface` (no `oneOf`/`anyOf`/`allOf`) + the tri-provider tier parsing every call natively |
 | I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress. `search_reference` adds a *view* of `reference/`, not a channel: it reads the same read-only tree `workspace_read` already serves | the scaffold tool list is exactly the base seven of P10 plus, per profile, the one added tool (`test_tool_defs_cover_spec_surface`, `tests/unit/test_profiles.py::test_the_surface_per_profile`); network-level closure is operator-owned (see *Unowned*, README) |
 | I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
-| I22 | The three post-broadcast terminal states plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing), `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
+| I22 | The post-broadcast terminal states — confirmed, reverted, unconfirmed, and from 0.7.0 proven not executed — plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing; `::test_not_executed_is_neither_unconfirmed_nor_reverted`, `::test_not_executed_lifts_its_own_hash_and_never_the_one_that_consumed_its_nonce`, `::test_a_returned_dropped_row_is_not_executed`, `::test_dropped_rows_inside_a_multi_transaction_payload_are_no_single_state`), `tests/unit/test_shape_tolerance.py::test_a_raised_not_executed_transaction_is_recorded_as_one`, `::test_a_returned_dropped_row_is_recorded_as_not_executed`, `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
 | I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
 | I24 | The session-start brief is one call of the harness's own roster tool, executed before the first model call, injected verbatim as a tool result, attempted exactly once, separable in telemetry from what the agent chose — and it bounds nothing the agent does. **A surface without that tool starts no session** | `tests/unit/test_brief.py` — ordering (`test_brief_is_executed_before_the_first_model_call`), whole-message verbatimness (`::test_brief_result_is_injected_verbatim`), no-special-path (`::test_the_brief_names_a_tool_the_agent_can_call_itself`, `::test_full_per_kami_detail_stays_on_the_harness_surface`, `::test_no_arguments_are_sent_so_the_daemon_fills_the_account_in`), the requirement (`::test_a_surface_without_the_roster_tool_is_refused_before_any_model_call`), provenance (`::test_brief_is_telemetered_and_marked_scaffold_initiated_from_the_harness`, `::test_brief_records_the_freshness_of_what_it_injected`, `::test_an_unparseable_roster_costs_nothing`), cap/counter/breaker exclusion (`::test_brief_consumes_no_session_tool_cap`, `::test_a_failed_brief_does_not_advance_the_consecutive_error_counter`, `::test_brief_never_feeds_the_repetition_breaker`), degradation (`::test_a_harness_failure_is_injected_as_the_harness_own_words`, `::test_a_failing_brief_is_attempted_exactly_once`, `::test_no_brief_when_no_harness_is_configured`, `::test_an_oversized_brief_is_capped_like_any_tool_result`); end to end through the real CLI against a stand-in harness in the `cron-smoke` job, and natively per provider in the tri-provider tier |
 | I25 | A model request that was sent always leaves a record, whether or not its outcome did — and the write-ahead marker never inflates accounting | `tests/unit/test_loop.py::test_every_model_request_is_written_before_it_is_sent` (asserts the marker is on disk at the moment the request goes out), `::test_each_retry_is_its_own_request`, `::test_write_ahead_markers_never_contribute_to_accounting`, `::test_an_unnormalizable_response_is_recorded_instead_of_escaping`; recovery in `tests/unit/test_runner.py::test_a_request_that_never_completed_is_named_not_lost`, `::test_the_phantom_is_counted_by_the_crash_session_end`, `::test_phantom_recovery_is_idempotent`, `::test_a_completed_request_is_never_called_phantom`; pairing re-asserted per session by `tests/cron_smoke/check_telemetry.py` |
@@ -1489,6 +1631,8 @@ the same daemon over the same socket.
 | I33 | **`wait` blocks within its bound, is clamped rather than rejected, is recorded as a requested/actual pair, is exempt from the repetition breaker and from nothing else, and still consumes `session_tool_cap`** | `tests/unit/test_wait.py` — surface and wording (`::test_it_is_on_the_base_surface_of_every_profile`, `::test_the_description_is_mechanism_only`), clamping (`::test_a_request_over_the_bound_is_clamped_and_the_clamp_is_visible`, `::test_a_negative_request_clamps_to_zero`, `::test_non_finite_and_non_numeric_requests_are_errors`), telemetry (`::test_both_durations_are_recorded_so_waiting_is_analyzable`, `::test_a_wait_that_never_reached_the_handler_records_no_durations`), and the two consequences (`::test_repeated_waits_never_trip_the_repetition_breaker`, `::test_a_repeated_non_wait_call_still_trips_it`, `::test_waits_still_consume_the_session_tool_cap`, `::test_the_watchdog_gives_wait_its_own_bound`, `::test_a_wait_longer_than_the_tool_timeout_still_completes`) |
 | I34 | **Every session is journaled whatever the model writes, the entry names no ending reason and no accounting, the file is bounded so a whole read never truncates, and the last entry reaches the next session as an ordinary re-readable slice** | `tests/unit/test_journal.py` — the entry (`::test_the_entry_carries_the_facts_a_successor_needs`, `::test_no_previous_entry_means_no_elapsed_figure_rather_than_zero`, `::test_the_entry_never_names_the_apparatus`, `::test_a_flood_of_transactions_cannot_crowd_out_every_other_session`), retention (`::test_retention_drops_oldest_entries_and_keeps_the_file_readable_whole`, `::test_the_newest_entry_is_kept_even_when_it_alone_exceeds_the_bound`, `::test_has_session_makes_a_second_write_detectable`), the tree (`::test_the_journal_is_readable_and_not_writable`, `::test_the_file_index_names_the_journal_with_its_size`, `::test_the_journal_does_not_count_against_the_workspace_quota`), the injection (`::test_the_last_entry_is_injected_as_a_readable_byte_slice`, `::test_the_first_session_gets_the_ordinary_not_found_result`, `::test_the_journal_injection_bounds_nothing_the_agent_does`) |
 | I35 | **Which lens daemon served a session is recorded on every `session_start`, never asserted against the manifest, and never reaches the agent** | `tests/unit/test_lens_provenance.py::test_the_serving_daemons_identity_lands_on_session_start`, `::test_the_enrichment_flag_makes_a_mis_provisioned_rung_detectable`, `::test_a_daemon_that_cannot_answer_costs_nothing`, `::test_a_daemon_serving_a_shape_we_did_not_expect_records_what_it_can`, `::test_no_daemon_means_no_provenance_and_no_query`, `::test_provenance_is_never_an_agent_visible_channel` |
+| I36 | **The harness's standing text reaches the model verbatim on every session, on every profile and through every provider adapter; it is fingerprinted, never copied, on `session_start`; a harness that sends none changes nothing; and a 4.x harness whose text did not arrive starts no session — visibly, as one `session_refused` event per attempt, consuming no session number** | `tests/unit/test_standing_text.py` — the field (`::test_line_one_alone_still_parses_and_carries_no_text`, `::test_a_hash_only_handshake_still_parses`, `::test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim`, `::test_the_remainder_is_not_reflowed_or_stripped`, `::test_tokens_are_read_from_line_one_only`, `::test_the_client_exposes_the_handshake_of_a_real_child`), the prompt (`::test_the_standing_text_is_in_the_system_prompt_of_every_profile`, `::test_no_text_means_the_prompt_is_exactly_what_it_was`, `::test_the_text_is_on_every_call_of_the_session`, `::test_the_text_never_enters_the_tool_surface_or_its_hash`), the wire (`::test_every_provider_adapter_sends_it_in_its_system_slot`, three real adapters × five profiles), the record (`::test_session_start_records_the_texts_fingerprint_and_size`, `::test_no_text_records_no_fingerprint_but_still_the_version`, `::test_the_text_is_never_in_telemetry_itself`), the refusal (`::test_a_4x_harness_whose_text_did_not_arrive_starts_no_session`, `::test_a_wrapper_that_drops_the_text_is_refused`, `::test_only_that_combination_is_refused`, `::test_bring_up_refuses_the_same_pairing_with_the_same_plain_message`, `::test_run_session_exits_with_the_plain_message_not_a_traceback`), the refusal's record (`::test_the_refusal_is_readable_from_telemetry_alone`, `::test_a_refused_attempt_consumes_no_session_number`, `::test_a_malformed_published_hash_cannot_mask_the_refusal`, `tests/unit/test_telemetry.py::test_a_malformed_refusal_is_rejected`); end to end under a cron environment against a stand-in serving a 4.x handshake (`tests/cron_smoke/check_telemetry.py`); natively per provider in the tri-provider tier once the recorded surface carries the text |
+| I37 | **Result shapes new at harness 4.0.0 / lens 1.0.0 neither crash nor mis-record**: incomplete rows, `INCOMPLETE` / `NOT_APPLIED`, time-boxed loop results, a `notice` first key, and the not-executed / lane-blocked / cancelled outcomes reach the model verbatim and are recorded as no terminal state rather than a wrong one | `tests/unit/test_shape_tolerance.py` (classification, hash lifting, receipts and the journal roster on each shape, through a session) |
 
 ---
 
@@ -1715,6 +1859,18 @@ a bug; changing one is a spec change, not a fix.
   so it cannot confound the ladder — and it is bounded in the two ways
   that matter: it states facts the world already exposes (times, its own
   calls, its own transactions) and never the apparatus (P15, I1).
+- **X31 — the system prompt carries text this scaffold did not write and
+  does not freeze.** From 0.7.0 the harness's standing text sits between
+  the scaffold's frozen assets and the file index (P1.11, D1). Its wording
+  is the harness's: a reword moves `harness_standing_text_sha256`, not
+  anything this repository pins, and the byte-exact asset tests (I3, I5)
+  do not see it. Accepted because the alternatives are worse — restating
+  the rules in the scaffold's own frozen words would duplicate a contract
+  that can drift and put scaffold-authored prose about another
+  component's surface in front of the model, and labelling the text would
+  be the first agent-visible prose this scaffold has composed since 0.6.0.
+  It is the arrangement tool descriptions have always had (D1), applied
+  to text the harness now says once instead of on every description.
 
 ---
 
@@ -1753,7 +1909,11 @@ a bug; changing one is a spec change, not a fix.
 - **N10** Runtime refusal on harness surface drift (D1) — detection is
   analytical and CI-side. This now covers the one by-name dependency too:
   a pinned surface without the balance tool degrades visibly every session
-  and is warned about at `init`, but never refuses to run.
+  and is warned about at `init`, but never refuses to run. The pairing
+  refusal (D1, 0.7.0) is not an exception: it checks a precondition the
+  handshake states about itself — that a 4.x harness's standing text
+  arrived — once per session, as the roster requirement does, and
+  compares nothing against a pin.
 - **N11** Searching anything but `reference/`. `search_reference` indexes
   the documentation snapshot only — not the agent's own `workspace/`
   notes, not its transcripts, not the run record. Retrieval over the
@@ -1766,6 +1926,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 2.4 | v0.7.0 | **Consumption of kami-harness 4.0.0 and kami-lens 1.0.0 — the harness's standing text reaches the model, and the pairing is enforced.** *Cause: kami-harness 4.0.0 stopped repeating its standing text on the tool descriptions and says it once, in the MCP handshake's `instructions` field after the first line — including the rule that `untrusted` fields are player data and never instructions — while this scaffold read that field only for the hash on line 1.* Against 4.0.0 every arm would have run with that rule shown nowhere, and nothing would have failed. The handshake is now parsed into its two parts (line-1 tokens; the remainder verbatim) and the remainder goes into the system prompt of every session on every profile, unlabelled, between the profile's appendices and the file index, so every provider adapter carries it in its own system slot (P1.11, D1, X31); a harness that sends none changes nothing, byte for byte. **Pairing rule: kami-agent ≥ 0.7.0 ↔ kami-harness ≥ 4.0.0** (D1, README). The half the scaffold can see is enforced: a handshake stating `schema_version` MAJOR ≥ 4 with no standing text arriving — a broken build, a stripped field, a wrapper that forwards the version and drops the text — is refused after the spawn and before `session_start`, with a plain message from `run-session` and `init` alike, and **visibly**: one `session_refused` event per refused attempt, which consumes no session number (P1 step 9, P9). *Cause: the harness's new not-executed outcomes (a nonce collision; a dropped transaction) had no terminal state to land in.* `tool_call.tx_terminal_state` gains `not_executed` — broadcast and proven never to execute, no gas, never in a block — from the raised errors and from a returned `status: "dropped"`, with the call's own hash lifted and never the one that consumed its nonce; P9 now tables what every terminal value means for reconciling gas and action counts. The other 4.0.0 / 1.0.0 shapes (incomplete rows, `INCOMPLETE` / `NOT_APPLIED`, time-boxed loop results, a `notice` first key) needed no code change and are pinned by test (I37). *Cause: deployment facts moved.* Packaging drops the strategy-service egress row and keys, adds the bridge's route host that was never listed, puts the harness's nonce ledger (`KAMI_LANE_DIR`) on the run's persistent volume — for this scaffold every session is a harness restart — states that `tool_timeout_s` must stay above the harness's call box, and states lens 1.0.0's host needs. **Consequences for readers:** the system prompt grows by the standing text (957 characters at 4.0.0 with its default 90 s call box) while the 4.0.0 tool surface sheds the 4,150 characters of sentences it replaced, so floors do not compare across this pin; the tri-provider tier now serves the roster brief as the harness serves it (indent=2, about twice the compact form it measured from 0.6.0), so its brief term does not compare across 0.7.0 either; P1 step 8's claim that a claimed-but-unused session number is "spent" is corrected — the fold never made it so. Telemetry schema 0.6.0 → 0.7.0: one new event type (`session_refused`), three additive optional `session_start` fields (`harness_schema_version`, `harness_standing_text_sha256`, `harness_standing_text_chars`), one widened enum (`tx_terminal_state` gains `not_executed`). New invariants I36–I37; new deviation X31; N10 restated. Pins: kami-harness 4.0.0 `55cdf9f`, kami-lens 1.0.0 `0ffc8a7`. |
 | 2.3 | v0.6.0 | **Diagnosability, a time primitive, a memory of its own sessions, and the roster brief back on the tool surface.** *Cause: the brief's injected call named something that was not a tool.* Through 0.5.1 the scaffold read the compact roster off the world-state daemon's socket itself and injected the answer under a name the tool surface did not carry — a call the agent could see in its own transcript and could never make, which agents repeatedly tried to make anyway. The pinned harness now serves the same compact roster as an ordinary tool, so the brief becomes a **scaffold-initiated call of `lens_roster`**, dispatched through the same path as any intent the agent returns, recorded as a normal `tool_call` with `initiator: scaffold` and `source: harness`, and re-issuable by the agent at will. This **supersedes the 0.4.0 routing decision** that moved the brief off the harness in the first place: that decision existed because no harness tool served the compact roster and the party report it replaced was an order of magnitude larger — wrapping the daemon is the harness's job, and it does it now. Consequences: **X22 is retired** (no injection is a special path any more; every one of the four names a tool the agent could call itself), the reserved-name check at `lens_roster` **inverts** from "the harness must not serve this" to "the harness must" and refuses loop construction otherwise — the second by-name harness dependency (D1), and the first that is required rather than degraded, because a session that cannot see its own kamis is a session pointed at the wrong environment; `source` no longer separates the injections (roster and balances are both `harness`); the daemon socket (D7) survives for the operator-side provenance query alone; and the scaffold now authors **no agent-visible string at all** — the frozen unreachable-daemon record retires with the direct read. *Cause: two runs in a row, the first question after an incident — what did the provider say? — was unanswerable from the record; a 14-hour run-wide outage produced zero diagnosable bytes and 150+ error rows carrying only a request id.* `AdapterError` gains `error_type` / `error_text`, all three adapters extract the provider's own token and message (never the SDK's body-echoing `str(exc)`), the `llm_call` row carries status/type/message with **explicit nulls** where the provider served none (X27), and a persistent **`run/errors.jsonl`** artifact (new **P14**) is written at the moment of failure with a longer message cut, no schema, and a writer that swallows its own failures — because the hosts keep no agent-side journal and a telemetry pull can come too late or not at all. *Cause: agents needed to sit out 85–185 s cooldowns mid-session and had no way to pass wall time, so they burned calls on filler and polled until the repetition breaker — firing on the only waiting strategy the scaffold offered — ended the session.* A new BASE-surface **`wait(seconds)`** tool (P10, every profile) blocks without a model turn, clamped to `caps.wait_max_seconds` (300) on the `set_next_wake` pattern, recorded as a requested/actual pair (P9), exempt from the repetition breaker and from nothing else (P5.1, X26), given its own watchdog bound because `tool_timeout_s` defaults below the clamp, and bounded in total by `session_tool_cap × wait_max_seconds` — an operator sizing obligation, stated. **P5's silence on why sessions end is untouched: the cause is removed, not disclosed.** *Cause: sessions that acted but wrote nothing made the agent's own past self an unknown actor — successors attributed their own harvest stops and item gains to "someone" — and a 17-hour outage was invisible to every arm, with not one sentence about elapsed time anywhere in context.* A machine-written **session journal** (new **P15**): one compact entry per session appended whatever the model writes, carrying session number, start/end, **elapsed since the previous session's end**, the agent's own tool counts, transaction hashes and the opening roster — and carrying **no ending reason and no accounting**, because this is the one scaffold-written surface the agent reads and P5's silence would otherwise leak from behind it. It lives in a third read-only tree `journal/` (P11), is named ONLY in the dynamic file index and in no prompt (I3), rolls to `caps.journal_max_bytes` (32768, below `tool_result_max_bytes` so a whole-file read never truncates), is written for crashed sessions by recovery (P3), and its last entry is injected at session start as an ordinary byte-sliced `workspace_read` — the **fourth** P1.12 injection, appended last so the first three keep their positions and `call_seq` numbers. *Cause: a run's live daemon version was recorded nowhere, and the last run's version scramble needed a VM-side gate to catch.* One operator-side `status` query (D7) records `lens_version`, `lens_upstream_pin`, `lens_enrich` and `lens_default_operator` on every `session_start` — never injected, never a tool_call row; `lens_enrich` makes a `pushed` arm running against a flag-off daemon detectable from telemetry for the first time (X25 partially closed), recorded and never asserted (N10). *Cause: a run-006 analysis concluded one arm had split its notes across two parallel trees; the archived workspace held one tree, and the field it grouped on was the agent's raw argument.* P11's one-segment-stripping claim **was true at 0.5.1 and stays** — no fix was needed, and the SPEC says so plainly; the field, not the behavior, was the defect, so `tool_call.path_resolved` now records what a path actually named beside what the agent typed (P9), and the claim is enforced through all four workspace tools rather than the resolver alone (I11). *Cause: the plan file is re-sent on every call of every session and could grow to the 64 KiB result cap — the one floor term the operator cannot size.* `PLAN_FILE_MAX_BYTES` (8192) bounds the plan injection, stated as a number in `prompts/planning.txt` and pinned to the constant by test, a code constant rather than a manifest knob because a frozen asset cannot quote a number an operator may change (P1.12.3, P13, I5). Three prompt assets move and each is an era difference: `system.txt` loses "You cannot wait or pause within a session" and its how-to-wait sentence on **every** profile (they became false when `wait` landed), `orientation.txt` says skills "improve" rather than "change" a kami's stats (every skill in this world is positive), `planning.txt` states the plan bound. Transcripts mark injected pairs `"initiator": "scaffold"` — one key that was never sent (P12, X28). **Consequences for readers:** `tools_hash` moves on EVERY profile (a base tool was added), so the 0.5.0 "hashes exactly as 0.4.0" claim is retired; floors do not compare across 0.6.0 in either direction; `session_end.tool_calls` does not compare across it either; `initiator=scaffold` now covers three rows per session (four on `planning`) and **two of them are `workspace_read`**, so split on `path`. Telemetry schema 0.5.0 → 0.6.0: nine additive-optional fields, no new event types. New invariants I32–I35; new deviations X26–X30; N3 restated so the journal is not misread as consolidation. |
 | 2.2 | v0.5.1 | Docs-only. The contract states what a run measures: the **system** — model, `scaffold_profile`, pinned environment — not the model alone. "Policy free" is restated per configuration (the scaffold never plays for the agent), while structure is a named, frozen, pinned profile; the P13 exclusion paragraph splits into every-profile apparatus/vendor items vs `control`-and-rules-text advice items; N1/N2 restated as version-scoped, not principled. No code, asset, schema, or hash moves. |
 | 2.1 | v0.5.1 | `prompts/orientation.txt` gains one rule sentence — "quest objectives count your account's totals across all your kamis" — a stated fact of the world (quest objective progress is tracked per account, not per kami) that the reference client's quest text leaves ambiguous; rules only, no advice; both copies and the frozen literal re-frozen (I3, P13). Nothing else moves; tools_hash per profile unchanged. |

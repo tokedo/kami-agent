@@ -5,7 +5,8 @@
 FROM python:3.13-slim
 
 ARG HARNESS_REPO=https://github.com/tokedo/kami-harness
-ARG HARNESS_SHA=48bd154f1181b5d8157f06e4c3dec979944c937e
+# kami-harness 4.0.0 (pairs with kami-agent 0.7.0+)
+ARG HARNESS_SHA=55cdf9f18ec9c4f4b07a587b8adbb6215f766cf5
 ARG GDD_REPO=
 ARG GDD_SHA=
 
@@ -31,6 +32,13 @@ RUN if [ -n "$GDD_REPO" ]; then \
     && cp -r /opt/gdd /srv/run/reference \
     && rm -rf /srv/run/reference/.git; \
     fi
+
+# The harness's per-wallet nonce ledger (kami-harness 4.0.0). The harness is
+# spawned once per session, so every session is a restart for it: the ledger
+# must outlive the process AND the container. /srv/run is the run's persistent
+# mount, and the directory is a run-dir internal no agent path reaches
+# (docs/packaging.md). The harness creates it (0700) on first use.
+ENV KAMI_LANE_DIR=/srv/run/harness-lanes
 
 WORKDIR /srv/run
 # Provisioning: mount/inject /srv/run/config.yaml and /srv/run/.env — the
