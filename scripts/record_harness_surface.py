@@ -34,6 +34,16 @@ questions over DIFFERENT bytes (SPEC D1):
   registry, taken verbatim from the handshake. Different by construction
   from both of the above. Never equate, reconcile, or assert them
   against each other.
+
+The recording also carries the rest of what the handshake states: the
+``schema_version`` token, and the **standing text** — everything after the
+first newline of the ``instructions`` field, verbatim (kami-harness 4.0.0
+and later; empty before). The smoke tier puts that text in the system
+prompt exactly as a session does, so the floor it reports includes it, and
+the live tier asserts a real harness still sends the same bytes. The text
+states the harness's call time box, so it depends on that harness's
+``KAMI_CALL_BUDGET_S`` as well as on its commit: record under the value
+the runs will use (unset = the harness default).
 """
 
 from __future__ import annotations
@@ -143,6 +153,8 @@ def main() -> int:
         published = client.harness_tools_hash
         name = client.server_name
         server_version = client.server_version
+        schema_version = client.harness_schema_version
+        standing_text = client.standing_text
     finally:
         client.close()
 
@@ -152,7 +164,15 @@ def main() -> int:
             "version": server_version,
             "sha": args.sha or sha,
             "recorded_under_python": version,
+            # The handshake's own schema_version token (None before 3.0.0).
+            "schema_version": schema_version,
+            # The call box the standing text below states, as configured
+            # for this recording (None = the harness default).
+            "call_budget_s": os.environ.get("KAMI_CALL_BUDGET_S"),
         },
+        # The handshake's standing text, verbatim ("" before 4.0.0). What
+        # every session shows the model in its system prompt (SPEC D1).
+        "standing_text": standing_text,
         # This scaffold's serialization of the HARNESS tools only — never
         # a session's session_start.tools_hash, which also spans the
         # scaffold surface (SPEC D1).
@@ -166,8 +186,8 @@ def main() -> int:
     }
     args.out.write_text(json.dumps(surface, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(
-        f"recorded {len(tools)} tools from {harness_dir} @ {args.sha or sha} "
-        f"(python {version}) → {args.out}"
+        f"recorded {len(tools)} tools and {len(standing_text)} chars of standing text "
+        f"from {harness_dir} @ {args.sha or sha} (python {version}) → {args.out}"
     )
     return 0
 

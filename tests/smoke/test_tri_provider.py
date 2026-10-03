@@ -33,6 +33,13 @@ rungs at or above `orientation` add a pinned prompt appendix, and
 `planning` adds another appendix plus the plan file — whose size is the
 AGENT's to decide, bounded only by tool_result_max_bytes. The report below
 prints each term separately for that reason.
+
+FROM 0.7.0 THE SYSTEM PROMPT ALSO CARRIES THE HARNESS'S STANDING TEXT —
+the part of its handshake after the first line, verbatim (SPEC D1, P1.11).
+It is fixed per harness pin and configuration, it is recorded in the
+surface fixture beside the tools, and the report quotes it as its own term
+(`standing_text_chars`). A fixture recorded before 4.0.0 carries none, and
+the floor is then what it was.
 """
 
 import json
@@ -313,6 +320,11 @@ class RecordedFakeHarness:
         # false-alarm class at run reconciliation (SPEC D1).
         self.recorded_hash = surface["harness_only_tools_hash"]
         self.harness_tools_hash = surface.get("harness_published_tools_hash")
+        # What the handshake stated besides the hash (SPEC D1): the version
+        # token and the standing text, which the runner puts in the system
+        # prompt verbatim. Absent from a fixture recorded before 0.7.0.
+        self.harness_schema_version = surface["harness"].get("schema_version")
+        self.standing_text = surface.get("standing_text") or ""
 
     def execute(self, name, args):
         if name == BRIEF_TOOL:
@@ -385,6 +397,11 @@ class ReadOnlyHarness:
         self._client = client
         self.tool_defs = client.tool_defs
         self.harness_tools_hash = client.harness_tools_hash
+        # Forwarded, or the session would run without the harness's
+        # standing text — and against a 4.x harness the runner refuses a
+        # wrapper that drops it (SPEC D1).
+        self.harness_schema_version = client.harness_schema_version
+        self.standing_text = client.standing_text
 
     def execute(self, name, args):
         if not name.startswith(("get_", "list_")):
@@ -621,10 +638,20 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
     # The workspace write landed.
     assert (run_dir / "workspace" / "smoke.md").read_text(encoding="utf-8") == "smoke ok"
 
+    # The harness's standing text reached the session record as what it is
+    # (SPEC D1, P9): fingerprinted on session_start, never copied into it.
+    session_start = next(e for e in events if e["event"] == "session_start")
+    if harness.standing_text:
+        assert session_start["harness_standing_text_chars"] == len(harness.standing_text)
+    else:
+        assert "harness_standing_text_chars" not in session_start
+
     # Apparatus leak check (I1) over every agent-visible string: system prompt +
     # file index, kickoff/continuation, tool names/descriptions/schemas,
-    # and the full transcript (assistant + tool results as sent).
+    # the harness's standing text, and the full transcript (assistant +
+    # tool results as sent).
     visible = [
+        harness.standing_text,
         (run_dir / "prompts" / "system.txt").read_text(encoding="utf-8"),
         (run_dir / "prompts" / "orientation.txt").read_text(encoding="utf-8"),
         (run_dir / "prompts" / "planning.txt").read_text(encoding="utf-8"),
@@ -692,6 +719,7 @@ def _assert_canned_session(provider, model, run_dir, harness, lens, outcome, eve
         f"journal_chars={len(journal_content)} "
         f"system_chars={system_chars} orientation_chars={orientation_chars} "
         f"planning_chars={planning_chars} kickoff_chars={len(KICKOFF)} "
+        f"standing_text_chars={len(harness.standing_text)} "
         f"llm_calls={session_end['llm_calls']} tool_calls={session_end['tool_calls']} "
         f"session_tokens={session_end['session_tokens']} "
         f"session_cache_read={session_cache_read} "
@@ -805,3 +833,10 @@ def test_recorded_surface_matches_the_live_harness():
     ]
     assert not drifted, f"description/schema drift in: {drifted}"
     assert tools_hash(live) == recorded["harness_only_tools_hash"]
+    # And the standing text the handshake states is the recorded one, byte
+    # for byte: it is in every session's system prompt (SPEC D1).
+    if "standing_text" in recorded:
+        assert harness.standing_text == recorded["standing_text"], (
+            "standing text drift: the live harness sends different bytes than "
+            "the fixture recorded (a different commit, or a different call box)"
+        )
