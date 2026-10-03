@@ -6,7 +6,7 @@ FROM python:3.13-slim
 
 ARG HARNESS_REPO=https://github.com/tokedo/kami-harness
 # kami-harness 4.0.0 (pairs with kami-agent 0.7.0+)
-ARG HARNESS_SHA=87b22315dc35326b5c6ff34ca793afa385d79d6f
+ARG HARNESS_SHA=55cdf9f18ec9c4f4b07a587b8adbb6215f766cf5
 ARG GDD_REPO=
 ARG GDD_SHA=
 

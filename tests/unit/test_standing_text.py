@@ -75,7 +75,8 @@ STANDING = (
     "clock; a result cut short carries time_boxed: true and `remaining`, what was not "
     "attempted."
 )
-REGISTRY_HASH = "3cd1c08c" + "0" * 56
+# Synthetic: shaped like a published registry hash, naming no release.
+REGISTRY_HASH = "0123456789abcdef" * 4
 LINE_ONE_4X = f"tools_hash={REGISTRY_HASH} schema_version=4.0.0 error_snippets=off"
 LINE_ONE_3X = f"tools_hash={REGISTRY_HASH} schema_version=3.7.0 error_snippets=off"
 INSTRUCTIONS_4X = f"{LINE_ONE_4X}\n{STANDING}"
