@@ -32,6 +32,13 @@ RUN if [ -n "$GDD_REPO" ]; then \
     && rm -rf /srv/run/reference/.git; \
     fi
 
+# The harness's per-wallet nonce ledger (kami-harness 4.0.0). The harness is
+# spawned once per session, so every session is a restart for it: the ledger
+# must outlive the process AND the container. /srv/run is the run's persistent
+# mount, and the directory is a run-dir internal no agent path reaches
+# (docs/packaging.md). The harness creates it (0700) on first use.
+ENV KAMI_LANE_DIR=/srv/run/harness-lanes
+
 WORKDIR /srv/run
 # Provisioning: mount/inject /srv/run/config.yaml and /srv/run/.env — the
 # .env must set MAINNET_RPC_URL (the harness refuses to start without it)

@@ -206,6 +206,19 @@ def test_example_manifest_pins_a_presentation_mode(tmp_path):
     assert cli.build_run_config(manifest, tmp_path).presentation_mode == "envelope"
 
 
+# kami-harness 4.0.0's default call box (KAMI_CALL_BUDGET_S): every served call
+# returns within this many seconds of wall clock.
+HARNESS_CALL_BOX_S = 90
+
+
+def test_the_example_watchdog_stays_above_the_harness_call_box(tmp_path):
+    """A watchdog that fires first tells the model a call failed while the
+    harness is still running it (docs/packaging.md). The sample must not
+    teach that configuration."""
+    caps = cli.build_run_config(cli.load_manifest(EXAMPLE), tmp_path).caps
+    assert caps.tool_timeout_s > HARNESS_CALL_BOX_S
+
+
 class ScriptedAdapter:
     def complete(self, system, messages, tools, params):
         return AdapterResponse(

@@ -11,9 +11,8 @@
 # outside one it is spend without a reader.
 #
 # Uses list_accounts as the read-only harness tool: the CI checkout has no
-# wallet or Kamibots API keys, so account-authenticated reads (get_nodes)
-# are exercised only in operator-run local smokes (KAMI_SMOKE_HARNESS=real
-# with a real roster).
+# wallet keys, so account-bound reads are exercised only in operator-run
+# local smokes (KAMI_SMOKE_HARNESS=real with a real roster).
 
 name: live-harness-smoke
 
