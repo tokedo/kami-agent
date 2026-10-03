@@ -89,15 +89,18 @@ is visible rather than silent — `tool_call` with `initiator: "scaffold"`
 and `ok: false` on the first event of every session — so check that
 field before concluding a run is healthy.
 
-**kami-lens 1.0.0 host requirements.** A first start loads the whole world
-into memory, peaking at about 4.5 GB: plan for a machine with roughly 8 GB
-or more — with under about 7 GB available to the process the daemon
-refuses a first load rather than dying part-way through. It raises its own
-Node heap limit to fit, which needs **Node 22.15 or newer**; on an older
-Node it refuses with the one line that fixes it
-(`NODE_OPTIONS=--max-old-space-size=6144 kami-lens daemon`). A restart
-that resumes from its saved copy of the world needs far less. Its `status`
-answer reports the heap limit it ended up with and who chose it.
+**kami-lens 1.0.0 host requirements** (its README is the authority). A
+first start with no saved state loads the whole world into memory: plan
+for **8 GB of RAM**. With under about 7 GB available to the process the
+daemon refuses a first load (with the remedy) rather than dying part-way
+through, and under 5.5 GB it refuses outright. Once running it holds
+about 2.2 GB, plus about 1.6 GB more for roughly ten seconds every ten
+minutes while a separate process rewrites its saved world — size the VM
+for that next to the harness and this scaffold. It raises its own Node
+heap limit to fit, which needs **Node 22.15 or newer**; on Node 20 set
+`NODE_OPTIONS=--max-old-space-size=6144` yourself. A restart that resumes
+from its saved world needs far less. Its `status` answer reports the heap
+limit it ended up with and who chose it.
 
 ## The harness's nonce ledger needs a persistent volume (kami-harness 4.0.0)
 
