@@ -16,6 +16,11 @@ Markers are the harness's own contract text, not incidental wording:
   states is always present, guaranteeing the transaction was never sent.
 - ``OnChainRevertError`` / ``TxUnconfirmedError`` — the two raised
   post-broadcast terminal states, each with distinct fixed phrasing.
+- ``TxNotExecutedError`` (kami-harness 4.0.0) — its two subclasses,
+  ``TxNonceCollisionError`` and ``TxDroppedError``, report a broadcast
+  transaction the harness PROVED will never execute; both open with
+  ``transaction <hash> was NOT executed`` and say the hash spent no gas.
+  The same verdict on a per-leg row is ``status: "dropped"``.
 - ``BatchTxError`` — a multi-transaction call in which at least one item
   failed; its message itemizes every outcome, successes included.
 
@@ -48,6 +53,12 @@ VALIDATION_REJECTED = "validation_rejected"
 # A multi-transaction call with at least one failed item; the message
 # itemizes per-item outcomes, which may mix all of the states above.
 BATCH_ERROR = "batch_error"
+# Broadcast and PROVEN never to execute (kami-harness 4.0.0): its nonce
+# was consumed by another transaction, or the node no longer holds it and
+# its nonce was released. This hash spent no gas, changed nothing, and
+# will never appear in a block. Not a revert (which mined and spent gas)
+# and not unconfirmed (whose outcome is still open).
+NOT_EXECUTED = "not_executed"
 
 TERMINAL_STATES = (
     CONFIRMED_SUCCESS,
@@ -55,12 +66,16 @@ TERMINAL_STATES = (
     UNCONFIRMED,
     VALIDATION_REJECTED,
     BATCH_ERROR,
+    NOT_EXECUTED,
 )
 
 # Ordered: a BatchTxError message embeds per-item outcomes whose text can
 # contain any of the single-transaction markers, so it is tested first.
 _ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (BATCH_ERROR, ("Per-item outcomes:", "are final")),
+    # Before UNCONFIRMED on purpose: a nonce collision's text says it is
+    # "not an unconfirmed transaction".
+    (NOT_EXECUTED, ("was NOT executed", "spent no gas")),
     (UNCONFIRMED, ("is UNCONFIRMED",)),
     (REVERTED, ("landed on-chain in block", "REVERTED")),
     (VALIDATION_REJECTED, ("validation failed; no transaction sent:",)),
@@ -68,14 +83,17 @@ _ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 # The transaction hash a raised terminal state names in its first clause.
-# Both raised single-transaction states open with "transaction <hash> ",
+# The raised single-transaction states — reverted, unconfirmed, and from
+# 4.0.0 not executed — all open with "transaction <hash> ",
 # which is the harness's own contract phrasing (the same phrasing the
 # markers above match on), so the hash is recoverable without parsing the
 # rest of the prose. Anchored at the start of the clause rather than
 # matched anywhere, so a hash quoted later in a message — a batch message
 # itemizing several — is never mistaken for THE transaction: a batch has
 # no single hash, and inventing one would be worse than reporting none.
-_RAISED_TX_HASH = re.compile(r"transaction (0x[0-9a-fA-F]+) (?:landed on-chain|is UNCONFIRMED)")
+_RAISED_TX_HASH = re.compile(
+    r"transaction (0x[0-9a-fA-F]+) (?:landed on-chain|is UNCONFIRMED|was NOT executed)"
+)
 
 
 def classify_error(message: str) -> str | None:
@@ -87,13 +105,19 @@ def classify_error(message: str) -> str | None:
 
 
 def tx_hash_from_error(message: str) -> str | None:
-    """The transaction hash a raised revert/unconfirmed error names, if any.
+    """The transaction hash a raised revert/unconfirmed/not-executed error names.
 
     A harness that RAISES its terminal states reports the transaction in
     prose, so the hash reaches the scaffold only inside the error text —
     the one field P9 tells readers never to parse. This lifts it onto
     ``tool_call.tx_hash`` at ingestion, on the same terms as the success
     path: recovered once, here, or recorded as absent.
+
+    A not-executed transaction's hash is lifted too: it was signed and
+    broadcast, and a reconciliation keyed on hashes needs to know that
+    this one will never appear in a block (``tx_terminal_state`` says so).
+    For a nonce collision the message also names the hash that consumed
+    the nonce; that one is NOT this call's transaction and is not lifted.
 
     Returns None for batch errors (no single transaction), for
     validation rejections (nothing was ever broadcast, so there is no
@@ -131,21 +155,34 @@ def error_shaped_payload(content: str) -> bool:
 def classify_success(content: str, structured: Any = None) -> str | None:
     """Terminal state of a returned harness result, or None if not a tx outcome.
 
-    Only a top-level ``status: "success"`` (or one ``result`` level down,
-    matching the tx_hash extraction path) counts. Partial batches under
-    ``allow_partial`` return per-item outcomes with no single terminal
-    state, and pre-send dry-run skips report ``skipped``; both classify
-    as None rather than being flattened into one label.
+    Only a top-level ``status`` (or one ``result`` level down, matching
+    the tx_hash extraction path) counts: ``"success"`` is a confirmed
+    receipt, and ``"dropped"`` — the harness's per-row word for a
+    transaction it proved will never execute (4.0.0) — is NOT_EXECUTED.
+    Partial batches under ``allow_partial`` return per-item outcomes with
+    no single terminal state, and pre-send dry-run skips report
+    ``skipped``; both classify as None rather than being flattened into
+    one label. Rows inside a multi-transaction ``txs`` list are not
+    classified here: they are copied verbatim, ``dropped`` included.
     """
     for candidate in (structured, _maybe_json(content)):
         if not isinstance(candidate, dict):
             continue
-        if candidate.get("status") == "success":
-            return CONFIRMED_SUCCESS
         inner = candidate.get("result")
-        if isinstance(inner, dict) and inner.get("status") == "success":
-            return CONFIRMED_SUCCESS
+        for level in (candidate, inner if isinstance(inner, dict) else {}):
+            status = level.get("status")
+            # A str check, not a bare lookup: a payload's `status` may be
+            # anything, and an unhashable one must classify as nothing.
+            if isinstance(status, str) and status in _RETURNED_STATUS:
+                return _RETURNED_STATUS[status]
     return None
+
+
+# A returned single-transaction ``status`` and the terminal state it is.
+_RETURNED_STATUS: dict[str, str] = {
+    "success": CONFIRMED_SUCCESS,
+    "dropped": NOT_EXECUTED,
+}
 
 
 def _maybe_json(text: str) -> Any:

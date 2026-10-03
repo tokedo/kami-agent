@@ -15,10 +15,12 @@ none of it may invent meaning for them:
 - loop results cut short by the call box: ``time_boxed: true`` with
   ``remaining``;
 - a ``notice`` as the FIRST key of a result;
-- the new raised outcomes — a transaction proven NOT executed (nonce
-  collision, dropped), a blocked lane, a cancelled call — none of which is
-  a revert or an unconfirmed transaction and none of which may be recorded
-  as one.
+- the new raised outcomes. A transaction proven NOT executed (nonce
+  collision, dropped; a ``dropped`` row) is recorded as its own terminal
+  state, ``not_executed`` (schema 0.7.0) — never as a revert or as
+  unconfirmed — with its own hash, never the one that consumed its nonce.
+  A blocked lane and a cancelled call are no single transaction outcome
+  and are recorded as none.
 
 No strategy is involved: the scaffold stays policy-free, and nothing here
 tells the agent what to do about any of these.
@@ -55,6 +57,7 @@ from kami_agent.tools.errors import ToolError
 from kami_agent.tools.receipts import (
     BATCH_ERROR,
     CONFIRMED_SUCCESS,
+    NOT_EXECUTED,
     UNCONFIRMED,
     classify_error,
     classify_success,
@@ -179,18 +182,23 @@ NOTICE_FIRST_SUCCESS = {
 # --- classification: nothing new is mis-recorded --------------------------------
 
 
-@pytest.mark.parametrize(
-    "message",
-    [NONCE_COLLISION, DROPPED, LANE_BLOCKED, CANCELLED, INCOMPLETE_ERROR, NOT_APPLIED_ERROR],
-)
-def test_new_failures_are_no_terminal_state_and_name_no_transaction(message):
-    """Not a revert, not unconfirmed: recorded as no state rather than a wrong one.
+@pytest.mark.parametrize("message", [LANE_BLOCKED, CANCELLED, INCOMPLETE_ERROR, NOT_APPLIED_ERROR])
+def test_new_failures_that_are_no_single_outcome_are_no_terminal_state(message):
+    """Recorded as no state rather than a wrong one, and naming no transaction."""
+    assert classify_error(message) is None
+    assert tx_hash_from_error(message) is None
+
+
+@pytest.mark.parametrize("message", [NONCE_COLLISION, DROPPED])
+def test_a_transaction_proven_not_executed_is_its_own_terminal_state(message):
+    """Not a revert (it never mined) and not unconfirmed (its outcome is closed).
 
     The nonce collision is the sharp case — its text says "not an
     unconfirmed transaction", and a looser match would record exactly that.
+    Its hash is lifted; the hash that consumed its nonce (H2) never is.
     """
-    assert classify_error(message) is None
-    assert tx_hash_from_error(message) is None
+    assert classify_error(message) == NOT_EXECUTED
+    assert tx_hash_from_error(message) == H1
 
 
 def test_the_shortened_receipt_wait_is_still_unconfirmed():
@@ -371,7 +379,7 @@ def test_incomplete_rows_from_an_agent_read_reach_the_model_untouched(run_dir):
 
 @pytest.mark.parametrize(
     "message",
-    [INCOMPLETE_ERROR, NOT_APPLIED_ERROR, NONCE_COLLISION, DROPPED, LANE_BLOCKED, CANCELLED],
+    [INCOMPLETE_ERROR, NOT_APPLIED_ERROR, LANE_BLOCKED, CANCELLED],
 )
 def test_new_raised_failures_reach_the_model_verbatim_and_record_no_outcome(run_dir, message):
     tool = "lens_kami" if "lens_kami" in message else "feed_kami"
@@ -384,6 +392,41 @@ def test_new_raised_failures_reach_the_model_verbatim_and_record_no_outcome(run_
     assert row["error"] == message
     assert "tx_terminal_state" not in row
     assert "tx_hash" not in row
+
+
+@pytest.mark.parametrize("message", [NONCE_COLLISION, DROPPED])
+def test_a_raised_not_executed_transaction_is_recorded_as_one(run_dir, message):
+    _, adapter, events = run(run_dir, {"feed_kami": message}, "feed_kami")
+    seen = results_seen(adapter)["c0"]
+    assert seen.content == message  # the agent still reads the harness's own words
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == "feed_kami")
+    assert row["ok"] is False
+    assert row["tx_terminal_state"] == NOT_EXECUTED
+    assert row["tx_hash"] == H1
+
+
+def test_a_returned_dropped_row_is_recorded_as_not_executed(run_dir):
+    dropped = {"tx_hash": H1, "status": "dropped", "nonce": 500, "consumed_by": H2}
+    _, adapter, events = run(run_dir, {"feed_kami": dropped}, "feed_kami")
+    assert results_seen(adapter)["c0"].content == json.dumps(dropped, ensure_ascii=False)
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == "feed_kami")
+    assert row["ok"] is True  # exception-keyed: nothing raised
+    assert row["tx_terminal_state"] == NOT_EXECUTED
+    assert row["tx_hash"] == H1
+
+
+def test_dropped_rows_in_a_sequence_stay_verbatim_and_name_no_single_state(run_dir):
+    sequence = {
+        "notice": f"step 2 was dropped: its nonce was consumed by {H2}",
+        "txs": [
+            {"tx_hash": H2, "status": "success", "block": 9, "gas_used": 21000},
+            {"tx_hash": H1, "status": "dropped", "nonce": 501, "consumed_by": H2},
+        ],
+    }
+    _, _, events = run(run_dir, {"act_sequence": sequence}, "act_sequence")
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == "act_sequence")
+    assert row["txs"] == sequence["txs"]  # the harness's own row vocabulary, verbatim
+    assert "tx_terminal_state" not in row
 
 
 def test_a_time_boxed_loop_result_is_recorded_as_the_transactions_it_carries(run_dir):

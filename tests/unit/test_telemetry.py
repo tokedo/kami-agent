@@ -365,7 +365,14 @@ def test_malformed_handshake_fields_are_rejected(writer, key, bad):
 
 @pytest.mark.parametrize(
     "state",
-    ["confirmed_success", "reverted", "unconfirmed", "validation_rejected", "batch_error"],
+    [
+        "confirmed_success",
+        "reverted",
+        "unconfirmed",
+        "validation_rejected",
+        "batch_error",
+        "not_executed",
+    ],
 )
 def test_every_terminal_state_is_accepted(writer, state):
     record = writer.emit(

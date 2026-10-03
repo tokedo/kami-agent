@@ -714,12 +714,37 @@ Reader notes (stable semantics):
   run; in a live stream it means the request is in flight.
 - `tool_call.tx_terminal_state` names the transaction outcome the
   harness reported — `confirmed_success` | `reverted` | `unconfirmed` |
-  `validation_rejected` | `batch_error` — classified once at ingestion
-  so downstream analysis never string-matches harness prose. It is
-  **absent** whenever the call was not one transaction outcome: reads,
-  scaffold tools, non-transaction errors, in-band partial batches, and
-  pre-send dry-run skips. Absence means *not classifiable as one
-  terminal state*, never *succeeded*.
+  `validation_rejected` | `batch_error` | `not_executed` (new at 0.7.0)
+  — classified once at ingestion so downstream analysis never
+  string-matches harness prose. It is **absent** whenever the call was
+  not one transaction outcome: reads, scaffold tools, non-transaction
+  errors (a blocked nonce lane and a cancelled call included), in-band
+  partial batches and multi-step results, and pre-send dry-run skips.
+  Absence means *not classifiable as one terminal state*, never
+  *succeeded*.
+
+  **What each value means for someone reconciling an arm's gas and
+  action counts afterwards.** "On-chain" is whether the hash will ever be
+  in a block; "gas" is whether this hash spent any; "action" is whether
+  the world changed.
+
+  | value | on-chain | gas | action | how to reconcile it |
+  |---|---|---|---|---|
+  | `confirmed_success` | mined, status 1 | spent | happened | count it once; the hash is in a block |
+  | `reverted` | mined, status 0 | spent (the harness reports `gas_used`) | did not happen | count the gas, not the action; the hash is in a block |
+  | `unconfirmed` | not known at report time | maybe | maybe | the only open state: resolve it on chain by its hash. It may still mine later — the harness keeps it in its ledger and a later call may report it in a `notice` |
+  | `not_executed` | **never** — proven: its nonce was consumed by another hash (a nonce collision; the message names that hash) or the node dropped it and its nonce was released | none by this hash | did not happen | count neither gas nor action for this hash, and do not look for it on chain. After a nonce collision the CONSUMING hash may well be in a block, signed by this harness or by another sender on the same key — count that one by its own row or on chain, never as this call |
+  | `validation_rejected` | nothing signed or sent | none | did not happen | no hash exists |
+  | `batch_error` | per item | per item | per item | no single hash: read the per-item outcomes in the message and the rows in `txs[]` |
+  | absent | — | — | — | not one transaction outcome: reconcile from `txs[]`, whose rows carry the harness's own per-row `status` — `success`, `reverted`, `unconfirmed`, `dropped` (= `not_executed`) — verbatim |
+
+  `ok` stays exception-keyed beside all of these: a raised not-executed
+  transaction is `ok: false`; a returned single-transaction row whose
+  `status` is `dropped` is `not_executed` with `ok: true`. The hash a
+  `not_executed` row carries in `tx_hash` is the call's own transaction —
+  lifted so a hash-keyed reconciliation knows it will never appear in a
+  block — never the hash that consumed its nonce. Streams written before
+  0.7.0 recorded these as absent.
 - `session_start.presentation_mode` is the mode the manifest pinned and
   the scaffold passed to the harness child. Absent when the manifest
   pinned none, in which case the harness applied its own default —
@@ -1236,7 +1261,9 @@ answer lived only in a transcript, and a crashed session never wrote one.
   raising it; either way the outcome is classified once, at ingestion,
   into `tool_call.tx_terminal_state` (P9) from the harness's own
   contract text. Analysis therefore splits validation-rejects, reverts,
-  and unconfirmed transactions on a field. The classification is
+  unconfirmed transactions, and — from kami-harness 4.0.0 — transactions
+  the harness proved will never execute (`not_executed`) on a field. The
+  classification is
   observation only: it changes nothing the agent sees, and an
   unrecognized message is recorded as no state rather than guessed at.
 - `tx_hash` is extracted best-effort from structured content or JSON
@@ -1561,7 +1588,7 @@ the same daemon over the same socket.
 | I19 | Tool schemas stay inside the subset all three providers accept | `tests/unit/test_scaffold_tools.py::test_tool_defs_cover_spec_surface` (no `oneOf`/`anyOf`/`allOf`) + the tri-provider tier parsing every call natively |
 | I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress. `search_reference` adds a *view* of `reference/`, not a channel: it reads the same read-only tree `workspace_read` already serves | the scaffold tool list is exactly the base seven of P10 plus, per profile, the one added tool (`test_tool_defs_cover_spec_surface`, `tests/unit/test_profiles.py::test_the_surface_per_profile`); network-level closure is operator-owned (see *Unowned*, README) |
 | I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
-| I22 | The three post-broadcast terminal states plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing), `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
+| I22 | The post-broadcast terminal states — confirmed, reverted, unconfirmed, and from 0.7.0 proven not executed — plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing; `::test_not_executed_is_neither_unconfirmed_nor_reverted`, `::test_not_executed_lifts_its_own_hash_and_never_the_one_that_consumed_its_nonce`, `::test_a_returned_dropped_row_is_not_executed`, `::test_dropped_rows_inside_a_multi_transaction_payload_are_no_single_state`), `tests/unit/test_shape_tolerance.py::test_a_raised_not_executed_transaction_is_recorded_as_one`, `::test_a_returned_dropped_row_is_recorded_as_not_executed`, `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
 | I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
 | I24 | The session-start brief is one call of the harness's own roster tool, executed before the first model call, injected verbatim as a tool result, attempted exactly once, separable in telemetry from what the agent chose — and it bounds nothing the agent does. **A surface without that tool starts no session** | `tests/unit/test_brief.py` — ordering (`test_brief_is_executed_before_the_first_model_call`), whole-message verbatimness (`::test_brief_result_is_injected_verbatim`), no-special-path (`::test_the_brief_names_a_tool_the_agent_can_call_itself`, `::test_full_per_kami_detail_stays_on_the_harness_surface`, `::test_no_arguments_are_sent_so_the_daemon_fills_the_account_in`), the requirement (`::test_a_surface_without_the_roster_tool_is_refused_before_any_model_call`), provenance (`::test_brief_is_telemetered_and_marked_scaffold_initiated_from_the_harness`, `::test_brief_records_the_freshness_of_what_it_injected`, `::test_an_unparseable_roster_costs_nothing`), cap/counter/breaker exclusion (`::test_brief_consumes_no_session_tool_cap`, `::test_a_failed_brief_does_not_advance_the_consecutive_error_counter`, `::test_brief_never_feeds_the_repetition_breaker`), degradation (`::test_a_harness_failure_is_injected_as_the_harness_own_words`, `::test_a_failing_brief_is_attempted_exactly_once`, `::test_no_brief_when_no_harness_is_configured`, `::test_an_oversized_brief_is_capped_like_any_tool_result`); end to end through the real CLI against a stand-in harness in the `cron-smoke` job, and natively per provider in the tri-provider tier |
 | I25 | A model request that was sent always leaves a record, whether or not its outcome did — and the write-ahead marker never inflates accounting | `tests/unit/test_loop.py::test_every_model_request_is_written_before_it_is_sent` (asserts the marker is on disk at the moment the request goes out), `::test_each_retry_is_its_own_request`, `::test_write_ahead_markers_never_contribute_to_accounting`, `::test_an_unnormalizable_response_is_recorded_instead_of_escaping`; recovery in `tests/unit/test_runner.py::test_a_request_that_never_completed_is_named_not_lost`, `::test_the_phantom_is_counted_by_the_crash_session_end`, `::test_phantom_recovery_is_idempotent`, `::test_a_completed_request_is_never_called_phantom`; pairing re-asserted per session by `tests/cron_smoke/check_telemetry.py` |

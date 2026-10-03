@@ -29,6 +29,19 @@ BATCH = (
     '— do not resubmit them. Per-item outcomes: [{"kami": 2, "status": "reverted"}]'
 )
 
+# kami-harness 4.0.0: a broadcast transaction PROVEN never to execute.
+# Copied from its TxNonceCollisionError / TxDroppedError, not imported.
+NONCE_COLLISION = (
+    "transaction 0xa11ce was NOT executed and cannot be: its nonce 500 was "
+    "consumed by 0xb0b (NOT signed by this harness). This hash spent no gas. "
+    "It is a nonce collision, not an unconfirmed transaction."
+)
+DROPPED = (
+    "transaction 0xd0d0 was NOT executed: the node no longer holds it (two "
+    "lookups agree) and its nonce 501 is unconsumed; the nonce was released. "
+    "This hash spent no gas."
+)
+
 # The MCP server wraps a raised tool exception before the client sees it,
 # so no marker can be assumed to sit at position 0.
 WRAPPED = "Error executing tool harvest_stop: "
@@ -41,6 +54,8 @@ WRAPPED = "Error executing tool harvest_stop: "
         (UNCONFIRMED, receipts.UNCONFIRMED),
         (REJECTED, receipts.VALIDATION_REJECTED),
         (BATCH, receipts.BATCH_ERROR),
+        (NONCE_COLLISION, receipts.NOT_EXECUTED),
+        (DROPPED, receipts.NOT_EXECUTED),
     ],
 )
 def test_each_terminal_state_classifies_distinctly(message, expected):
@@ -103,6 +118,60 @@ def test_a_batch_error_yields_no_single_hash():
 
 def test_a_pre_signing_rejection_has_no_hash_to_report():
     assert receipts.tx_hash_from_error(REJECTED) is None
+
+
+# --- a transaction proven NOT executed (kami-harness 4.0.0, schema 0.7.0) ------
+
+
+def test_not_executed_is_neither_unconfirmed_nor_reverted():
+    """The nonce collision says "not an unconfirmed transaction": it must not
+    be recorded as one, and nothing about it is a revert (no block, no gas)."""
+    for message in (NONCE_COLLISION, DROPPED, WRAPPED + NONCE_COLLISION):
+        state = receipts.classify_error(message)
+        assert state == receipts.NOT_EXECUTED
+        assert state not in (receipts.UNCONFIRMED, receipts.REVERTED)
+
+
+def test_not_executed_lifts_its_own_hash_and_never_the_one_that_consumed_its_nonce():
+    assert receipts.tx_hash_from_error(NONCE_COLLISION) == "0xa11ce"
+    assert receipts.tx_hash_from_error(WRAPPED + DROPPED) == "0xd0d0"
+
+
+def test_a_batch_quoting_a_not_executed_item_is_still_a_batch():
+    assert receipts.classify_error(BATCH + " " + NONCE_COLLISION) == receipts.BATCH_ERROR
+    assert receipts.tx_hash_from_error(BATCH + " " + NONCE_COLLISION) is None
+
+
+def test_a_returned_dropped_row_is_not_executed():
+    """The harness's per-row word for the same verdict, as a single result."""
+    row = {"tx_hash": "0xd0d0", "status": "dropped", "nonce": 501, "consumed_by": None}
+    assert receipts.classify_success(json.dumps(row)) == receipts.NOT_EXECUTED
+    nested = json.dumps({"result": row})
+    assert receipts.classify_success(nested) == receipts.NOT_EXECUTED
+
+
+def test_dropped_rows_inside_a_multi_transaction_payload_are_no_single_state():
+    """Rows in a txs list stay verbatim; the call as a whole is not one outcome."""
+    payload = json.dumps(
+        {"txs": [{"tx_hash": "0x1", "status": "success"}, {"tx_hash": "0x2", "status": "dropped"}]}
+    )
+    assert receipts.classify_success(payload) is None
+
+
+def test_an_odd_status_value_classifies_as_nothing_and_never_raises():
+    for status in (["success"], {"a": 1}, 1, None, "SUCCESS", "reverted"):
+        assert receipts.classify_success(json.dumps({"status": status})) is None
+
+
+def test_the_enum_is_the_documented_six():
+    assert receipts.TERMINAL_STATES == (
+        "confirmed_success",
+        "reverted",
+        "unconfirmed",
+        "validation_rejected",
+        "batch_error",
+        "not_executed",
+    )
 
 
 def test_non_transaction_errors_yield_no_hash():
