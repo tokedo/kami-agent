@@ -1346,7 +1346,7 @@ answer lived only in a transcript, and a crashed session never wrote one.
   "must be absent" to "must be present".
 - **Cap arithmetic assumption.** Every call re-sends the system prompt
   (with this profile's appendices, P13, and from 0.7.0 the harness's
-  standing text — 957 characters at kami-harness 4.0.0 through 4.2.0
+  standing text — 957 characters at kami-harness 4.0.0 through 4.3.0
   with its default 90 s call box), the file
   index, the entire tool surface, and every session-start injection
   (P1.12) — the roster, the gas balances, and on `planning` the plan file.
@@ -1426,11 +1426,12 @@ answer lived only in a transcript, and a crashed session never wrote one.
   4 owes no text and passes. Like the roster requirement, this is a
   precondition checked once per session, not drift detection (N10).
   The rule keys on the MAJOR, so every 4.x harness pairs with this
-  scaffold. **The dev pin is kami-harness 4.2.0** (`c036554`): the image
+  scaffold. **The dev pin is kami-harness 4.3.0** (`cf395c9`): the image
   default, the example manifest, the recorded surface fixture and the
   live tier name it. Its standing text is byte-identical to 4.0.0's
-  (957 characters, sha256 `7c0e7ca6…ae4b`), so moving between 4.0.0 and
-  4.2.0 leaves `session_start.harness_standing_text_sha256` unchanged.
+  (957 characters, sha256 `7c0e7ca6…ae4b`), so moving between any of
+  4.0.0 through 4.3.0 leaves `session_start.harness_standing_text_sha256`
+  unchanged.
 - **Context-guard headroom** (same owner): because the guard is checked
   post-call, one full turn lands in context before the next check.
   Headroom below the model's context window must cover
@@ -1566,21 +1567,22 @@ the same daemon over the same socket.
 - **Construction cannot fail.** A client opens no connection until it is
   queried, so an unreachable daemon can never abort a session; it is
   discovered by the brief and degrades there.
-- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.0.2
-  recommended and pinned** (`62c3d85`, new at 0.7.1). kami-lens 1.0.0
+- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.0.3
+  recommended and pinned** (`7f9be7b`, new at 0.7.1). kami-lens 1.0.0
   could keep an EARLIER transaction's write when several transactions in
   one block wrote the same key — a kami's health, a timestamp, a
   harvest's state — and serve that stale value, with nothing degraded,
   until the key was written again; its periodic chain re-read could not
-  correct it. 1.0.1 fixed it, and 1.0.2 keeps the projection clock in
-  step with the chain. The harness serves its `lens_*` reads — the
+  correct it. 1.0.1 fixed it; 1.0.2 keeps the projection clock in step
+  with the chain, and 1.0.3 measures it against the chain before its
+  first answer. The harness serves its `lens_*` reads — the
   session-start roster among them — from this daemon, so the defect is
   in what the model is shown, not only in what analysis reads. **Not enforced**:
   the provenance query below records `lens_version` on every
   `session_start`, which makes a run against 1.0.0 detectable in
   telemetry; refusing on it would be the runtime drift refusal N10
   excludes. Nothing this scaffold reads from the daemon changed shape
-  between 1.0.0 and 1.0.2 — `roster` and the envelope's `meta` keys are
+  between 1.0.0 and 1.0.3 — `roster` and the envelope's `meta` keys are
   identical, and the `status` fields the provenance query reads are
   unchanged — while `status.sync` gains `reconcileRepairs` and
   `lastRepair`, which are not read (I37).
@@ -1656,7 +1658,7 @@ the same daemon over the same socket.
 | I34 | **Every session is journaled whatever the model writes, the entry names no ending reason and no accounting, the file is bounded so a whole read never truncates, and the last entry reaches the next session as an ordinary re-readable slice** | `tests/unit/test_journal.py` — the entry (`::test_the_entry_carries_the_facts_a_successor_needs`, `::test_no_previous_entry_means_no_elapsed_figure_rather_than_zero`, `::test_the_entry_never_names_the_apparatus`, `::test_a_flood_of_transactions_cannot_crowd_out_every_other_session`), retention (`::test_retention_drops_oldest_entries_and_keeps_the_file_readable_whole`, `::test_the_newest_entry_is_kept_even_when_it_alone_exceeds_the_bound`, `::test_has_session_makes_a_second_write_detectable`), the tree (`::test_the_journal_is_readable_and_not_writable`, `::test_the_file_index_names_the_journal_with_its_size`, `::test_the_journal_does_not_count_against_the_workspace_quota`), the injection (`::test_the_last_entry_is_injected_as_a_readable_byte_slice`, `::test_the_first_session_gets_the_ordinary_not_found_result`, `::test_the_journal_injection_bounds_nothing_the_agent_does`) |
 | I35 | **Which lens daemon served a session is recorded on every `session_start`, never asserted against the manifest, and never reaches the agent** | `tests/unit/test_lens_provenance.py::test_the_serving_daemons_identity_lands_on_session_start`, `::test_the_enrichment_flag_makes_a_mis_provisioned_rung_detectable`, `::test_a_daemon_that_cannot_answer_costs_nothing`, `::test_a_daemon_serving_a_shape_we_did_not_expect_records_what_it_can`, `::test_no_daemon_means_no_provenance_and_no_query`, `::test_provenance_is_never_an_agent_visible_channel` |
 | I36 | **The harness's standing text reaches the model verbatim on every session, on every profile and through every provider adapter; it is fingerprinted, never copied, on `session_start`; a harness that sends none changes nothing; and a 4.x harness whose text did not arrive starts no session — visibly, as one `session_refused` event per attempt, consuming no session number** | `tests/unit/test_standing_text.py` — the field (`::test_line_one_alone_still_parses_and_carries_no_text`, `::test_a_hash_only_handshake_still_parses`, `::test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim`, `::test_the_remainder_is_not_reflowed_or_stripped`, `::test_tokens_are_read_from_line_one_only`, `::test_the_client_exposes_the_handshake_of_a_real_child`), the prompt (`::test_the_standing_text_is_in_the_system_prompt_of_every_profile`, `::test_no_text_means_the_prompt_is_exactly_what_it_was`, `::test_the_text_is_on_every_call_of_the_session`, `::test_the_text_never_enters_the_tool_surface_or_its_hash`), the wire (`::test_every_provider_adapter_sends_it_in_its_system_slot`, three real adapters × five profiles), the record (`::test_session_start_records_the_texts_fingerprint_and_size`, `::test_no_text_records_no_fingerprint_but_still_the_version`, `::test_the_text_is_never_in_telemetry_itself`), the refusal (`::test_a_4x_harness_whose_text_did_not_arrive_starts_no_session`, `::test_a_wrapper_that_drops_the_text_is_refused`, `::test_only_that_combination_is_refused`, `::test_bring_up_refuses_the_same_pairing_with_the_same_plain_message`, `::test_run_session_exits_with_the_plain_message_not_a_traceback`), the refusal's record (`::test_the_refusal_is_readable_from_telemetry_alone`, `::test_a_refused_attempt_consumes_no_session_number`, `::test_a_malformed_published_hash_cannot_mask_the_refusal`, `tests/unit/test_telemetry.py::test_a_malformed_refusal_is_rejected`); end to end under a cron environment against a stand-in serving a 4.x handshake (`tests/cron_smoke/check_telemetry.py`); natively per provider in the tri-provider tier once the recorded surface carries the text |
-| I37 | **Result shapes new at harness 4.0.0 / lens 1.0.0 neither crash nor mis-record**: incomplete rows, `INCOMPLETE` / `NOT_APPLIED`, time-boxed loop results, a `notice` first key, and the not-executed / lane-blocked / cancelled outcomes reach the model verbatim and are recorded as no terminal state rather than a wrong one. From 0.7.1 also the harness 4.1.0 / 4.2.0 and lens 1.0.1 / 1.0.2 shapes: `fee_wei` (a string, or null — always null on a reverted row, kept as null in `tool_call.txs`) and `payouts` rows carrying `decode_error` on a write result, and a `portal_claim` with no `amount` and a `decode_error`, are a landed transaction — confirmed, its own hash, never error-shaped and never a breaker error; an `unregistered: true` inventory row passes untouched; `status.sync.reconcileRepairs` / `lastRepair` add nothing to `session_start`; and `meta.asOf.clockSampleAgoMs` past 300 s is never read as staleness (`lens_stale` is `meta.stale`) | `tests/unit/test_shape_tolerance.py` (classification, hash lifting, receipts and the journal roster on each shape, through a session) |
+| I37 | **Result shapes new at harness 4.0.0 / lens 1.0.0 neither crash nor mis-record**: incomplete rows, `INCOMPLETE` / `NOT_APPLIED`, time-boxed loop results, a `notice` first key, and the not-executed / lane-blocked / cancelled outcomes reach the model verbatim and are recorded as no terminal state rather than a wrong one. From 0.7.1 also the harness 4.1.0 / 4.2.0 and lens 1.0.1 / 1.0.2 shapes: `fee_wei` (a string, or null — always null on a reverted row, kept as null in `tool_call.txs`) and `payouts` rows carrying `decode_error` on a write result, and a `portal_claim` with no `amount` and a `decode_error`, are a landed transaction — confirmed, its own hash, never error-shaped and never a breaker error; an `unregistered: true` inventory row passes untouched; `status.sync.reconcileRepairs` / `lastRepair` add nothing to `session_start`; and `meta.asOf.clockSampleAgoMs` past 300 s is never read as staleness (`lens_stale` is `meta.stale`). And the harness 4.3.0 shapes: a portal `dry_run` quote (no `status`, hash or fee) is no transaction — no terminal state, no hash, nothing journaled — and its refusal, the real call's pre-signing text, is `validation_rejected` even where that text says a deposit "lands and reverts"; `cooldowns` rows (null with a `decode_error` where unstated) leave a landed result confirmed and never error-shaped; `get_gas_balance`'s `*_wei` and `block` pass through the session-start injection verbatim and its `block` is no lens freshness field; and a `travel_to_room` `fee_wei` total of null keeps its legs, null leg fee included, in `tool_call.txs` | `tests/unit/test_shape_tolerance.py` (classification, hash lifting, receipts and the journal roster on each shape, through a session) |
 
 ---
 
