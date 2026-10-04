@@ -38,6 +38,22 @@ same terms (the last section of this file):
   once there has been one, ``lastRepair``;
 - ``meta.asOf.clockSampleAgoMs`` may run past 300,000 on a healthy daemon.
 
+kami-harness 4.3.0 adds, on the same terms again:
+
+- a ``dry_run`` on ``portal_deposit`` / ``portal_claim`` / ``portal_cancel``:
+  a quote with ``dry_run: true`` and no ``status``, ``tx_hash``, ``block``,
+  ``gas_used`` or ``fee_wei`` — no transaction, so no terminal state; a
+  dry run that fails a check raises the real call's own pre-signing
+  refusal, word for word;
+- ``cooldowns`` on harvest start / stop / collect results and their
+  ``act_sequence`` rows: per kami ``{kami_id, cooldown_until}``, null with
+  a ``decode_error`` where it cannot be stated;
+- ``get_gas_balance`` states every balance in wei too (``*_wei``) and the
+  ``block`` it read them at (null when the node would not answer at one
+  height) — this is the session-start balance injection;
+- ``travel_to_room`` states a ``fee_wei`` total, null when any leg that
+  spent or may have spent gas states none.
+
 A ``decode_error`` is the harness saying what it could not read out of a
 transaction that LANDED. It is not a failure of the call, and is recorded
 as none.
@@ -79,6 +95,7 @@ from kami_agent.tools.receipts import (
     CONFIRMED_SUCCESS,
     NOT_EXECUTED,
     UNCONFIRMED,
+    VALIDATION_REJECTED,
     classify_error,
     classify_success,
     error_shaped_payload,
@@ -276,6 +293,10 @@ SURFACE = [
     ToolDef(name="portal_claim", description="Claim.", input_schema=EMPTY),
     ToolDef(name="allocate_skills", description="Loop.", input_schema=EMPTY),
     ToolDef(name="lens_inventory", description="Inventory.", input_schema=EMPTY),
+    ToolDef(name="portal_deposit", description="Deposit.", input_schema=EMPTY),
+    ToolDef(name="portal_cancel", description="Cancel.", input_schema=EMPTY),
+    ToolDef(name="harvest_start", description="Start.", input_schema=EMPTY),
+    ToolDef(name="travel_to_room", description="Travel.", input_schema=EMPTY),
 ]
 
 
@@ -910,3 +931,400 @@ def test_a_status_with_repair_counters_records_the_same_identity(run_dir, sync_e
     shown = json.dumps([getattr(m, "content", None) for m in adapter.requests[-1]], default=str)
     assert "reconcileRepairs" not in shown
     assert "ffda3963" not in shown
+
+
+# =================================================================================
+# kami-harness 4.3.0
+# =================================================================================
+#
+# Shapes copied from the harness's own builders at 4.3.0 (portal_deposit /
+# portal_claim / portal_cancel with dry_run, _require_gas_token_left[_before_
+# approve], _require_gas_balance, _kami_cooldowns, get_gas_balance,
+# travel_to_room / _fee_total). Identifiers and amounts are synthetic.
+
+OWNER = "0x" + "0f" * 20
+ITEMS_WEI = "50000000000000"  # 5 items of a scale-5 token
+
+# --- dry runs: a quote, no transaction ------------------------------------------
+
+DRY_DEPOSIT = {
+    "dry_run": True,
+    "item": 103,
+    "item_name": "Ether Shard",
+    "amount": 5,
+    "tax": {"flat": 1, "bps": 0, "items": 1},
+    "credited": 4,
+    "token": {"address": GAS_TOKEN, "amount_wei": ITEMS_WEI, "amount": "0.00005"},
+    "approve_needed": False,
+    "approve_fee_bound_wei": None,
+    "deposit_fee_bound_wei": "3012500000001",
+    "deposit_fee_bound_estimated": False,
+    "gas_token": True,
+    "gas_token_rule": "passes",
+}
+# The allowance is short: an approve would be signed first, so the
+# deposit's bound is an estimate and says so.
+DRY_DEPOSIT_SHORT_ALLOWANCE = {
+    **DRY_DEPOSIT,
+    "approve_needed": True,
+    "approve_fee_bound_wei": "172500000001",
+    "deposit_fee_bound_wei": "4281622500001",
+    "deposit_fee_bound_estimated": True,
+    "gas_token_rule": (
+        "passes, the deposit's bound an estimate (it cannot be estimated before "
+        "its allowance exists); its exact bound is checked once the approve has "
+        "landed"
+    ),
+}
+DRY_CLAIM = {
+    "notice": (
+        f"operator-lane receipt: the payout goes to the account's operator as of "
+        f"this claim, {PAYEE}, which is not this server's operator wallet (none)"
+    ),
+    "dry_run": True,
+    "receipt_id": "0x21",
+    "route": "operator",
+    "item": 103,
+    "token": GAS_TOKEN,
+    "payee": PAYEE,
+    "amount_wei": "90000000000000",
+    "amount": "0.00009",
+    "claimable_now": True,
+    "claimable_at": 1791030000,
+    "signer": "owner",
+    "fee_bound_wei": "325000000001",
+}
+DRY_CANCEL = {
+    "dry_run": True,
+    "receipt_id": "0x22",
+    "item": 103,
+    "items_refunded": 9,
+    "tax_not_refunded": 1,
+    "signer": "operator",
+    "fee_bound_wei": "325000000001",
+}
+
+# A dry run that fails a check raises the REAL call's refusal, word for word.
+# The first says "lands and reverts" of a deposit that was NOT sent: the
+# sharp case for a looser revert match.
+_REFUSED = "validation failed; no transaction sent: "
+REFUSE_DEPOSIT_GAS_TOKEN = (
+    f"Error executing tool portal_deposit: {_REFUSED}item 103's token is the gas "
+    f"token, so the deposit and its gas come out of one balance. Owner wallet "
+    f"{OWNER} holds 53012500000000 wei (0.0000530125 ETH); depositing 5 items "
+    f"takes {ITEMS_WEI} wei, and the deposit's fee bound is 3012500000001 wei (gas "
+    "limit 1205000 x the flat price 2500000 wei + 1 wei: the prepayment, the gas "
+    "gate's bound): 53012500000001 wei in all, 1 wei short. A deposit that leaves "
+    "less than its fee lands and reverts; at most 4 items can be deposited from "
+    "this balance now."
+)
+REFUSE_DEPOSIT_BEFORE_APPROVE = (
+    f"Error executing tool portal_deposit: {_REFUSED}item 103's token is the gas "
+    "token, so the deposit, its approve and their gas come out of one balance; "
+    f"nothing was signed. Owner wallet {OWNER} holds 54454122500001 wei "
+    f"(0.000054454122500001 ETH); depositing 5 items takes {ITEMS_WEI} wei, the "
+    "approve's fee bound is 172500000001 wei (gas limit 69000 x the flat price "
+    "2500000 wei + 1 wei, the prepayment), and the deposit's is an ESTIMATE, "
+    "4281622500001 wei (gas limit 1712649: the limit a recorded deposit was sent "
+    "with — a deposit cannot be estimated before its allowance exists; its exact "
+    "bound is checked once the approve has landed): 54454122500002 wei in all, 1 "
+    "wei short. By that estimate at most 4 items can be deposited from this "
+    "balance now."
+)
+REFUSE_CLAIM_EARLY = (
+    f"Error executing tool portal_claim: {_REFUSED}portal receipt claimable at "
+    "1791033600 (in 3600 s)"
+)
+REFUSE_CANCEL_GAS = (
+    f"Error executing tool portal_cancel: {_REFUSED}operator wallet {OPERATOR} "
+    "holds 0.0000001 ETH; the transaction requires 0.000325000000000001 ETH (gas "
+    "limit 130000 at the flat price + 1 wei, the prepayment)"
+)
+
+# --- cooldowns on harvest results and sequence rows --------------------------------
+
+COOLDOWN_UNSTATED = {
+    "kami_id": 1054,
+    "cooldown_until": None,
+    "decode_error": (
+        "cooldown not stated: the receipt carries no component.Time.Next write "
+        "for kami #1054, and reading it at block 34007712 failed (request timeout)"
+    ),
+}
+START_WITH_COOLDOWNS = {
+    "tx_hash": H1,
+    "status": "success",
+    "block": 34007712,
+    "gas_used": 288140,
+    "fee_wei": "36971000000000",
+    "account": "main",
+    "cooldowns": [{"kami_id": 1041, "cooldown_until": 1791030180}, COOLDOWN_UNSTATED],
+}
+COLLECT_WITH_COOLDOWNS = {
+    "tx_hash": H1,
+    "status": "success",
+    "block": 34007713,
+    "gas_used": 104277,
+    "fee_wei": "13377000000000",
+    "account": "main",
+    "kamis": [1041],
+    "payouts": [{"kami_id": 1041, "item": 2, "item_name": "VIPP", "amount": 0}],
+    "cooldowns": [{"kami_id": 1041, "cooldown_until": 1791030210}],
+}
+SEQUENCE_WITH_COOLDOWNS = {
+    "status": "complete",
+    "steps": [
+        {
+            "index": 0,
+            "op": "harvest_stop",
+            "kami_ids": [1041],
+            "status": "success",
+            "tx_hash": H1,
+            "block": 34007712,
+            "gas_used": 201556,
+            "fee_wei": "25866000000000",
+            "payouts": [{"kami_id": 1041, "item": 2, "item_name": "VIPP", "amount": 515}],
+            "cooldowns": [{"kami_id": 1041, "cooldown_until": 1791030180}],
+        },
+        {
+            "index": 1,
+            "op": "harvest_start",
+            "kami_ids": [1054],
+            "status": "success",
+            "tx_hash": H2,
+            "block": 34007712,
+            "gas_used": 160233,
+            "fee_wei": "20561000000000",
+            "cooldowns": [COOLDOWN_UNSTATED],
+        },
+    ],
+    "sent": 2,
+    "landed": 2,
+    "account": "main",
+}
+
+# --- get_gas_balance: exact wei and the block they were read at --------------------
+
+GAS_BALANCE_430 = {
+    "balances": {
+        "main": {
+            "operator_address": OPERATOR,
+            "operator_eth": "0.019428",
+            "operator_wei": "19428000000000000",
+            "owner_address": OWNER,
+            "owner_eth": "1E-18",
+            "owner_wei": "1",
+            "owner_mainnet_eth": None,
+            "owner_mainnet_wei": None,
+        }
+    },
+    "block": 34007712,
+}
+# The node would not answer at one height: every balance re-read at latest.
+GAS_BALANCE_430_NO_BLOCK = {**GAS_BALANCE_430, "block": None}
+
+# --- travel_to_room: a fee total, null when a leg that spent gas states none -------
+
+TRAVEL_FEE_UNSTATED = {
+    "reached_target": True,
+    "path": [11, 12, 13],
+    "hops": 2,
+    "moves_executed": 2,
+    "items_used": [],
+    "gas_used": 184402,
+    "fee_wei": None,
+    "stamina_remaining": 20,
+    "final_room": 13,
+    "txs": [
+        {
+            "tx_hash": H1,
+            "status": "success",
+            "block": 34007712,
+            "gas_used": 92201,
+            "fee_wei": "11828000000000",
+        },
+        # Landed, but its fee legs were not identified: the total is null,
+        # never the partial sum.
+        {"tx_hash": H2, "status": "success", "block": 34007713, "gas_used": 92201, "fee_wei": None},
+    ],
+}
+
+
+# --- classification -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "result",
+    [DRY_DEPOSIT, DRY_DEPOSIT_SHORT_ALLOWANCE, DRY_CLAIM, DRY_CANCEL],
+    ids=["deposit", "deposit-short-allowance", "claim", "cancel"],
+)
+def test_a_dry_run_quote_is_no_transaction(result):
+    """No status, no hash, no legs: nothing is classified or lifted from a quote."""
+    text = json.dumps(result)
+    assert classify_success(text) is None
+    assert _extract_tx_hash(None, text) is None
+    assert _extract_txs(None, text) == ()
+    assert not error_shaped_payload(text)
+    assert not is_error_or_revert(True, text)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        REFUSE_DEPOSIT_GAS_TOKEN,
+        REFUSE_DEPOSIT_BEFORE_APPROVE,
+        REFUSE_CLAIM_EARLY,
+        REFUSE_CANCEL_GAS,
+    ],
+    ids=["deposit-gas-token", "deposit-before-approve", "claim-early", "cancel-gas"],
+)
+def test_a_refused_dry_run_is_the_real_calls_pre_signing_rejection(message):
+    """Never a revert — not even the one that says "lands and reverts" — and no hash."""
+    assert classify_error(message) == VALIDATION_REJECTED
+    assert tx_hash_from_error(message) is None
+
+
+@pytest.mark.parametrize(
+    "result",
+    [START_WITH_COOLDOWNS, COLLECT_WITH_COOLDOWNS],
+    ids=["start", "collect"],
+)
+def test_cooldowns_with_and_without_decode_error_leave_a_confirmed_success(result):
+    text = json.dumps(result)
+    assert classify_success(text) == CONFIRMED_SUCCESS
+    assert _extract_tx_hash(None, text) == H1
+    assert _extract_txs(None, text) == ()
+    assert not error_shaped_payload(text)
+    assert not is_error_or_revert(True, text)
+
+
+def test_a_sequence_with_cooldown_rows_names_no_single_outcome():
+    text = json.dumps(SEQUENCE_WITH_COOLDOWNS)
+    assert classify_success(text) is None  # "complete" is not one transaction
+    assert _extract_tx_hash(None, text) is None
+    assert not error_shaped_payload(text)
+    assert not is_error_or_revert(True, text)
+
+
+@pytest.mark.parametrize(
+    "result", [GAS_BALANCE_430, GAS_BALANCE_430_NO_BLOCK], ids=["at-a-block", "block-null"]
+)
+def test_a_gas_balance_with_wei_and_block_is_a_plain_read(result):
+    text = json.dumps(result)
+    assert classify_success(text) is None
+    assert _extract_tx_hash(None, text) is None
+    assert _extract_txs(None, text) == ()
+    assert not error_shaped_payload(text)
+
+
+def test_a_travel_with_a_null_fee_total_keeps_its_legs_verbatim():
+    text = json.dumps(TRAVEL_FEE_UNSTATED)
+    assert classify_success(text) is None  # many hops, no single outcome
+    assert _extract_txs(None, text) == tuple(TRAVEL_FEE_UNSTATED["txs"])
+    assert not error_shaped_payload(text)
+    assert not is_error_or_revert(True, text)
+
+
+# --- through a session ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tool", "result"),
+    [
+        ("portal_deposit", DRY_DEPOSIT),
+        ("portal_deposit", DRY_DEPOSIT_SHORT_ALLOWANCE),
+        ("portal_claim", DRY_CLAIM),
+        ("portal_cancel", DRY_CANCEL),
+    ],
+    ids=["deposit", "deposit-short-allowance", "claim", "cancel"],
+)
+def test_a_dry_run_reaches_the_model_untouched_and_records_no_transaction(run_dir, tool, result):
+    _, adapter, events = run(run_dir, {tool: result}, tool)
+    seen = results_seen(adapter)["c0"]
+    assert seen.content == json.dumps(result, ensure_ascii=False)
+    assert seen.is_error is False
+    assert list(json.loads(seen.content)) == list(result)  # notice stays first
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == tool)
+    assert row["ok"] is True
+    for absent in ("tx_terminal_state", "tx_hash", "txs", "result_error_shaped"):
+        assert absent not in row
+    (entry,) = journal.read_entries(run_dir)
+    assert entry["tx_hashes"] == []
+
+
+@pytest.mark.parametrize(
+    ("tool", "message"),
+    [
+        ("portal_deposit", REFUSE_DEPOSIT_GAS_TOKEN),
+        ("portal_deposit", REFUSE_DEPOSIT_BEFORE_APPROVE),
+        ("portal_claim", REFUSE_CLAIM_EARLY),
+        ("portal_cancel", REFUSE_CANCEL_GAS),
+    ],
+    ids=["deposit-gas-token", "deposit-before-approve", "claim-early", "cancel-gas"],
+)
+def test_a_refused_dry_run_reaches_the_model_verbatim_as_a_rejection(run_dir, tool, message):
+    _, adapter, events = run(run_dir, {tool: message}, tool)
+    seen = results_seen(adapter)["c0"]
+    assert seen.content == message
+    assert seen.is_error is True
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == tool)
+    assert row["ok"] is False
+    assert row["error"] == message
+    assert row["tx_terminal_state"] == VALIDATION_REJECTED
+    assert "tx_hash" not in row
+
+
+@pytest.mark.parametrize(
+    ("tool", "result"),
+    [("harvest_start", START_WITH_COOLDOWNS), ("harvest_collect", COLLECT_WITH_COOLDOWNS)],
+    ids=["start", "collect"],
+)
+def test_cooldowns_reach_the_model_untouched(run_dir, tool, result):
+    _, adapter, events = run(run_dir, {tool: result}, tool)
+    seen = results_seen(adapter)["c0"]
+    assert seen.content == json.dumps(result, ensure_ascii=False)
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == tool)
+    assert row["ok"] is True
+    assert row["tx_terminal_state"] == CONFIRMED_SUCCESS
+    assert row["tx_hash"] == H1
+    assert "result_error_shaped" not in row
+
+
+def test_sequence_cooldown_rows_reach_the_model_untouched(run_dir):
+    _, adapter, events = run(run_dir, {"act_sequence": SEQUENCE_WITH_COOLDOWNS}, "act_sequence")
+    seen = results_seen(adapter)["c0"]
+    assert seen.content == json.dumps(SEQUENCE_WITH_COOLDOWNS, ensure_ascii=False)
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == "act_sequence")
+    assert row["ok"] is True
+    assert "tx_terminal_state" not in row
+    assert "result_error_shaped" not in row
+
+
+@pytest.mark.parametrize(
+    "result", [GAS_BALANCE_430, GAS_BALANCE_430_NO_BLOCK], ids=["at-a-block", "block-null"]
+)
+def test_the_session_start_balance_injection_carries_wei_and_block_verbatim(run_dir, result):
+    """The balance read is injected as served; its `block` is no lens freshness field."""
+    outcome, adapter, events = run(run_dir, {BALANCE_TOOL: result})
+    assert outcome == SESSION_RAN
+    injected = results_seen(adapter)["balance_1"]
+    assert injected.content == json.dumps(result, ensure_ascii=False)
+    assert injected.is_error is False
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == BALANCE_TOOL)
+    assert row["ok"] is True
+    assert row["initiator"] == "scaffold"
+    for absent in ("lens_block", "lens_stale", "tx_hash", "tx_terminal_state", "txs"):
+        assert absent not in row
+
+
+def test_a_travel_with_a_null_fee_total_is_recorded_leg_by_leg(run_dir):
+    _, adapter, events = run(run_dir, {"travel_to_room": TRAVEL_FEE_UNSTATED}, "travel_to_room")
+    seen = results_seen(adapter)["c0"]
+    assert seen.content == json.dumps(TRAVEL_FEE_UNSTATED, ensure_ascii=False)
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == "travel_to_room")
+    assert row["ok"] is True
+    assert row["txs"] == TRAVEL_FEE_UNSTATED["txs"]  # the null leg fee kept, not dropped
+    assert "tx_terminal_state" not in row
+    assert "result_error_shaped" not in row
+    (entry,) = journal.read_entries(run_dir)
+    assert entry["tx_hashes"] == [H1, H2]
