@@ -5,7 +5,7 @@ The model-agnostic reference agent scaffold for
 frontier models into Kamigotchi, a live on-chain world, and measures what
 they do under controlled conditions.
 
-**Status: v0.7.0.** [SPEC.md](SPEC.md) is the contract registry — what the
+**Status: v0.7.1.** [SPEC.md](SPEC.md) is the contract registry — what the
 scaffold provides, what it depends on, the invariants and how each one is
 enforced, and the behaviors that are accepted by design.
 
@@ -121,6 +121,25 @@ start with a plain message instead of running without it, and writes one
 up no session number. Against an older
 harness it injects nothing and sends exactly the prompt 0.6.0 sent.
 Contract: [SPEC.md](SPEC.md) D1.
+
+The check keys on the harness's major version, so any 4.x harness pairs
+with 0.7.0 or newer. The pinned and tested harness is **kami-harness
+4.3.0**: the image default, the example manifest, the recorded tool
+surface and the live tier all name it, and its standing text is the same,
+byte for byte, as 4.0.0's.
+
+**kami-lens 1.0.1 or newer is required for correct reads; 1.0.3 is
+recommended and pinned.** kami-lens 1.0.0 could keep an earlier
+transaction's value when several transactions in one block wrote the same
+thing — a kami's health, a timestamp, a harvest's state — and serve that
+stale value, looking healthy, until it was written again. The harness's
+`lens_*` reads, the session-start roster among them, come from that
+daemon, so on 1.0.0 a session can be shown a wrong value with nothing
+marking it. 1.0.2 and 1.0.3 also keep the
+projection clock in step with the chain from the daemon's first answer. The scaffold does not refuse an
+older daemon; it records the serving daemon's version on every
+`session_start` (`lens_version`), so a run against 1.0.0 is visible in
+telemetry. Contract: [SPEC.md](SPEC.md) D7.
 
 ## Setup
 
