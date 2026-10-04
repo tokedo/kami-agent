@@ -99,6 +99,6 @@ lens:
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: 55cdf9f18ec9c4f4b07a587b8adbb6215f766cf5 # kami-harness 4.0.0 (pairs with kami-agent 0.7.0+)
-  lens_sha: 0ffc8a734082bc9ee74ec381178b4320fe323aad # kami-lens 1.0.0
+  harness_sha: c036554f6e4a15754f2f2249e68bb2fe12000d26 # kami-harness 4.2.0 (4.0.0+ pairs with kami-agent 0.7.0+)
+  lens_sha: 62c3d8598dddcf3d791fdd4d7a57259db852971a # kami-lens 1.0.2 (1.0.1+ required for correct reads)
   gdd_sha: 531e4de49bdbc71cbbfa727849e53f6ef5fad85c # repo cleanup only; game content byte-identical to c2c5a1b
