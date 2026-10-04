@@ -498,33 +498,33 @@ GAS_TOKEN = "0x" + "e1" * 20
 STOP_WITH_PAYOUTS = {
     "tx_hash": H1,
     "status": "success",
-    "block": 34031872,
+    "block": 34007712,
     "gas_used": 403112,
     "fee_wei": "51732000000000",
     "account": "main",
-    "kamis": [11224, 12649, 6245],
+    "kamis": [1041, 1054, 1077],
     "payouts": [
-        {"kami_id": 11224, "item": 2, "item_name": "VIPP", "amount": 630},
+        {"kami_id": 1041, "item": 2, "item_name": "VIPP", "amount": 515},
         # The game's event states the amount; the item could not be singled out.
         {
-            "kami_id": 12649,
+            "kami_id": 1054,
             "item": None,
             "item_name": None,
-            "amount": 622,
+            "amount": 498,
             "decode_error": (
-                "the HARVEST_STOP event pays kami #12649's account 622, and "
+                "the HARVEST_STOP event pays kami #1054's account 498, and "
                 "inventory writes of items [2, 103] precede it in the receipt; "
                 "the item is not stated"
             ),
         },
         # No event for this kami: neither is stated.
         {
-            "kami_id": 6245,
+            "kami_id": 1077,
             "item": None,
             "item_name": None,
             "amount": None,
             "decode_error": (
-                "no HARVEST_STOP event for kami #6245 in the receipt; the payout is not stated"
+                "no HARVEST_STOP event for kami #1077 in the receipt; the payout is not stated"
             ),
         },
     ],
@@ -533,40 +533,40 @@ STOP_WITH_PAYOUTS = {
 COLLECT_FEE_UNSTATED = {
     "tx_hash": H1,
     "status": "success",
-    "block": 34031082,
+    "block": 34007690,
     "gas_used": 210554,
     "fee_wei": None,
     "account": "main",
-    "kamis": [6058],
-    "payouts": [{"kami_id": 6058, "item": 2, "item_name": "VIPP", "amount": 0}],
+    "kamis": [1088],
+    "payouts": [{"kami_id": 1088, "item": 2, "item_name": "VIPP", "amount": 0}],
 }
 # A partial loop result whose last leg reverted: the leg and the top level
 # both carry fee_wei null (a reverted receipt has no logs, so no fee legs).
 ALLOCATE_LEG_REVERTED = {
-    "kami_id": 11224,
+    "kami_id": 1041,
     "allocated": 1,
     "failed_at": 212,
     "total_planned": 2,
-    "error": f"transaction {H2} landed on-chain in block 34031901 and REVERTED",
+    "error": f"transaction {H2} landed on-chain in block 34007721 and REVERTED",
     "txs": [
         {
             "tx_hash": H1,
             "status": "success",
-            "block": 34031900,
+            "block": 34007720,
             "gas_used": 98211,
             "fee_wei": "12601000000000",
         },
         {
             "tx_hash": H2,
             "status": "reverted",
-            "block": 34031901,
+            "block": 34007721,
             "gas_used": 61002,
             "fee_wei": None,
         },
     ],
     "tx_hash": H2,
     "status": "reverted",
-    "block": 34031901,
+    "block": 34007721,
     "gas_used": 61002,
     "fee_wei": None,
     "chain": {"skill_points": 1},
@@ -578,22 +578,22 @@ SEQUENCE_STOP_THEN_REVERT = {
         {
             "index": 0,
             "op": "harvest_stop",
-            "kami_ids": [11224],
+            "kami_ids": [1041],
             "status": "success",
             "tx_hash": H1,
-            "block": 34031872,
+            "block": 34007712,
             "gas_used": 201556,
             "fee_wei": "25866000000000",
-            "payouts": [{"kami_id": 11224, "item": 2, "item_name": "VIPP", "amount": 630}],
+            "payouts": [{"kami_id": 1041, "item": 2, "item_name": "VIPP", "amount": 515}],
         },
         {
             "index": 1,
             "op": "feed",
-            "kami_id": 11224,
+            "kami_id": 1041,
             "item_id": 11301,
             "status": "reverted",
             "tx_hash": H2,
-            "block": 34031873,
+            "block": 34007713,
             "gas_used": 48211,
             "fee_wei": None,
         },
@@ -612,7 +612,7 @@ CLAIM_NO_PAYOUT_FOUND = {
     ),
     "tx_hash": H1,
     "status": "success",
-    "block": 34031950,
+    "block": 34007730,
     "gas_used": 131070,
     "fee_wei": "16823000000000",
     "receipt_id": "0x1f",
@@ -632,7 +632,7 @@ CLAIM_NO_PAYOUT_FOUND = {
 CLAIM_AMOUNT_DISAGREES = {
     "tx_hash": H1,
     "status": "success",
-    "block": 34031951,
+    "block": 34007731,
     "gas_used": 131070,
     "fee_wei": "16823000000000",
     "receipt_id": "0x20",
@@ -654,15 +654,15 @@ CLAIM_AMOUNT_DISAGREES = {
 # so on a quiet chain it runs past the 300 s tick on a healthy daemon.
 META_102 = {
     "servedAt": "2026-10-04T12:00:00.000Z",
-    "blockNumber": 34031900,
+    "blockNumber": 34007720,
     "stale": False,
     "mode": "daemon",
-    "reconciledThrough": 34031880,
-    "appliedThrough": 34031899,
+    "reconciledThrough": 34007700,
+    "appliedThrough": 34007719,
     "asOf": {
-        "block": 34031900,
+        "block": 34007720,
         "projectedAtSec": 1791115200,
-        "clockSampleBlock": 34031650,
+        "clockSampleBlock": 34007600,
         "clockSampleBlockTime": 1791114788,
         "clockOffsetMs": -812,
         "clockSampleAgoMs": 412345,
@@ -697,7 +697,7 @@ INVENTORY_102 = {
     "meta": META_102,
 }
 REPAIR = {
-    "block": 34031702,
+    "block": 34007650,
     "component": "Health",
     "entity": "0x" + "4a" * 32,
     "at": "2026-10-04T11:58:41.000Z",
@@ -711,12 +711,12 @@ def status_102(sync_extra):
         "gapsHealed": 0,
         "gapsDeferred": 0,
         "reconcilePasses": 41,
-        "reconciledThrough": 34031880,
+        "reconciledThrough": 34007700,
         "lastReconcileAt": "2026-10-04T11:59:30.000Z",
         "unhealedRanges": [],
         "lastHealMs": None,
         "reconcileIntervalMs": 30000,
-        "appliedThrough": 34031899,
+        "appliedThrough": 34007719,
         "shortReads": 0,
         "olderWritesSkipped": 1873,
         "lastReconcileAdvanceAt": "2026-10-04T11:59:30.000Z",
