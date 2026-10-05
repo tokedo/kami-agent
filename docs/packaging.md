@@ -32,6 +32,9 @@ python -c "from kami_agent.supervisor import install_cron; \
            install_cron('kami-agent run-session --run-dir /srv/run', 5)"
 ```
 
+`GDD_SHA` is the manifest's `pins.gdd_sha`; `manifests/example.yaml`
+names the kamigotchi-gdd commit that matches its harness and lens pins.
+
 `kami-agent status --run-dir /srv/run` prints the state.json cache
 (operator-facing; never an agent channel — SPEC I1).
 
