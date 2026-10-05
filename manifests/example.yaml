@@ -89,9 +89,13 @@ harness: # spawned per session as a stdio child (SPEC D1)
 # roster included — arrives through the harness, which reads the same
 # daemon over the same socket, so these must name the same one.
 # socket_path unset resolves KAMI_LENS_SOCKET, then the platform default.
-# The roster tool sends no account argument: the daemon fills it from its
-# own configured default operator, and until that is set the brief
-# degrades visibly every session, which is the expected early-run shape.
+# The roster brief sends no account argument. From kami-harness 4.4.0 the
+# harness reads the run's own account (its account labelled main) and
+# needs no daemon setting: until that account is registered the brief
+# degrades visibly every session with "no account is registered", which
+# is the expected early-run shape. Against 4.0.0-4.3.0 the daemon fills
+# the argument from its configured default operator instead, and the
+# brief degrades the same way until that is set.
 lens:
   socket_path: null
   timeout_s: 30
@@ -99,6 +103,6 @@ lens:
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: cf395c983861e5bba4f7d1a44b55906df1d3f5c8 # kami-harness 4.3.0 (4.0.0+ pairs with kami-agent 0.7.0+)
+  harness_sha: dfa08602776450b76cf82201a98ff5a3d2e114e0 # kami-harness 4.4.0 (4.0.0+ pairs with kami-agent 0.7.0+)
   lens_sha: 7f9be7b67d9884c19422ec27c330633f2f257a10 # kami-lens 1.0.3 (1.0.1+ required for correct reads)
   gdd_sha: 875b7da6231ebcdebdfc79419d09f3bf749a74c3 # kamigotchi-gdd main (2026-10-03), synced to upstream ffda3963 — the upstream pin of the harness and lens above

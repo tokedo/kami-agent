@@ -133,10 +133,14 @@ SOURCE_LENS = "lens"
 # tool that exists succeeding, and the agent can re-issue it whenever it
 # likes. The special path is retired with the pseudo-name.
 #
-# No arguments: the tool's account-index parameter defaults to the
-# daemon's own configured default operator, so the scaffold does not have
-# to know which account the run is — the same reasoning as the balance
-# call's empty account label.
+# No arguments: which account the call reads is the harness's to resolve,
+# so the scaffold does not have to know which account the run is — the
+# same reasoning as the balance call's empty account label. From
+# kami-harness 4.4.0 the harness reads the run's own account (its account
+# labelled main) and, until that account is registered, raises its plain
+# "no account is registered" error; against 4.0.0-4.3.0 the parameter
+# defaults to the daemon's configured default operator (SPEC D7). Either
+# way the result goes to the model verbatim, one attempt, no retry.
 BRIEF_TOOL = "lens_roster"
 BRIEF_ARGS: dict[str, Any] = {}
 BRIEF_CALL_ID = "brief_1"
