@@ -54,6 +54,14 @@ kami-harness 4.3.0 adds, on the same terms again:
 - ``travel_to_room`` states a ``fee_wei`` total, null when any leg that
   spent or may have spent gas states none.
 
+kami-harness 4.4.0 adds no result shape, but the session-start brief's
+early-run answer changes words: with no account given the harness reads
+the run's own account and, until that account is registered, raises
+``NOT_FOUND: no account is registered for owner wallet 0x… (account
+'main')`` where 4.0.0–4.3.0 passed on the daemon's ``BAD_ARGS``. Either is
+the brief degrading visibly — one attempt, the words verbatim, no terminal
+state.
+
 A ``decode_error`` is the harness saying what it could not read out of a
 transaction that LANDED. It is not a failure of the call, and is recorded
 as none.
@@ -358,7 +366,7 @@ def run_dir(tmp_path):
     return tmp_path
 
 
-def run(run_dir, answers, *names, lens=None):
+def run(run_dir, answers, *names, lens=None, harness=None):
     adapter = Calls(*names)
     config = RunConfig(
         run_dir=Path(run_dir),
@@ -371,7 +379,7 @@ def run(run_dir, answers, *names, lens=None):
     outcome = run_session(
         config,
         adapter,
-        harness_factory=lambda: Harness(answers),
+        harness_factory=lambda: harness if harness is not None else Harness(answers),
         lens_factory=(lambda: lens) if lens is not None else None,
     )
     events = list(read_events(Path(run_dir) / "telemetry.jsonl"))
@@ -1328,3 +1336,76 @@ def test_a_travel_with_a_null_fee_total_is_recorded_leg_by_leg(run_dir):
     assert "result_error_shaped" not in row
     (entry,) = journal.read_entries(run_dir)
     assert entry["tx_hashes"] == [H1, H2]
+
+
+# =================================================================================
+# kami-harness 4.4.0
+# =================================================================================
+#
+# No result shape changed. What changed is what the session-start brief —
+# lens_roster with no argument — answers before the run's account exists: the
+# harness now reads the run's own account (its account labelled main) and,
+# while that wallet has no account, raises its own NOT_FOUND instead of
+# passing on the daemon's BAD_ARGS for a missing default operator. Text copied
+# from the harness's `_no_account`, wrapped as its MCP server wraps every
+# raised error; the wallet address is synthetic.
+
+BRIEF_NO_ACCOUNT_440 = (
+    "Error executing tool lens_roster: NOT_FOUND: no account is registered for "
+    f"owner wallet {OWNER} (account 'main')"
+)
+# The same call's early-run answer against 4.0.0-4.3.0, on a daemon with no
+# default operator configured.
+BRIEF_NO_DEFAULT_OPERATOR_430 = (
+    "Error executing tool lens_roster: BAD_ARGS: account index must be a non-negative integer"
+)
+
+
+class RecordingHarness(Harness):
+    """The same stand-in, keeping every call it was asked to execute."""
+
+    def __init__(self, answers):
+        super().__init__(answers)
+        self.calls = []
+
+    def execute(self, name, args):
+        self.calls.append((name, dict(args)))
+        return super().execute(name, args)
+
+
+def test_the_no_account_error_is_no_transaction_outcome():
+    """A write tool refuses with the same words behind "validation failed; no
+    transaction sent:"; this read has no such prefix and sent nothing, so it
+    is no terminal state at all — never a rejection, never a hash."""
+    assert classify_error(BRIEF_NO_ACCOUNT_440) is None
+    assert tx_hash_from_error(BRIEF_NO_ACCOUNT_440) is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [BRIEF_NO_ACCOUNT_440, BRIEF_NO_DEFAULT_OPERATOR_430],
+    ids=["4.4.0-no-account-registered", "4.3.0-no-default-operator"],
+)
+def test_the_early_run_brief_degrades_visibly_on_either_harness(run_dir, message):
+    """Same call, one attempt, the harness's words verbatim, and the session goes on."""
+    harness = RecordingHarness({BRIEF_TOOL: message})
+    outcome, adapter, events = run(run_dir, {}, "lens_kami", harness=harness)
+    assert outcome == SESSION_RAN
+    # Sent once, with no argument, and never again by the scaffold.
+    assert [c for c in harness.calls if c[0] == BRIEF_TOOL] == [(BRIEF_TOOL, {})]
+    # The model is shown the harness's own words, as an error result...
+    seen = results_seen(adapter)
+    assert seen["brief_1"].content == message
+    assert seen["brief_1"].is_error is True
+    # ...and the session proceeds: the model's own call ran after it.
+    assert seen["c0"].is_error is False
+    (row,) = [e for e in events if e["event"] == "tool_call" and e["tool"] == BRIEF_TOOL]
+    assert row["initiator"] == "scaffold"
+    assert row["source"] == "harness"
+    assert row["ok"] is False
+    assert row["error"] == message
+    for absent in ("tx_terminal_state", "tx_hash", "lens_block", "lens_stale"):
+        assert absent not in row
+    # No roster was served, so the journal keeps none rather than an empty one.
+    (entry,) = journal.read_entries(run_dir)
+    assert "roster" not in entry

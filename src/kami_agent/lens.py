@@ -1,9 +1,11 @@
 """kami-lens client: one JSON-lines request over the daemon's unix socket (SPEC D7).
 
-The scaffold consumes the world-state daemon **directly** for exactly one
-thing: the session-start status brief (P1.12). Everything else the agent
-perceives still arrives through the harness MCP surface (D1), which
-speaks to the same daemon over the same socket.
+The scaffold consumes the world-state daemon **directly** only for
+operator-side reads the agent never sees: one ``status`` query per session
+for provenance (D7), and ``init``'s connectivity check at bring-up.
+Everything the agent perceives — the session-start roster brief included
+(P1.12) — arrives through the harness MCP surface (D1), which speaks to
+the same daemon over the same socket.
 
 This module is argument mapping + one socket round trip + envelope
 pass-through, and nothing else. It never recomputes, summarizes, or
@@ -20,12 +22,16 @@ One request object per line in, one response per line out. The envelope
 is ``{data, untrusted: [paths], meta}`` and is returned verbatim, minus
 the ``id``/``ok`` transport keys.
 
-**Arguments are positional and are deliberately omitted for the brief.**
-The daemon prefills the account-index argument of an operator-argument
-query from its own configured default operator when the argument list is
-empty. That default is daemon-side configuration this repo neither owns
-nor can verify, so a brief taken before it is set degrades visibly (D7)
-rather than being papered over here.
+**Arguments are positional; an empty list is sent as no ``args`` key.**
+For an operator-argument query sent that way the daemon prefills the
+account index from its own configured default operator, if one is set —
+daemon-side configuration this repo neither owns nor can verify. The one
+such query this module makes is ``init``'s argument-free roster check,
+which therefore tells whether a daemon is serving, not what the
+session-start brief will show: the brief is the harness's own roster
+call, and which account it reads is the harness's to resolve — from
+kami-harness 4.4.0 the run's own account, before that the daemon's
+default operator (D7).
 
 Two failure classes, both non-fatal to a session (X21):
 

@@ -1,6 +1,11 @@
 """CLI: manifest → config builders, init layout + run_start, status (SPEC P12)."""
 
 import json
+import os
+import shutil
+import socket
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -134,6 +139,126 @@ def test_check_mainnet_rpc_requires_chain_id_1(monkeypatch):
     monkeypatch.setattr(cli.httpx, "post", lambda url, **kwargs: FakeRpcResponse("0x89"))
     with pytest.raises(SystemExit, match="chain id 137"):
         cli.check_mainnet_rpc("http://rpc.test")
+
+
+# --- init's lens line (SPEC D7) ----------------------------------------------------
+#
+# The check's job is one question — is a world-state daemon serving on that
+# socket? — reported and never fatal. Its own argument-free roster query goes
+# to the daemon directly, while the session-start brief is the harness's call,
+# and from kami-harness 4.4.0 the harness resolves the brief's account itself.
+# So what the daemon answers is not the brief, and no line may send an operator
+# to configure the daemon's default operator.
+
+
+class OneAnswerDaemon:
+    """A unix-socket stand-in answering every request with one fixed reply."""
+
+    def __init__(self, reply):
+        # mkdtemp, not tmp_path: a unix socket path is capped near 104 bytes.
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "kami-lens.sock")
+        self.requests = []
+        self._reply = reply
+        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._server.bind(self.path)
+        self._server.listen(4)
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._server.accept()
+            except OSError:
+                return
+            with conn:
+                buffer = b""
+                while b"\n" not in buffer:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                if not buffer:
+                    continue
+                request = json.loads(buffer.split(b"\n", 1)[0])
+                self.requests.append(request)
+                line = json.dumps({"id": request.get("id"), **self._reply}) + "\n"
+                conn.sendall(line.encode())
+
+    def close(self):
+        self._server.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+DAEMON_ANSWERS = {
+    "a-roster": {
+        "ok": True,
+        "data": {"account": {"index": 4271, "roomIndex": 11}, "kamis": [{"index": 1041}]},
+        "untrusted": [],
+        "meta": {"blockNumber": 8814052, "stale": False, "mode": "daemon"},
+    },
+    # A daemon with no default operator configured — the state a new
+    # deployment's daemon is in, and one the pinned harness no longer needs
+    # changed.
+    "no-default-operator": {
+        "ok": False,
+        "error": {"code": "BAD_ARGS", "message": "account index must be a non-negative integer"},
+    },
+    "another-error": {
+        "ok": False,
+        "error": {"code": "NOT_FOUND", "message": "no such account"},
+    },
+}
+
+
+@pytest.fixture
+def lens_daemon():
+    made = []
+
+    def build(reply):
+        d = OneAnswerDaemon(reply)
+        made.append(d)
+        return d
+
+    yield build
+    for d in made:
+        d.close()
+
+
+def lens_manifest(socket_path):
+    return {"lens": {"socket_path": socket_path, "timeout_s": 1}}
+
+
+@pytest.mark.parametrize("answer", sorted(DAEMON_ANSWERS))
+def test_init_reports_a_serving_daemon_the_same_whatever_it_answers(lens_daemon, answer):
+    """A roster and an error both prove a daemon is serving; neither is the brief."""
+    d = lens_daemon(DAEMON_ANSWERS[answer])
+    line = cli.check_lens(lens_manifest(d.path))
+    assert line == f"lens ok (daemon serving at {d.path})"
+    # The check's own query is unchanged: one argument-free roster query.
+    assert d.requests == [{"id": 1, "query": "roster"}]
+
+
+def test_init_warns_without_failing_when_no_daemon_serves(tmp_path):
+    line = cli.check_lens(lens_manifest(str(tmp_path / "absent.sock")))
+    assert line.startswith("lens WARNING: ")
+    assert line.endswith(" — every session-start brief will degrade (D7)")
+
+
+def test_init_skips_the_lens_check_when_lens_is_disabled():
+    assert cli.check_lens({"lens": {"enabled": False}}) == "lens: not configured (skipped)"
+
+
+def test_no_lens_line_sends_an_operator_to_set_a_default_operator(lens_daemon):
+    lines = [
+        cli.check_lens(lens_manifest(lens_daemon(reply).path)) for reply in DAEMON_ANSWERS.values()
+    ]
+    lines.append(cli.check_lens(lens_manifest("/nonexistent/kami-lens.sock")))
+    lines.append(cli.check_lens({"lens": {"enabled": False}}))
+    for line in lines:
+        assert "operator" not in line.lower()
+        assert "expected until" not in line
+        assert "BAD_ARGS" not in line
 
 
 def test_harness_factory_passes_environment_through(monkeypatch):

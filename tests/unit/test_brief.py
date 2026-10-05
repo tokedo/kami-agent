@@ -210,8 +210,13 @@ def test_brief_result_is_injected_verbatim(run_dir):
     assert result.is_error is False
 
 
-def test_no_arguments_are_sent_so_the_daemon_fills_the_account_in(run_dir):
-    """The scaffold has no account identity of its own (D1, D7)."""
+def test_no_arguments_are_sent_so_the_scaffold_never_names_the_account(run_dir):
+    """The scaffold has no account identity of its own (D1, D7).
+
+    Which account an argument-free call reads is the harness's to resolve:
+    from kami-harness 4.4.0 the run's own, before that the daemon's
+    default operator. The call is the same against both.
+    """
     game = Game()
     make_loop(run_dir, ScriptedAdapter(response(end_call())), game=game).run()
     assert BRIEF_ARGS == {}

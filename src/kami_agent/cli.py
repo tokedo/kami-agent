@@ -172,12 +172,15 @@ def harness_factory(manifest: dict[str, Any]):
 
 
 def lens_factory(manifest: dict[str, Any]):
-    """Build the world-state daemon client the session-start brief uses (D7).
+    """Build the world-state daemon client for the scaffold's own reads (D7).
 
-    Always returns a factory: the socket path resolves from the manifest,
-    then the environment, then the platform default, and a client opens no
-    connection until it is queried. A run that wants no brief at all omits
-    the key by setting ``lens.enabled: false``.
+    Those are operator-side only: the per-session provenance query and
+    ``init``'s connectivity check. The session-start brief is the
+    harness's roster call and never goes through this client.
+
+    Returns a factory unless ``lens.enabled: false``: the socket path
+    resolves from the manifest, then the environment, then the platform
+    default, and a client opens no connection until it is queried.
     """
     lens = manifest.get("lens") or {}
     if lens.get("enabled") is False:
@@ -188,8 +191,8 @@ def lens_factory(manifest: dict[str, Any]):
             lens.get("socket_path"),
             timeout_s=lens.get("timeout_s", 30.0),
             # Mirrors what the harness sends under the same pinned mode, so
-            # the brief and the harness's world-state reads ask the daemon
-            # for the same composition.
+            # this client's reads and the harness's world-state reads ask
+            # the daemon for the same composition.
             no_authored=manifest.get("presentation_mode") == "name-free",
         )
 
@@ -248,38 +251,37 @@ def check_provider(manifest: dict[str, Any]) -> str:
 
 
 def check_lens(manifest: dict[str, Any]) -> str:
-    """Bring-up check for the session-start brief's daemon (D7).
+    """Bring-up check: is a world-state daemon serving on that socket (D7)?
 
-    Runs the brief's own query, because the two things that can be wrong
-    are different and only this distinguishes them:
+    Sends one argument-free roster query straight to the daemon and
+    reports one of two states. Neither is fatal:
 
     - **unreachable** — no daemon on that socket. Every session's brief
-      will degrade. Reported, not fatal: a run whose world-state reads
-      work through the harness can still proceed, and X21 says an
-      unavailable read-side daemon must not end sessions.
-    - **answered with an error** — the daemon is serving but cannot
-      resolve the account. Before the daemon's default operator is set
-      this is the EXPECTED shape, not a misconfiguration, so it is
-      reported as the normal early-run state rather than as a fault.
+      will degrade, because the harness reads the same daemon. Reported,
+      not fatal: X21 says an unavailable read-side daemon must not end
+      sessions.
+    - **serving** — the daemon answered, with a roster or with an error.
+      Either answer proves the same thing, so both print the same line.
+
+    What the daemon answered is not reported, because it is not the
+    session-start brief. The brief is the harness's own roster call, and
+    the harness decides which account a call with no argument reads —
+    from kami-harness 4.4.0 the run's own account, which needs nothing
+    from the daemon's configuration — while this query goes to the daemon
+    directly and is answered for whatever account the daemon itself would
+    choose.
     """
     factory = lens_factory(manifest)
     if factory is None:
         return "lens: not configured (skipped)"
     client = factory()
     try:
-        envelope = client.query(ROSTER_QUERY)
+        client.query(ROSTER_QUERY)
     except LensUnavailableError as exc:
         return f"lens WARNING: {exc.message} — every session-start brief will degrade (D7)"
-    except LensQueryError as exc:
-        return (
-            f"lens ok (daemon serving at {client.socket_path}); "
-            f"the brief query answered {exc.code} — expected until the "
-            f"daemon's default operator is set (D7)"
-        )
-    data = envelope.get("data") if isinstance(envelope, dict) else None
-    kamis = data.get("kamis") if isinstance(data, dict) else None
-    count = len(kamis) if isinstance(kamis, list) else "?"
-    return f"lens ok ({client.socket_path}, brief roster of {count})"
+    except LensQueryError:
+        pass
+    return f"lens ok (daemon serving at {client.socket_path})"
 
 
 def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
