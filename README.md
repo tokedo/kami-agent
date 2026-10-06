@@ -124,7 +124,7 @@ Contract: [SPEC.md](SPEC.md) D1.
 
 The check keys on the harness's major version, so any 4.x harness pairs
 with 0.7.0 or newer. The pinned and tested harness is **kami-harness
-4.4.0**: the image default, the example manifest, the recorded tool
+4.5.0**: the image default, the example manifest, the recorded tool
 surface and the live tier all name it, and its standing text is the same,
 byte for byte, as 4.0.0's. From 4.4.0 a read called with no account — the
 session-start roster is one — answers for the run's own account, the

@@ -1354,7 +1354,7 @@ answer lived only in a transcript, and a crashed session never wrote one.
   "must be absent" to "must be present".
 - **Cap arithmetic assumption.** Every call re-sends the system prompt
   (with this profile's appendices, P13, and from 0.7.0 the harness's
-  standing text — 957 characters at kami-harness 4.0.0 through 4.4.0
+  standing text — 957 characters at kami-harness 4.0.0 through 4.5.0
   with its default 90 s call box), the file
   index, the entire tool surface, and every session-start injection
   (P1.12) — the roster, the gas balances, and on `planning` the plan file.
@@ -1434,11 +1434,11 @@ answer lived only in a transcript, and a crashed session never wrote one.
   4 owes no text and passes. Like the roster requirement, this is a
   precondition checked once per session, not drift detection (N10).
   The rule keys on the MAJOR, so every 4.x harness pairs with this
-  scaffold. **The dev pin is kami-harness 4.4.0** (`dfa0860`): the image
+  scaffold. **The dev pin is kami-harness 4.5.0** (`f04672a`): the image
   default, the example manifest, the recorded surface fixture and the
   live tier name it. Its standing text is byte-identical to 4.0.0's
   (957 characters, sha256 `7c0e7ca6…ae4b`), so moving between any of
-  4.0.0 through 4.4.0 leaves `session_start.harness_standing_text_sha256`
+  4.0.0 through 4.5.0 leaves `session_start.harness_standing_text_sha256`
   unchanged. What 4.4.0 gives a deployment: a read called with no
   account — the roster brief is one (P1.12.1) — answers for the run's own
   account, the harness account labelled `main`, with no setting on the
