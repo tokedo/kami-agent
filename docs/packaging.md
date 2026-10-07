@@ -9,10 +9,13 @@ injected at provision time and never baked into the image:
   `MAINNET_RPC_URL` (the harness refuses to start without it; the scaffold
   passes its environment through to the harness child). `kami-agent init`
   writes nothing here — there is no key path through init. Secrets live
-  only in this file, and never in git. kami-harness 4.0.0 reads no
-  third-party strategy-service key any more: a `{LABEL}_KAMIBOTS_API_KEY`
-  or `{LABEL}_PRIVY_ID` left in an old `.env` is ignored and can be
-  removed.
+  only in this file, and never in git. From kami-harness 4.6.0 the
+  harness again holds a strategy-service credential per account: when the
+  agent registers (`register_kamibots`), the harness writes
+  `{LABEL}_KAMIBOTS_API_KEY` and `{LABEL}_PRIVY_ID` through its own
+  secret store, into its keys file (`KAMI_KEYS_FILE`: this file when it
+  names it, `~/.blocklife-keys/.env` otherwise), and reads them from
+  there or from this file. The scaffold never reads them.
 - `/srv/run/reference/` — the pinned GDD snapshot (SPEC D5), read-only via
   the path sandbox.
 
@@ -70,15 +73,19 @@ firewall allows outbound traffic ONLY to:
 | the mainnet RPC host (`.env` `MAINNET_RPC_URL`) | harness bridge tools (`bridge_eth_from_mainnet`, `bridge_status`) |
 | `router-api.initia.xyz` | the bridge route the harness's `bridge_eth_from_mainnet` asks for before it signs |
 | `api.prod.kamigotchi.io` | Kamiden indexer + Kamigaze snapshot (market/order-book reads, KWOB bootstrap) |
+| `api.kamibots.xyz` | the nine OUTSOURCE tools (the strategy service; contacted only when one of them is called) |
 
 Everything else — including the other two providers — is denied. DNS for
 the allowlisted hosts is permitted; nothing agent-visible discloses the
 allowlist (SPEC I1).
 
-From kami-harness 4.0.0 there is no `api.kamibots.xyz` row: the
-third-party strategy-service tools left the surface, and nothing the
-harness serves contacts that host. A firewall that still allows it is
-allowing a host nothing in the run uses.
+From kami-harness 4.6.0 the `api.kamibots.xyz` row is back (4.0.0
+through 4.5.0 served nothing that contacted it): the nine strategy-service
+(OUTSOURCE) tools contact that host, and no other tool the harness serves
+does. A deployment that denies it loses only the OUTSOURCE class: every
+call that reaches for the host fails with the harness's
+`OUTSOURCE_UNAVAILABLE` error, legibly, and every other tool works as
+before.
 
 The kami-lens daemon (below) has egress of its own when it runs on the
 same VM: the chain's JSON-RPC and WebSocket endpoints, `api.prod.kamigotchi.io`
