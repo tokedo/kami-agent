@@ -103,6 +103,6 @@ lens:
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: cf8c1bf7cb52cd610f94ea7fdb3d975b450cdd4e # kami-harness 4.6.0 (4.0.0+ pairs with kami-agent 0.7.0+)
-  lens_sha: 7f9be7b67d9884c19422ec27c330633f2f257a10 # kami-lens 1.0.3 (1.0.1+ required for correct reads)
+  harness_sha: df7129f0b762e91994cb75c793e8755777bbd037 # kami-harness 4.7.0 (4.0.0+ pairs with kami-agent 0.7.0+)
+  lens_sha: e60429094b312e1bf4799b42d12c70ef3d66827f # kami-lens 1.0.5 (1.0.1+ required for correct reads)
   gdd_sha: 875b7da6231ebcdebdfc79419d09f3bf749a74c3 # kamigotchi-gdd main (2026-10-03), synced to upstream ffda3963 — the upstream pin of the harness and lens above
