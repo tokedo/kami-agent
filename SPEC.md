@@ -1591,22 +1591,26 @@ the same daemon over the same socket.
 - **Construction cannot fail.** A client opens no connection until it is
   queried, so an unreachable daemon can never abort a session; it is
   discovered by the brief and degrades there.
-- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.0.3
-  recommended and pinned** (`7f9be7b`, new at 0.7.1). kami-lens 1.0.0
-  could keep an EARLIER transaction's write when several transactions in
+- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.0.5
+  recommended and pinned** (`e604290`, new at 0.7.5; 1.0.3 `7f9be7b`
+  from 0.7.1). kami-lens 1.0.0 could keep an EARLIER transaction's
+  write when several transactions in
   one block wrote the same key — a kami's health, a timestamp, a
   harvest's state — and serve that stale value, with nothing degraded,
   until the key was written again; its periodic chain re-read could not
   correct it. 1.0.1 fixed it; 1.0.2 keeps the projection clock in step
   with the chain, and 1.0.3 measures it against the chain before its
-  first answer. The harness serves its `lens_*` reads — the
-  session-start roster among them — from this daemon, so the defect is
+  first answer. 1.0.4 changes documentation only; 1.0.5 serves
+  `cooldownSec` rounded up, so it reads 0 only once the chain accepts
+  the next action, and logs each write it skips as older. The harness
+  serves its `lens_*` reads — the session-start roster among them —
+  from this daemon, so the defect is
   in what the model is shown, not only in what analysis reads. **Not enforced**:
   the provenance query below records `lens_version` on every
   `session_start`, which makes a run against 1.0.0 detectable in
   telemetry; refusing on it would be the runtime drift refusal N10
   excludes. Nothing this scaffold reads from the daemon changed shape
-  between 1.0.0 and 1.0.3 — `roster` and the envelope's `meta` keys are
+  between 1.0.0 and 1.0.5 — `roster` and the envelope's `meta` keys are
   identical, and the `status` fields the provenance query reads are
   unchanged — while `status.sync` gains `reconcileRepairs` and
   `lastRepair`, which are not read (I37).

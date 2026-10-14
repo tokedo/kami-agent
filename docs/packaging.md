@@ -102,7 +102,7 @@ is visible rather than silent — `tool_call` with `initiator: "scaffold"`
 and `ok: false` on the first event of every session — so check that
 field before concluding a run is healthy.
 
-**Install kami-lens 1.0.3** (the pinned version; **1.0.1 at the least**).
+**Install kami-lens 1.0.5** (the pinned version; **1.0.1 at the least**).
 kami-lens 1.0.0 could serve a stale value — a kami's health, a timestamp,
 a harvest's state — when several transactions in one block wrote it,
 with nothing marked degraded, until it was written again; 1.0.1 fixed
@@ -114,7 +114,7 @@ Every `session_start` records the serving daemon's `lens_version`; check
 it reads `1.0.1` or later.
 
 **kami-lens host requirements** (its README is the authority; unchanged
-from 1.0.0 to 1.0.3). A
+from 1.0.0 to 1.0.5). A
 first start with no saved state loads the whole world into memory: plan
 for **8 GB of RAM**. With under about 7 GB available to the process the
 daemon refuses a first load (with the remedy) rather than dying part-way

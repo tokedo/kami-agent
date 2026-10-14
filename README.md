@@ -134,7 +134,7 @@ is the harness's plain error that no account is registered. Against
 4.0.0–4.3.0 the same call answers for the daemon's configured default
 operator, so on those harnesses the roster fails until that is set.
 
-**kami-lens 1.0.1 or newer is required for correct reads; 1.0.3 is
+**kami-lens 1.0.1 or newer is required for correct reads; 1.0.5 is
 recommended and pinned.** kami-lens 1.0.0 could keep an earlier
 transaction's value when several transactions in one block wrote the same
 thing — a kami's health, a timestamp, a harvest's state — and serve that
@@ -142,7 +142,9 @@ stale value, looking healthy, until it was written again. The harness's
 `lens_*` reads, the session-start roster among them, come from that
 daemon, so on 1.0.0 a session can be shown a wrong value with nothing
 marking it. 1.0.2 and 1.0.3 also keep the
-projection clock in step with the chain from the daemon's first answer. The scaffold does not refuse an
+projection clock in step with the chain from the daemon's first answer,
+and 1.0.5 serves a kami's `cooldownSec` rounded up, so it reads 0 only
+once the chain accepts the next action. The scaffold does not refuse an
 older daemon; it records the serving daemon's version on every
 `session_start` (`lens_version`), so a run against 1.0.0 is visible in
 telemetry. Contract: [SPEC.md](SPEC.md) D7.
