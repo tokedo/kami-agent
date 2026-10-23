@@ -5,7 +5,7 @@ The model-agnostic reference agent scaffold for
 frontier models into Kamigotchi, a live on-chain world, and measures what
 they do under controlled conditions.
 
-**Status: v0.7.5.** [SPEC.md](SPEC.md) is the contract registry — what the
+**Status: v0.8.0.** [SPEC.md](SPEC.md) is the contract registry — what the
 scaffold provides, what it depends on, the invariants and how each one is
 enforced, and the behaviors that are accepted by design.
 
@@ -45,7 +45,11 @@ Design principles behind the contract:
    silent.
 7. **Closed world.** The agent's only channels are the harness tools, the
    bundled read-only `reference/` tree, its own `workspace/`, and the
-   read-only `journal/` the scaffold writes about its own past sessions.
+   read-only `journal/` the scaffold writes about its own past sessions —
+   and, on the two shell rungs, a shell in an environment container of its
+   own that has no network and holds no key, from which the world-state
+   daemon (and on `shell_keeper` a keeper daemon) is reachable over a
+   socket and nothing else is.
 
 Every session opens with **session-start injections** (SPEC P1.12):
 before the first model call the scaffold performs a few reads and puts
@@ -80,13 +84,20 @@ that named them would say through the back door what that silence
 protects.
 
 **The scaffold itself is configurable as an experimental variable.** A
-manifest `scaffold_profile` selects one of five cumulative rungs —
-`control`, `orientation`, `search`, `pushed`, `planning` — which decide
+manifest `scaffold_profile` selects one of seven cumulative rungs —
+`control`, `orientation`, `search`, `pushed`, `planning`, `shell`,
+`shell_keeper`. The first five vary how *documentation* reaches the agent:
 whether the system prompt carries a pinned paragraph about the world's
 core loop, whether a deterministic `search_reference` tool over the
 documentation snapshot is on the surface, and whether the agent has a
-plan file re-read to it each session. One version serves every rung
-(variants are flags, never branches), the rung is recorded on every
+plan file re-read to it each session. The last two are **capability
+rungs**, measured against `planning`: `shell` adds a `shell` tool — a bash
+command in a persistent environment container of the agent's own, whose
+home is its workspace and where files, installed state and background
+processes persist until the run ends — and `shell_keeper` adds a keeper
+daemon reachable from that shell, which signs routine game actions with
+the run's operator key once the agent grants it. One version serves every
+rung (variants are flags, never branches), the rung is recorded on every
 `session_start`, and because a rung can add a tool, `tools_hash` differs
 between rungs by design while the harness surface stays identical. What
 does *not* vary: the objective, the world, the harness, and the absence of
@@ -102,6 +113,13 @@ strategy content anywhere the model can see.
 | World | Kamigotchi on-chain | shared, live |
 
 ## Pairing with the harness
+
+**kami-agent 0.8.0 pairs with kami-harness 5.0.0 or newer** — the harness
+it is built and tested against, whose surface no longer carries the
+strategy-service tools and whose operator key signs trades, transfers,
+auction buys and gacha. The check the scaffold enforces is unchanged and
+keys on the MAJOR: since 0.7.0 a harness at 4.0.0 or above must deliver
+its standing text.
 
 **kami-agent 0.7.0 or newer pairs with kami-harness 4.0.0 or newer.**
 From 4.0.0 the harness states the rules that apply to its whole tool
@@ -122,11 +140,10 @@ up no session number. Against an older
 harness it injects nothing and sends exactly the prompt 0.6.0 sent.
 Contract: [SPEC.md](SPEC.md) D1.
 
-The check keys on the harness's major version, so any 4.x harness pairs
-with 0.7.0 or newer. The pinned and tested harness is **kami-harness
-4.7.0**: the image default, the example manifest, the recorded tool
-surface and the live tier all name it, and its standing text is the same,
-byte for byte, as 4.0.0's. From 4.4.0 a read called with no account — the
+The pinned and tested harness is **kami-harness 5.0.0**: the image
+default, the example manifest, the recorded tool surface and the live
+tier all name it, and its standing text is the same, byte for byte, as
+4.0.0's. From 4.4.0 a read called with no account — the
 session-start roster is one — answers for the run's own account, the
 harness account labelled `main`, with nothing to configure on the
 kami-lens daemon; until that account is registered, the roster's result
@@ -134,7 +151,7 @@ is the harness's plain error that no account is registered. Against
 4.0.0–4.3.0 the same call answers for the daemon's configured default
 operator, so on those harnesses the roster fails until that is set.
 
-**kami-lens 1.0.1 or newer is required for correct reads; 1.0.5 is
+**kami-lens 1.0.1 or newer is required for correct reads; 1.1.0 is
 recommended and pinned.** kami-lens 1.0.0 could keep an earlier
 transaction's value when several transactions in one block wrote the same
 thing — a kami's health, a timestamp, a harvest's state — and serve that
@@ -143,8 +160,12 @@ stale value, looking healthy, until it was written again. The harness's
 daemon, so on 1.0.0 a session can be shown a wrong value with nothing
 marking it. 1.0.2 and 1.0.3 also keep the
 projection clock in step with the chain from the daemon's first answer,
-and 1.0.5 serves a kami's `cooldownSec` rounded up, so it reads 0 only
-once the chain accepts the next action. The scaffold does not refuse an
+1.0.5 serves a kami's `cooldownSec` rounded up, so it reads 0 only
+once the chain accepts the next action, and 1.1.0 serves what patch 0.4.5
+added (a node's yield item, requirements and level cap, a kami's soulbind)
+with every value it checks equal to the chain's own integer arithmetic.
+On the shell rungs the same daemon is what the `kami-lens` command inside
+the environment reaches. The scaffold does not refuse an
 older daemon; it records the serving daemon's version on every
 `session_start` (`lens_version`), so a run against 1.0.0 is visible in
 telemetry. Contract: [SPEC.md](SPEC.md) D7.
@@ -152,8 +173,12 @@ telemetry. Contract: [SPEC.md](SPEC.md) D7.
 ## Setup
 
 Bring-up, the Docker image, and per-run injection of `config.yaml`,
-`.env`, and the `reference/` snapshot: [docs/packaging.md](docs/packaging.md).
-A manifest template lives in [`manifests/example.yaml`](manifests/example.yaml).
+`.env`, the keys file and the `reference/` snapshot: [docs/packaging.md](docs/packaging.md).
+The shell rungs also need their environment — the container the agent's
+shell runs in, the relay that hands it the daemons' sockets, and on
+`shell_keeper` the keeper — defined in
+[`deploy/environment/`](deploy/environment/README.md). A manifest template
+lives in [`manifests/example.yaml`](manifests/example.yaml).
 
 ```sh
 uv sync
@@ -164,8 +189,9 @@ uv run kami-agent run-session --run-dir /srv/run --manual
 ## CLI
 
 - `kami-agent init` — manifest copy, run-dir scaffolding, connectivity
-  checks (chain RPC, mainnet RPC, provider API, MCP handshake), emits
-  `run_start`. Handles no key material.
+  checks (chain RPC, mainnet RPC, provider API, MCP handshake, and on the
+  shell rungs the environment container), emits `run_start`. Handles no
+  key material.
 - `kami-agent run-session` — execute one session (what the scheduler
   invokes).
 - `kami-agent status` — operator-facing state summary.
@@ -255,6 +281,13 @@ Four tiers, all named as enforcement in the SPEC's invariant table:
    term (`standing_text_chars`): it is fixed per harness pin and
    configuration, recorded in the surface fixture beside the tools, and
    absent from a fixture recorded before 4.0.0.
+   The tier also carries the OpenAI-compatible leg (`openrouter`), which
+   runs only when `OPENROUTER_API_KEY` is set, and the environment probes
+   (`tests/smoke/test_environment_docker.py`, marked `docker`), which run
+   against a real environment container named by `KAMI_SMOKE_ENV_CONTAINER`
+   and skip without one: from inside it, the run directory, the keys, the
+   docker socket and the network are unreachable, what the agent leaves
+   running persists, and the daemons answer.
 4. **Live-harness** (scheduled and on demand, never gates PRs) — the same
    canned session against a real kami-harness checkout at the pinned SHA
    with live read-only RPC. Non-gating by design: chain-RPC flakiness must

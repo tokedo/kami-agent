@@ -1,13 +1,15 @@
 ---
 module: kami-agent
-version: 2.9
-describes: v0.7.5
+version: 2.10
+describes: v0.8.0
 ---
 
 # kami-agent — Contract Registry
 
 kami-agent turns a stateless model API into a persistent actor in the
-Kamigotchi world: one loop, three provider adapters, sessions on disk.
+Kamigotchi world: one loop, three provider adapters, sessions on disk —
+and, on the two shell rungs, a persistent environment container of the
+agent's own (D8).
 This file is the contract, not a tour — every entry is a claim that can
 be falsified against the code at the version named above. Narrative,
 rationale, and setup live in `README.md` and `docs/`.
@@ -45,8 +47,19 @@ Ordered steps, as implemented:
    `session_end reason=crash`; the `state.json` cache is refreshed from
    the fold.
 5. `run_status == complete` → `already_complete`.
-6. **Boundary check** (P7.3). Tripped → `run_complete` event, run
-   disabled, `run_complete`.
+6. **Boundary check** (P7.3). Tripped → on the shell rungs **the end of
+   the run** first (D8), in this order: on `shell_keeper` the keeper's
+   `stop --all` then `revoke` for the run's account — two `tool_call` rows,
+   `source: keeper`, `initiator: scaffold`, `ok: false` with the run still
+   completing when the daemon does not answer — and the last `keeper_tx`
+   read; then the environment stopped (`docker stop`, ten-second grace) and
+   one `shell_state` at phase `run_complete`. Then the `run_complete` event,
+   carrying `environment_stopped` and `keeper_grants_after`; run disabled;
+   `run_complete`. Every step is idempotent, and a process that dies inside
+   them leaves no `run_complete`, so the next invocation does them again.
+   **Sessions never revoke**: the keeper is meant to act between sessions,
+   and the run's end is the one point after which nothing would ever look
+   at a surviving grant.
 7. **Claim the session number**: `session_counter += 1`, persisted
    before any model call, so a crash never reuses a number.
 8. **Read the profile's prompt assets** (P13): the base string plus the
@@ -81,11 +94,27 @@ Ordered steps, as implemented:
     harness `presentation_mode`, and what the handshake stated: the
     harness's own registry hash, its `schema_version`, and the sha256 and
     length of the standing text this session shows the model (D1, P9).
+    **On the shell rungs** (new at 0.8.0, D8), before it is emitted, the
+    scaffold inspects the environment container — starting it again if it
+    stopped between sessions — lists its processes and probes the
+    daemons' sockets from inside it, and on `shell_keeper` reads the
+    keeper's ledger; `session_start` names the environment's image
+    (`environment_image`) and the keeper's version (`keeper_version`), and
+    is followed by one `shell_state` (phase `session_start`) and one
+    `keeper_tx` per transaction the keeper signed since the last read. None
+    of it is agent-visible (I1).
 11. **Build context**: system prompt = the base string + the profile's
     appendices + **the harness's standing text, verbatim, when it sent
-    any** (D1) + the file index (full `workspace/` tree with byte sizes,
+    any** (D1) + the file index (the `workspace/` tree with byte sizes,
     `reference/` collapsed to one `N files, N bytes, read-only` line),
-    the parts joined by `\n\n`. A harness that sends no standing text
+    the parts joined by `\n\n`. **The index is bounded from 0.8.0**, on
+    every profile: entries whose name begins with `.` and the directories
+    `__pycache__`, `node_modules`, `.venv` and `venv` are left out, at most
+    `FILE_INDEX_MAX_ENTRIES` (200) entries are listed and then one line
+    `… and <N> more entries`, and a symlink is never followed (P11). A
+    persistent home accumulates what a listing should not carry into every
+    session — a virtualenv alone is hundreds of files. The `workspace_list`
+    TOOL is not bounded. A harness that sends no standing text
     (every harness before 4.0.0) adds nothing — the prompt is byte for
     byte what 0.6.0 composed.
 12. **Kickoff**: the first user message is the frozen constant
@@ -95,8 +124,10 @@ Ordered steps, as implemented:
     previous session's journal entry, each injected as a completed
     call/result pair.
 14. **Agent loop** (P2) until a stop reason (P5).
-15. **Persist**: `session_end`, the session's journal entry (P15), the
-    transcript file, the state cache.
+15. **Persist**: on the shell rungs one `shell_state` (phase
+    `session_end`) first — what the session left running — then
+    `session_end`, the session's journal entry (P15), the transcript file,
+    the state cache.
 16. **Schedule** (P6): exactly one `schedule_next`.
 17. **Release lock** → `session_ran`.
 
@@ -391,7 +422,10 @@ names are manifest-pinned (`caps:` block):
 | `same_tool_errors` | `repetition_same_tool_error_cap` (8) | that many consecutive executed calls of the same tool (args may differ), all classified error-or-revert |
 
 - A **signature** is `toolname:sha256(canonical_json(args))[:12]`;
-  argument key order never distinguishes two calls.
+  argument key order never distinguishes two calls. **The `shell` tool's
+  signature is its command text alone** (0.8.0): `args` reduced to
+  `{"command": <text>}`, so the same command run again with another
+  timeout is the same command.
 - **`wait` is excluded from all three rules, and it is the only
   exclusion.** Every rule keys on repetition being evidence that the agent
   has stopped getting anywhere — but waiting is the one call whose purpose
@@ -570,7 +604,7 @@ class ModelAdapter(Protocol):
 
 `run/telemetry.jsonl`, one JSON object per line, append-only. Machine
 contract: **`schema/telemetry.json`**, JSON Schema draft 2020-12,
-`version: 0.7.0`, shipped inside the wheel as package data and kept
+`version: 0.8.0`, shipped inside the wheel as package data and kept
 byte-identical to the repo copy. Every event is validated **before** it
 is written; an invalid event raises and never lands. Unknown fields are
 rejected (`unevaluatedProperties: false`), so additive changes require a
@@ -581,19 +615,53 @@ enforced), `run_id`, `session`, `event`.
 
 | event | required | optional |
 |---|---|---|
-| `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | — |
-| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `scaffold_profile`, `presentation_mode`, `harness_tools_hash`, `harness_schema_version`, `harness_standing_text_sha256`, `harness_standing_text_chars`, `lens_version`, `lens_upstream_pin`, `lens_enrich`, `lens_default_operator` |
+| `run_start` | `manifest_hash`, `model`, `harness_sha`, `agent_sha`, `gdd_sha`, `harness_tools[]`, `price_table` | `keeper_sha` (0.8.0: the pin on `shell_keeper`, `""` below it) |
+| `session_start` | `trigger` (`scheduled`\|`manual`), `budget_remaining_usd`, `wallclock_elapsed_s`, `tools_hash` | `scaffold_profile`, `presentation_mode`, `harness_tools_hash`, `harness_schema_version`, `harness_standing_text_sha256`, `harness_standing_text_chars`, `lens_version`, `lens_upstream_pin`, `lens_enrich`, `lens_default_operator`, `environment_image` (0.8.0, shell rungs), `keeper_version` (0.8.0, `shell_keeper`) |
 | `llm_request` | `request_seq` | — |
 | `llm_call` | `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd`, `cumulative_usd`, `cumulative_tokens`, `latency_ms`, `stop_reason`, `retry_count` | `reasoning_tokens`, `usage_unknown`, `continuation`, `empty_response`, `request_seq`, `phantom`, `provider_request_id`, `error_status`, `error_type`, `error_text`, `cache_write_5m_tokens`, `cache_write_1h_tokens` |
-| `tool_call` | `tool`, `source` (`harness`\|`scaffold`\|`lens`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`), `call_seq`, `path` + `path_resolved` (file tools), `query` + `hits` (`search_reference`), `wait_requested_s` + `wait_actual_s` (`wait`), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state`, `txs[]`, `result_error_shaped`, `provider_call_id`, `provider_call_id_duplicate`, `lens_stale`, `lens_block` |
+| `tool_call` | `tool`, `source` (`harness`\|`scaffold`\|`lens`\|`keeper`), `duration_ms`, `ok` | `initiator` (`model`\|`scaffold`\|`keeper`), `call_seq`, `path` + `path_resolved` (file tools), `query` + `hits` (`search_reference`), `wait_requested_s` + `wait_actual_s` (`wait`), `exit_code` + `timed_out` + `stdout_bytes` + `stderr_bytes` + `shell_log` (`shell`, 0.8.0), `keeper_books_stopped` / `keeper_grants_after` (the two keeper rows at `run_complete`, 0.8.0), `error`, `truncated`, `original_bytes`, `skipped`, `tx_hash`, `tx_terminal_state`, `txs[]`, `result_error_shaped`, `provider_call_id`, `provider_call_id_duplicate`, `lens_stale`, `lens_block` |
 | `workspace_write` | `path`, `bytes`, `workspace_total_bytes` | — |
 | `workspace_delete` | `path`, `workspace_total_bytes` | — |
 | `schedule_next` | `source` (`agent`\|`default`), `clamped_min`, `next_wake_at` | `requested_min`, `carried`, `carried_invalid` |
 | `session_end` | `reason` (P5 enum), `llm_calls`, `tool_calls`, `session_cost_usd`, `session_tokens` | `repetition_rule`, `repetition_signature`, `repetition_tool`, `repetition_count`, `repetition_window`, `repetition_distinct`, `repetition_signatures[]` |
-| `run_complete` | `reason` (`budget`\|`t_max`\|`manual`), `totals{sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd}` | — |
+| `run_complete` | `reason` (`budget`\|`t_max`\|`manual`), `totals{sessions, llm_calls, cumulative_usd, cumulative_tokens, overspend_usd}` | `environment_stopped` (0.8.0, shell rungs), `keeper_grants_after` (0.8.0, `shell_keeper`) |
 | `session_refused` (0.7.0) | `reason` (`standing_text_missing`), `message`, `trigger` (`scheduled`\|`manual`) | `harness_schema_version`, `harness_tools_hash` |
+| `keeper_tx` (0.8.0) | `book`, `tx_hash`, `action`, `status`, `initiator` (const `keeper`), `source` (const `keeper`) | `block`, `nonce`, `gas_used`, `ledger_ts`, `receipt_stage` |
+| `shell_state` (0.8.0) | `phase` (`session_start`\|`session_end`\|`run_complete`), `container`, `running`, `restarted`, `process_count`, `workspace_bytes` | `processes[]` (≤ 50 × `{pid, comm, args ≤ 200}`), `restart_count`, `lens_socket_ok`, `keeper_socket_ok` |
 
 Reader notes (stable semantics):
+
+- **Analysis of agent behaviour excludes `keeper_tx` from the tool counts
+  and includes it in the gas sums; `shell_state` is the scaffold's record
+  of the environment, never shown to the agent** (0.8.0, D8). The keeper
+  signs with the run's own operator key, so what it spends is the agent's
+  — delegated, not someone else's. One `keeper_tx` per FINAL receipt row
+  of the keeper's ledger (a `tx` row at `stage: receipt` whose status is
+  not `unconfirmed`, which the keeper writes when its receipt read did not
+  answer and the step stays open), deduplicated by hash across the whole
+  stream; `status` is the ledger's own (`success`, `reverted`, or
+  `not_sent` — closed without a receipt, no gas). Its `session` is the
+  session whose START read it (or, after the last session, the
+  `run_complete` read), not when it was signed — `ledger_ts` says that.
+  `shell_state` is written at session start (before the injections), at
+  session end (before `session_end`) and at `run_complete` (after the
+  container was stopped): `restarted` is true when the container's
+  `RestartCount` moved since the last snapshot that read one or the
+  scaffold itself started it — files survived, processes did not;
+  `processes` is the container's process table from the docker API (host
+  pids), the record of "set and forget"; `running: false` also covers a
+  docker API that could not be read. The socket probes run from inside the
+  environment as the agent's user.
+- **`shell` rows** (0.8.0): `exit_code` is what the docker API reported
+  (null when it reported none); **a non-zero exit is the agent's command
+  speaking, not a tool error** — `ok` stays true and the consecutive-error
+  counter is untouched. `timed_out` is the wrapper's: exit 124 or 137 at or
+  past the clamped timeout. `stdout_bytes` / `stderr_bytes` are the full
+  totals; the model saw at most `(tool_result_max_bytes − 1024) / 2` bytes
+  of each. `shell_log` is the run-dir path of the call's whole output. A
+  docker failure (no container, exec refused) is `ok: false` with the
+  daemon's own words in `error`, and carries none of the five fields.
+  `source` is `scaffold`, as for every scaffold tool.
 
 - `llm_call.stop_reason` accepts the P8 enum **plus `error`**, which
   marks a failed-but-logged attempt with no provider stop reason.
@@ -614,7 +682,10 @@ Reader notes (stable semantics):
   does not: `source` names the layer that owns the thing called,
   `initiator` names the layer that wanted it run. `model` is every
   intent the agent returned; `scaffold` is the session-start injections
-  (P1.12). **Any measure of agent behavior must exclude
+  (P1.12) and, from 0.8.0, the two keeper rows at `run_complete`
+  (`keeper_stop_all`, `keeper_revoke`, `source: keeper`). `keeper` (0.8.0)
+  is in the enum for analysis joins and never emitted on a `tool_call`:
+  what the keeper itself signs is a `keeper_tx` event. **Any measure of agent behavior must exclude
   scaffold-initiated calls**: they are reads the agent did not choose,
   and they consume none of the caps that bound what it does. The field is
   optional in the schema so streams written under 0.3.0 and earlier still
@@ -670,7 +741,13 @@ Reader notes (stable semantics):
   incident is actually read. Absent entirely on successful calls.
 - **The lens provenance fields say which daemon served the session**
   (D7): `lens_version`, `lens_upstream_pin`, `lens_enrich`,
-  `lens_default_operator`. `lens_enrich` is the daemon half of the
+  `lens_default_operator`. From kami-harness 4.4.0 the roster brief does
+  not depend on `lens_default_operator` — the harness names the run's own
+  account on a read called with no account — so the field explains no
+  failed brief on such a harness; it is still recorded because it is part
+  of the daemon configuration that served the session (a harness with no
+  `main` label, or one before 4.4.0, still reads through it, and `init`'s
+  direct lens query answers for it). `lens_enrich` is the daemon half of the
   `pushed` rung, so an arm pinned to `pushed` against a daemon running
   with enrichment off is now visible in the record rather than only on
   the host. **They are recorded, never asserted**: the scaffold compares
@@ -679,7 +756,8 @@ Reader notes (stable semantics):
 - `session_start.scaffold_profile` is the rung the manifest pinned (D3),
   and it is what explains a `tools_hash` that differs between arms of one
   family: a profile at or above `search` carries one more scaffold tool by
-  design (P10).
+  design, and one at or above `shell` one more again (P10); `shell` and
+  `shell_keeper` hash alike.
 - **`tool_call.call_seq` is the stream's own call identity**, minted by
   the scaffold, one per emitted row, monotonic within a session, skipped
   intents included. Before 0.4.0 telemetry carried no call identity at
@@ -740,7 +818,23 @@ Reader notes (stable semantics):
   harness reported — `confirmed_success` | `reverted` | `unconfirmed` |
   `validation_rejected` | `batch_error` | `not_executed` (new at 0.7.0)
   — classified once at ingestion so downstream analysis never
-  string-matches harness prose. It is **absent** whenever the call was
+  string-matches harness prose. **From 0.8.0 the classifier keys on the
+  harness's stable clauses** (its SPEC P4): every post-broadcast state
+  names its transaction in a clause opening `transaction <hash>` (`…
+  landed on-chain in block N and REVERTED`, `… is UNCONFIRMED`, `… was NOT
+  executed`), and the EARLIEST such clause in a message is its outcome and
+  its `tx_hash`; a refusal before signing says `no transaction sent` in its
+  FIRST clause (the text before the first `": "`, the MCP wrapper removed),
+  and only there. So kami-harness 5.0.0's deposit outcome after a landed
+  approve (`the approve <hash> landed …; the deposit: transaction <hash>
+  …`) is the deposit's own state and hash, a refusal whose detail quotes
+  another transaction's clause stays `validation_rejected`, and a reworded
+  refusal that keeps the phrase in its first clause is still one. Every
+  5.0.0 text classifies as 0.7.5 classified it; what moved is what a
+  future rewording can break. The dry-run "not performed" verdict (an
+  infrastructure failure, no transaction) stays `validation_rejected`:
+  nothing was signed or spent, which is what the value means for
+  reconciliation. It is **absent** whenever the call was
   not one transaction outcome: reads, scaffold tools, non-transaction
   errors (a blocked nonce lane and a cancelled call included), in-band
   partial batches and multi-step results, and pre-send dry-run skips.
@@ -811,7 +905,9 @@ Reader notes (stable semantics):
 ### P10. Scaffold tools (never part of the harness MCP surface)
 
 The surface is **profile-selected** (D3). The base tools below ship for
-every run; a profile at or above `search` adds `search_reference`.
+every run; a profile at or above `search` adds `search_reference`, and
+from 0.8.0 a profile at or above `shell` adds `shell`. `shell_keeper`
+adds no tool: the keeper is reached through the shell.
 
 **Base surface (every profile):**
 
@@ -831,6 +927,43 @@ every run; a profile at or above `search` adds `search_reference`.
 | tool | signature | contract |
 |---|---|---|
 | `search_reference` | (query, k?) | deterministic BM25 keyword search over `reference/`; top-k (default 5, clamped to 1–10) passages, each `{path, offset, length, text}` with BYTE offsets so `workspace_read(path, offset, length)` expands the hit; snippet bounded at 600 chars; an index with no indexable file answers `no reference files` |
+
+**Profile-added (profiles ≥ `shell`, 0.8.0):**
+
+| tool | signature | contract |
+|---|---|---|
+| `shell` | (command, timeout_s?) | one `docker exec` into the run's environment container (D8) as uid 1000, working directory `/workspace`, `HOME=/workspace`, under `timeout -k 5 <t> bash -c <command>`; `t` = `timeout_s` clamped to `[1, caps.shell_timeout_s]` (default 120), the upper bound when absent, NaN/Inf rejected; no stdin. The result text is `exit_code`, `timed_out`, `duration_s` (one decimal), then `--- stdout (<n> bytes) ---` and `--- stderr (<n> bytes) ---`, each stream capped separately at half of `tool_result_max_bytes` less a fixed 1 KiB reserve, with the standard truncation marker |
+
+`shell` in detail, because it is the widest channel this scaffold has
+opened:
+
+- **It runs in the environment, never here.** The command reaches the
+  container through the Docker Engine API on the socket mounted into the
+  scaffold's own container; the model's text never runs where the keys,
+  the run directory or that socket are (D8, I1). Its description is frozen
+  byte-exact and mechanism only (I3): what runs where, what persists, that
+  output is cut and the timeout clamped.
+- **The timeout bounds the foreground command.** What the command
+  deliberately detaches (`nohup … &`, `setsid`) keeps running — files,
+  installed state and background processes persist between calls and
+  sessions until the run ends; that persistence is the behaviour the rung
+  measures, not a hole in the timeout (X33). `timed_out` is true when the
+  wrapper's code (124, or 137 after the five-second kill grace) arrives at
+  or past `t`.
+- **A non-zero exit is a result; a docker failure is an error.** The
+  former is the agent's command speaking and never advances the
+  consecutive-error counter; the latter (no container, exec refused, the
+  stream not ending) is `ok: false` with the daemon's own words after
+  `the command could not be run in the environment: `.
+- **Exempt from `tool_timeout_s`'s watchdog, as `wait` is**, and bounded
+  by its own clamp plus the kill grace plus a 10-second margin for docker's
+  round trips. It **counts against `session_tool_cap`**, and the repetition
+  breaker keys it on its command text (P5.1).
+- **The whole output is kept** in `run_dir/shell/<session:03d>-<call_seq:04d>.log`
+  — the command, how it ended, both streams (each up to
+  `SHELL_LOG_MAX_BYTES`, 32 MiB per call, the log saying where it cut) — a
+  run-directory internal never mounted into the environment. The
+  `tool_call` row names it (`shell_log`, P9).
 
 `search_reference` in detail, because every number in it is a pinned
 artifact of the arms it serves: the index is built lazily, once per
@@ -879,8 +1012,8 @@ for the agent's own benefit rather than the experiment's:
   exists to catch a hung harness call and defaults below `wait_max_seconds`
   (120 s against 300 s), so a wait running its full clamp would otherwise
   be killed while behaving exactly as specified, counted as a consecutive
-  error, and leave its sleeping thread behind. Every other tool keeps
-  `tool_timeout_s`.
+  error, and leave its sleeping thread behind. `shell` gets its own on the
+  same terms (above). Every other tool keeps `tool_timeout_s`.
 
 **Ordering rule** (unchanged in kind, now stated per profile): game tools
 first, then base scaffold tools in declaration order, then profile-added
@@ -903,10 +1036,11 @@ expected, and — as always — never equated with the harness's value (D1).
 
 The name-collision check at loop construction runs against the **union**
 of the base and every profile's added names — `wait` included from
-0.6.0 — so a harness that registers one of them is refused identically on
-every arm rather than only on the arms whose profile carries it.
+0.6.0, `shell` from 0.8.0 — so a harness that registers one of them is
+refused identically on every arm rather than only on the arms whose
+profile carries it.
 
-The two tables above are the whole scaffold surface. None of the
+The three tables above are the whole scaffold surface. None of the
 session-start injections (P1.12) adds an entry to it: every one of them
 now names a tool that is already there — three of the harness's or this
 table's own — so the surface the model is shown, and with it
@@ -943,6 +1077,19 @@ it (D1).
   leaving a root are rejected. Bare paths can never reach run-directory
   internals (`state.json`, `telemetry.jsonl`, `errors.jsonl`, `prompts/`,
   `transcripts/`, `config.yaml`, `run.lock`).
+- **On the shell rungs `workspace/` is also the environment's
+  `/workspace`** (0.8.0, D8) — the shell's working directory and HOME, one
+  filesystem seen two ways. What the shell writes there the workspace
+  tools read, and the reverse: on those rungs the scaffold hands what
+  `workspace_write` creates to the environment's user (uid 1000), so the
+  agent's shell can change files its own tool wrote. **`workspace_quota_bytes`
+  bounds `workspace_write` only**: what the shell writes is bounded by the
+  host's disk (an operator obligation, `docs/packaging.md`), and is visible
+  in `get_status`'s byte count and in every `shell_state`. From 0.8.0 the
+  listings and the byte count never follow a symlink — the shell can make
+  one, and a link to a file outside the workspace would otherwise show
+  that file's size; the read tools already refused to follow one out of a
+  root.
 - The scaffold never writes into `workspace/` beyond creating the
   directory; its content is entirely agent-authored and is the only
   thing the AGENT writes that survives between sessions. The scaffold's
@@ -956,32 +1103,45 @@ it (D1).
 run/
 ├── config.yaml       # verbatim manifest copy (D3); immutable per run
 ├── state.json        # scaffold-owned CACHE (P3): session_counter, cumulative_usd,
-│                     # cumulative_tokens, next_wake_at, run_status, first_session_at
+│                     # cumulative_tokens, next_wake_at, run_status, first_session_at,
+│                     # and (0.8.0) the keeper ledger cursor keeper_cursor / keeper_open
 ├── run.lock          # PID + created (P4); absent between sessions
 ├── workspace/        # agent-owned (P11)
 ├── reference/        # read-only documentation snapshot (D5)
 ├── journal/          # scaffold-written session record (P15); agent-readable,
 │                     #   agent-unwritable; sessions.jsonl, rolled to a size bound
 ├── errors.jsonl      # persistent provider-error artifact (P14); NEVER agent-visible
+├── shell/            # shell rungs (0.8.0): one full log per shell call (P10);
+│                     #   never mounted into the environment, never agent-visible
 ├── prompts/          # frozen assets: system.txt, kickoff.txt, continue.txt,
-│                     #   orientation.txt, planning.txt (P13)
+│                     #   orientation.txt, planning.txt, shell.txt, shell_keeper.txt (P13)
 ├── transcripts/      # session-NNNN.jsonl, messages exactly as sent (post-truncation),
 │                     #   plus one provenance key that was never sent (P12 note below)
 └── telemetry.jsonl   # append-only event stream (P9) — source of truth
 ```
 
 - `kami-agent init --manifest M --run-dir DIR` — validation and
-  scaffolding only: copies the manifest, materializes **all five** frozen
+  scaffolding only: copies the manifest, materializes **all seven** frozen
   prompt assets (P13, whatever the profile), creates `workspace/` and
-  `transcripts/`, runs connectivity checks (chain RPC, mainnet RPC with
+  `transcripts/` (on the shell rungs giving `workspace/` to uid 1000),
+  runs connectivity checks (chain RPC, mainnet RPC with
   `eth_chainId == 1`, provider API, MCP handshake — which also reports
   whether the pinned surface carries the balance tool and how long the
   harness's standing text is, and exits with the pairing message when a
   4.x harness's standing text did not arrive, D1), emits
-  `run_start`. **There is no key path through
-  init**: it never generates, imports, or writes key material.
-  `--skip-connectivity` skips the four checks (and leaves
-  `run_start.harness_tools` empty).
+  `run_start`. **On the shell rungs** (0.8.0) the checks also assert the
+  environment, the I30 pattern — a mismatch starts no run: the container
+  the manifest names exists and runs; `command -v keeper` inside it FAILS
+  on `shell` and SUCCEEDS on `shell_keeper`; on `shell_keeper` `keeper
+  status` answers from inside with `meta.profile == "lab"` and the keeper
+  container's image reference names `pins.keeper_sha`; `kami-lens health`
+  answers from inside; the rung's appendices are in the run directory.
+  `run_start` records `pins.keeper_sha` on `shell_keeper` and `""` below
+  it. From 0.8.0 `init` also refuses an unknown rung, and a shell rung that
+  names no environment container, before it writes anything of the run's
+  record (D3). **There is no key path through init**: it never generates, imports,
+  or writes key material. `--skip-connectivity` skips the four checks and
+  the environment's (and leaves `run_start.harness_tools` empty).
 - `kami-agent run-session --run-dir DIR [--manual]` — one session (P1).
 - `kami-agent status --run-dir DIR` — prints the `state.json` summary.
   Operator-facing; never an agent channel.
@@ -999,12 +1159,12 @@ description of the content and needs this one stated exception.
 
 ### P13. Frozen prompt assets
 
-Five files ship per run and every one is byte-frozen. Three are the
-strings every session uses; two are **profile appendices**, appended to
-the system prompt by the profiles that carry them (D3). `init`
-materializes all five regardless of profile, so a run directory can be
-inspected against any rung, and a profile whose asset is missing fails
-loudly before the session starts (P1 step 8).
+Seven files ship per run and every one is byte-frozen. Three are the
+strings every session uses; four are **profile appendices**, appended to
+the system prompt by the profiles that carry them, in ladder order (D3).
+`init` materializes all seven regardless of profile, so a run directory
+can be inspected against any rung, and a profile whose asset is missing
+fails loudly before the session starts (P1 step 8).
 
 | asset | used by | content |
 |---|---|---|
@@ -1012,7 +1172,9 @@ loudly before the session starts (P1 step 8).
 | `prompts/kickoff.txt` | every profile | the first user message; no dynamic content, no digits |
 | `prompts/continue.txt` | every profile | the tool-less-turn continuation |
 | `prompts/orientation.txt` | profiles ≥ `orientation` | the core-loop paragraph |
-| `prompts/planning.txt` | profile `planning` | what `workspace/plan.md` is and that it is shown each session |
+| `prompts/planning.txt` | profiles ≥ `planning` | what `workspace/plan.md` is and that it is shown each session |
+| `prompts/shell.txt` | profiles ≥ `shell` (0.8.0) | that the `shell` tool runs bash in an environment of the agent's own: `/workspace` is the workspace tools' directory, `/reference` and `/journal` the same trees; files, installed state and background processes persist until the run ends; no network, no wallet key; what is installed, and that `kami-lens --help` documents the world-state reader it reaches |
+| `prompts/shell_keeper.txt` | profile `shell_keeper` (0.8.0) | that a keeper daemon is reachable from the shell as `keeper`, that `keeper --help` and `keeper describe` are its documentation, that once granted for the run's account it signs with the account's operator key, and that a grant is made and removed through it |
 
 The system prompt states, in order: the situation (autonomous agent,
 periodic sessions, tool calls are the only effect, no human reads the
@@ -1032,6 +1194,16 @@ points, quests, gas. Every sentence is a rule of the game; none is a
 recommendation. That boundary is the rung's whole point, and the text is
 a pinned artifact of the design that varies it: rewording it changes what
 those arms were measured on.
+
+`shell.txt` and `shell_keeper.txt` (0.8.0) are one paragraph each,
+mechanism only: what exists and how it is reached, never when, why or
+whether to use it. Beside the vocabulary scan every asset gets, both and
+the `shell` tool's description pass a second scrub — the keeper's own
+policy-word list (`predator`, `enemy`, `danger`, `safe`, `efficient`,
+`consider`, `armed`, `hostile`, … and its rate, budget and deadline
+phrasings) plus `should`, `best`, `recommend`, `good` — with zero hits
+(I3). `shell.txt` never names the keeper: the plain `shell` arm is the
+keeper's control and must not learn that one exists.
 
 `planning.txt` states where the plan file is, that the scaffold shows it
 each session **up to a stated number of bytes**, and that keeping it
@@ -1354,7 +1526,7 @@ answer lived only in a transcript, and a crashed session never wrote one.
   "must be absent" to "must be present".
 - **Cap arithmetic assumption.** Every call re-sends the system prompt
   (with this profile's appendices, P13, and from 0.7.0 the harness's
-  standing text — 957 characters at kami-harness 4.0.0 through 4.7.0
+  standing text — 957 characters at kami-harness 4.0.0 through 5.0.0
   with its default 90 s call box), the file
   index, the entire tool surface, and every session-start injection
   (P1.12) — the roster, the gas balances, and on `planning` the plan file.
@@ -1433,13 +1605,23 @@ answer lived only in a transcript, and a crashed session never wrote one.
   harness that states no `schema_version` (before 3.0.0) or a MAJOR below
   4 owes no text and passes. Like the roster requirement, this is a
   precondition checked once per session, not drift detection (N10).
-  The rule keys on the MAJOR, so every 4.x harness pairs with this
-  scaffold. **The dev pin is kami-harness 4.7.0** (`df7129f`): the image
-  default, the example manifest, the recorded surface fixture and the
-  live tier name it. Its standing text is byte-identical to 4.0.0's
-  (957 characters, sha256 `7c0e7ca6…ae4b`), so moving between any of
-  4.0.0 through 4.7.0 leaves `session_start.harness_standing_text_sha256`
-  unchanged. What 4.4.0 gives a deployment: a read called with no
+  The rule keys on the MAJOR.
+- **Pairing rule from 0.8.0: kami-agent ≥ 0.8.0 ↔ kami-harness ≥ 5.0.0.**
+  This is the pairing the scaffold is built and tested against, and what
+  it names everywhere it names a harness; the check it enforces is the
+  0.7.0 one above, unchanged — a harness at MAJOR 4 or above must have
+  delivered its standing text — so 0.8.0 still starts against a 4.x
+  harness, and 0.7.x against a 5.x one. What 5.0.0 changes for a run: 100
+  tools (the nine strategy-service tools are gone), the operator key signs
+  trades, item transfers, auction buys and gacha (so the operator-only key
+  shape reaches every game action, D6), `transfer_items` refuses a target
+  that is not a registered account, the soulbind refusals, and refusal
+  texts reworded (P9's classifier keys on their stable clauses). **The dev
+  pin is kami-harness 5.0.0** (`659c205`): the image default, the example
+  manifest, the recorded surface fixture and the live tier name it. Its
+  standing text is byte-identical to 4.0.0's (957 characters, sha256
+  `7c0e7ca6…ae4b`), so moving between any of 4.0.0 through 5.0.0 leaves
+  `session_start.harness_standing_text_sha256` unchanged. What 4.4.0 gives a deployment: a read called with no
   account — the roster brief is one (P1.12.1) — answers for the run's own
   account, the harness account labelled `main`, with no setting on the
   world-state daemon, and says plainly that no account is registered
@@ -1477,6 +1659,19 @@ recorded as absent where it does not — absence is never read as zero.
 | OpenAI | `_request_id` on the response, from the `x-request-id` header; also on API errors | **none** — `prompt_tokens_details` carries `cached_tokens` and `audio_tokens` only |
 | Google | `response_id` on the response — a **model** response id, not a transport request id; no header without `include_sdk_http_response`, which would change the pinned request configuration and is deliberately not set. Errors carry none | **none** — `cache_tokens_details` is a per-**modality** breakdown, not a lifetime one |
 
+**The OpenAI-compatible path** (tested from 0.8.0). `provider: openai`
+reaches any endpoint that speaks the Chat Completions API — a router such
+as OpenRouter among them: the manifest's `openai.base_url` (else
+`OPENAI_BASE_URL`, else the SDK's default) and `openai.extra_headers` are
+passed to the client as given, and `OPENAI_API_KEY` holds that endpoint's
+key. Such a router serves its usage in OpenAI's shape, cached prompt
+tokens in `prompt_tokens_details.cached_tokens`, so the same
+normalization applies (`cache_read_tokens`, priced at the manifest's
+`cache_read_usd_per_mtok`, P7.2) — the path never passed 0 there; 0.8.0
+pins it with a recorded router response. A 5-minute vs 1-hour cache-write
+split stays Anthropic-only: no other path serves one. The endpoint's host
+is the run's provider host in the egress allowlist.
+
 The Anthropic split is worth having beyond bookkeeping: the adapter
 requests 5-minute entries only, so a non-zero 1-hour figure would be a
 finding, and recording both makes N5's no-long-TTL claim a measured fact
@@ -1506,11 +1701,15 @@ at construction, everything else is silently ignored.
 | `workspace_quota_bytes` | P11 |
 | `lock_stale_s` | P4 |
 | `chain_rpc_url` | `init` connectivity check only |
-| `scaffold_profile` (`control`\|`orientation`\|`search`\|`pushed`\|`planning`) | P10, P13, P1.12.3 — the knowledge-delivery rung: it selects the scaffold surface, the prompt appendices, and the plan-file injection, and it is recorded on every `session_start`. **Validated at `build_run_config`**: an unknown value exits there, before any lock, telemetry, or session number, exactly as an unknown provider does. Absent = `control`. Cumulative: each value implies the ones to its left. `pushed` changes **nothing agent-side** beyond the recorded value — its rung is lens/harness result enrichment behind their own runtime flags, which the manifest records for provenance and the scaffold neither reads nor asserts |
+| `scaffold_profile` (`control`\|`orientation`\|`search`\|`pushed`\|`planning`\|`shell`\|`shell_keeper`) | P10, P13, P1.12.3, D8 — the rung: it selects the scaffold surface, the prompt appendices, the plan-file injection and, from `shell`, the environment, and it is recorded on every `session_start`. **`shell` and `shell_keeper` are CAPABILITY rungs — they add a channel, not documentation — measured against `planning`**; the five below them are knowledge rungs. **Validated at `build_run_config`**: an unknown value exits there, before any lock, telemetry, or session number, exactly as an unknown provider does. Absent = `control`. Cumulative: each value implies the ones to its left. `pushed` changes **nothing agent-side** beyond the recorded value — its rung is lens/harness result enrichment behind their own runtime flags, which the manifest records for provenance and the scaffold neither reads nor asserts |
 | `presentation_mode` | D1 — passed to the harness child as `PRESENTATION_MODE`, recorded on `session_start`; never validated scaffold-side. Also selects the brief's `noAuthored` request flag (D7), so both read paths ask the daemon for the same composition |
+| `caps.shell_timeout_s` | P10 — upper bound of ONE `shell` call's timeout (default 120); the call's `timeout_s` is clamped to `[1, this]` |
+| `environment.{container,keeper_container,docker_socket,keeper_socket}` | D8 — shell rungs only, ignored below. `container` (else `KAMI_ENV_CONTAINER`) is **required at ≥ `shell`**: a shell rung without it exits at `init` and at `build_run_config`. `keeper_container` (default `kami-keeper`) is what `init` checks against `pins.keeper_sha`; `docker_socket` unset resolves `DOCKER_HOST` (`unix://`), then `/var/run/docker.sock`; `keeper_socket` unset resolves `KAMI_KEEPER_SOCKET`, then `/srv/keeper/keeper.sock` |
+| `openai.{base_url,extra_headers}` | D2 — `provider: openai` only: the endpoint (else `OPENAI_BASE_URL`) and headers sent on every request (strings only, else the manifest is refused) |
 | `harness.{command,args,cwd,env,handshake_timeout_s}` | D1 |
 | `lens.{socket_path,timeout_s,enabled}` | D7 — the world-state daemon the session-start brief reads. `socket_path` unset resolves `KAMI_LENS_SOCKET`, then the platform default; `enabled: false` is the only way to run with no brief at all |
 | `pins.{agent_sha,harness_sha,lens_sha,gdd_sha}` | `run_start` provenance only — recorded, never verified |
+| `pins.keeper_sha` | 0.8.0: recorded on `run_start` on `shell_keeper` (`""` below it), and the one pin that is **checked**, once, at `init`: the keeper container's image reference must name it (D8) |
 
 Not manifest-driven despite being run parameters: **`poll_cadence`**
 (an argument to the supervisor's cron installer, default 5 min) and
@@ -1529,7 +1728,9 @@ explicit `HOME`, non-interactive shell — which is what I9 asserts.
 ### D5. Bundled documentation snapshot
 
 `run/reference/` is populated outside the scaffold — by packaging, at
-the pinned `gdd_sha` — and is read-only by construction (P11). `init`
+the pinned `gdd_sha` — and is read-only by construction (P11); on the
+shell rungs it is also mounted read-only at `/reference` in the
+environment (D8), the same documentation the workspace tools read. `init`
 warns rather than fails when it is absent, so a dev run without it is
 possible; a run without it silently deprives the agent of its only
 documentation.
@@ -1539,7 +1740,28 @@ documentation.
 Durability of telemetry (I6) assumes `flush` + `fsync` semantics and an
 atomic `os.replace` for the state cache. Keys are read from a run-dir
 `.env` (existing environment wins) and never enter the manifest, the
-config copy, transcripts, or telemetry.
+config copy, transcripts, or telemetry — nor, from 0.8.0, the
+environment container (D8): a `shell` call's process gets the
+container's own environment plus `HOME=/workspace`, nothing of the
+scaffold's.
+
+**Two key shapes** (0.8.0; `docs/packaging.md` has the deployment side):
+
+- **owner + operator** (the quick start): the owner key `MAIN_OWNER_KEY`
+  in the run-dir `.env`, which this scaffold loads and passes to the
+  harness child (the harness reads a key from its environment first, its
+  keys file second); the operator key is created in-run by the agent
+  (`create_operator_wallet`), and the harness writes it to its keys file,
+  `KAMI_KEYS_FILE` (`/srv/keys/.env` in the packaged deployment);
+- **operator only**: `MAIN_OPERATOR_KEY` alone, in the keys file at
+  provision time, no owner key on the host and the account registered
+  beforehand. From kami-harness 5.0.0 every game action signs with the
+  operator; the harness's owner-signed tools refuse legibly, naming the
+  missing key.
+
+In both, the keeper (`shell_keeper`) only ever receives the operator key:
+it mounts the keys file read-only and its own store loads `*_OPERATOR_KEY`
+names and nothing else, and only the account LABEL crosses its socket.
 
 ### D7. kami-lens daemon socket
 
@@ -1591,9 +1813,9 @@ the same daemon over the same socket.
 - **Construction cannot fail.** A client opens no connection until it is
   queried, so an unreachable daemon can never abort a session; it is
   discovered by the brief and degrades there.
-- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.0.5
-  recommended and pinned** (`e604290`, new at 0.7.5; 1.0.3 `7f9be7b`
-  from 0.7.1). kami-lens 1.0.0 could keep an EARLIER transaction's
+- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.1.0
+  recommended and pinned** (`7131a52`, new at 0.8.0; 1.0.5 `e604290` from
+  0.7.5, 1.0.3 `7f9be7b` from 0.7.1). kami-lens 1.0.0 could keep an EARLIER transaction's
   write when several transactions in
   one block wrote the same key — a kami's health, a timestamp, a
   harvest's state — and serve that stale value, with nothing degraded,
@@ -1602,7 +1824,10 @@ the same daemon over the same socket.
   with the chain, and 1.0.3 measures it against the chain before its
   first answer. 1.0.4 changes documentation only; 1.0.5 serves
   `cooldownSec` rounded up, so it reads 0 only once the chain accepts
-  the next action, and logs each write it skips as older. The harness
+  the next action, and logs each write it skips as older; 1.1.0 serves
+  patch 0.4.5's facts — a node's `yieldItem`, `requirements`, `levelCap`,
+  `scavengeCost`, a kami's `soulboundUntil` — and every value it checks
+  equal to the chain's own integer arithmetic. The harness
   serves its `lens_*` reads — the session-start roster among them —
   from this daemon, so the defect is
   in what the model is shown, not only in what analysis reads. **Not enforced**:
@@ -1610,10 +1835,13 @@ the same daemon over the same socket.
   `session_start`, which makes a run against 1.0.0 detectable in
   telemetry; refusing on it would be the runtime drift refusal N10
   excludes. Nothing this scaffold reads from the daemon changed shape
-  between 1.0.0 and 1.0.5 — `roster` and the envelope's `meta` keys are
+  between 1.0.0 and 1.1.0 — `roster` and the envelope's `meta` keys are
   identical, and the `status` fields the provenance query reads are
   unchanged — while `status.sync` gains `reconcileRepairs` and
-  `lastRepair`, which are not read (I37).
+  `lastRepair`, which are not read (I37). On the shell rungs the
+  `kami-lens` command inside the environment reaches the same daemon
+  through the relayed socket (D8); the scaffold still reads it directly
+  for the provenance query only, recorded on `session_start` as before.
 - **One provenance query, operator-side** (new at 0.6.0). Before
   `session_start` is emitted the scaffold sends one `status` query — a
   general query on the daemon's own registry, argument-free, answered
@@ -1644,17 +1872,73 @@ the same daemon over the same socket.
   this scaffold does not recognize contributes whatever fields it did
   serve.
 
+### D8. The environment container and the keeper daemon (shell rungs; new at 0.8.0)
+
+What the scaffold assumes of the deployment on `shell` and `shell_keeper`
+— defined in `deploy/environment/` (`Dockerfile.env`, `compose.yaml`,
+`compose.keeper.yaml`), checked at `init` where it can be (P12), and
+probed from inside at every session boundary (`shell_state`, P9):
+
+- **One container per run**, named by the manifest
+  (`environment.container`, else `KAMI_ENV_CONTAINER`), running for the
+  whole run across every session, with docker's `--init` as PID 1 so what
+  the agent detaches is re-parented and reaped, and `restart:
+  unless-stopped` — a host reboot brings it back with its files and
+  without its processes (`shell_state.restarted`). The scaffold starts it
+  again at a session boundary if it is not running, and stops it at
+  `run_complete`; it never creates or removes it.
+- **Its user is uid 1000**, which owns `/workspace` (the scaffold gives
+  `workspace/` to it at `init` and hands it what `workspace_write`
+  creates).
+- **Mounts, and nothing else:** the run's `workspace/` read-write at
+  `/workspace` (working directory and HOME), `reference/` and `journal/`
+  read-only at `/reference` and `/journal`, the relay's lens socket at
+  `/srv/lens/kami-lens.sock`, and on `shell_keeper` only the relay's keeper
+  socket at `/srv/keeper/keeper.sock`. Not the run directory's internals,
+  not the keys, not the docker socket, not either daemon's data directory.
+  A read-only root with a tmpfs `/tmp`; no network (`network_mode: none`).
+- **The toolset is the image's**, at pinned commits: `bash`, coreutils,
+  `grep`/`sed`/`awk`, `jq`, `git`, `sqlite3`, `python3`, `node`, `less`,
+  `nano`, `procps`, the `kami-lens` CLI at the lens pin, and on
+  `shell_keeper` only the keeper CLIENT at the keeper pin (`keeper`, a
+  wrapper over `python -m keeper`, without the daemon's dependencies). The
+  plain `shell` image has no keeper client at all, and `init` refuses a
+  rung whose image disagrees.
+- **The two daemons stay outside.** The lens and the keeper run in their
+  own containers, and a relay (`sockets`) gives the environment sockets of
+  its own in root-owned directories, so a daemon restart never strands it
+  and their data is never in reach. The keeper runs its `lab` profile,
+  armed, at most one book per account, ungranted until the agent grants
+  it — the grant is the agent's act through its shell.
+- **The scaffold's side of the boundary**: it reaches the container only
+  through the Docker Engine API on the socket mounted into its own
+  container (no docker CLI), and the keeper through the relay's keeper
+  socket mounted into its container (`kami_agent/keeper.py`: one request
+  per connection, `{id, cmd, args}`), for three things only — the
+  keeper's version on `session_start`, its ledger (`keeper_tx`), and the
+  `stop --all` + `revoke` at `run_complete`. Nothing it reads there
+  reaches the model (I1).
+- **The keeper read.** `books {account: main}`, then per book `ledger
+  {book, kind: tx}` with `since` = the highest lens block already read —
+  the keeper's `since` is a lens-block lower bound, inclusive, so re-reads
+  are expected and the hash set dedups them; a receipt the keeper writes
+  late carries no lens basis and is returned only by a whole read, so a
+  book with a hash seen broadcast and not yet closed is read whole until it
+  closes. The cursor is a cache in `state.json`; the dedup set is folded
+  from telemetry, so losing the cache costs one whole re-read and never a
+  duplicate event.
+
 ---
 
 ## Invariants
 
 | # | claim | enforcement |
 |---|---|---|
-| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — including the two surfaces added at 0.6.0: the `wait` tool's strings and **the session journal**, whose entries carry no ending reason (the P5 silence contract) and no accounting of any kind (P15) — system prompt, prompt appendices, tool descriptions, tool results, error messages, or `get_status`. **In-world resources are not apparatus**: gas and the ETH that pays it are world facts (P7.4), so "cost(s) gas" is carved out of the vocabulary scan and nothing else is; the wallets' ETH balances reach the agent as world state through a tool result, while the dollar budget stays unreachable and `budget_visible` stays pinned false (X10) | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all **five** frozen assets, with the `\bcosts? gas\b` carve-out), `::test_the_gas_sentence_states_the_resource_and_where_it_is_shown`, `tests/unit/test_profiles.py::test_no_apparatus_leaks_in_any_profiles_tool_strings` (every profile's surface), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`, `tests/unit/test_journal.py::test_the_entry_never_names_the_apparatus`, `tests/unit/test_wait.py::test_the_description_is_mechanism_only`; tri-provider smoke re-scans every agent-visible string of a real session, the harness's standing text included (0.7.0) |
+| I1 | No budget, spend, run-duration, cap, or measurement information reaches the agent through any channel — including the two surfaces added at 0.6.0: the `wait` tool's strings and **the session journal**, whose entries carry no ending reason (the P5 silence contract) and no accounting of any kind (P15) — system prompt, prompt appendices, tool descriptions, tool results, error messages, or `get_status`. **From 0.8.0 the environment too** (D8): nothing in the run directory's internals or the keys — and not the docker socket, either daemon's data, or any network route — is reachable from the container the agent's commands run in, and nothing the scaffold reads from the environment or the keeper (`shell_state`, `keeper_tx`, the keeper's version) reaches the model; what the agent knows of its keeper it fetched itself, through its shell. **In-world resources are not apparatus**: gas and the ETH that pays it are world facts (P7.4), so "cost(s) gas" is carved out of the vocabulary scan and nothing else is; the wallets' ETH balances reach the agent as world state through a tool result, while the dollar budget stays unreachable and `budget_visible` stays pinned false (X10) | `tests/unit/test_prompts.py::test_no_apparatus_or_policy_leaks` (forbidden-vocabulary scan over all **five** frozen assets, with the `\bcosts? gas\b` carve-out), `::test_the_gas_sentence_states_the_resource_and_where_it_is_shown`, `tests/unit/test_profiles.py::test_no_apparatus_leaks_in_any_profiles_tool_strings` (every profile's surface), `tests/unit/test_scaffold_tools.py::test_no_apparatus_leaks_in_agent_visible_tool_strings`, `::test_get_status_exactly_four_fields`, `tests/unit/test_journal.py::test_the_entry_never_names_the_apparatus`, `tests/unit/test_wait.py::test_the_description_is_mechanism_only`, `tests/unit/test_keeper_ledger.py::test_nothing_of_the_keeper_reaches_the_model`, `tests/unit/test_shell_tool.py::test_the_environment_mounts_nothing_of_the_run_the_keys_or_docker` (the definition), `::test_the_docker_failure_wording_carries_no_apparatus`; tri-provider smoke re-scans every agent-visible string of a real session, the harness's standing text included (0.7.0); the environment probes `tests/smoke/test_environment_docker.py::test_p15_*` from inside a real container |
 | I2 | Budget and t_max are checked **only** at session boundaries; no in-flight session is ever terminated for either | single `boundary_check` call site in `runner.run_session`; `tests/unit/test_governor.py` (budget, t_max, precedence, overspend), `tests/unit/test_runner.py::test_budget_boundary_completes_run`, `::test_t_max_boundary` |
-| I3 | Zero strategy content in the scaffold, the prompts, or the profile appendices — mechanics and rules only. The orientation appendix states what the core loop *is* and never what to do; `search_reference`'s description states what it searches and never when to search | `tests/unit/test_prompts.py::test_frozen_strings_are_exactly_as_reviewed`, `::test_profile_appendices_are_exactly_as_reviewed` (byte-exact; any reword must be re-frozen in the same commit), `tests/unit/test_search.py::test_the_tool_description_is_mechanism_only` + the I1 scans + review discipline on every agent-visible string |
+| I3 | Zero strategy content in the scaffold, the prompts, or the profile appendices — mechanics and rules only. The orientation appendix states what the core loop *is* and never what to do; `search_reference`'s description states what it searches and never when to search | `tests/unit/test_prompts.py::test_frozen_strings_are_exactly_as_reviewed`, `::test_profile_appendices_are_exactly_as_reviewed` (byte-exact; any reword must be re-frozen in the same commit), `tests/unit/test_search.py::test_the_tool_description_is_mechanism_only`, `tests/unit/test_shell_rungs.py::test_the_two_appendices_are_exactly_as_frozen`, `::test_the_shell_tool_is_exactly_as_frozen`, `::test_the_frozen_texts_carry_no_policy_language` (the keeper's own scrub list plus four advice words, zero hits) + the I1 scans + review discipline on every agent-visible string |
 | I4 | Forced endings are silent: no warning message, no final model call, no tool result, no `tool_call` event for the carried wake | `tests/unit/test_loop.py::test_context_guard_trips_post_call_and_is_silent`, `tests/unit/test_repetition.py::test_trip_is_silent_and_ends_like_tool_cap`, the carried-wake suite (`test_token_cap_carries_final_turn_wake_intent` … `test_cap_without_wake_intent_carries_nothing`) |
-| I5 | Frozen strings and code defaults cannot silently diverge (wake bounds), and the packaged copies match the repo copies byte-for-byte — all five prompt assets and the telemetry schema | `tests/unit/test_prompts.py::test_wake_bounds_in_frozen_prompt_match_code_defaults`, `::test_packaged_prompts_match_repo_prompts` (five assets), `::test_init_materializes_every_asset`, `tests/unit/test_telemetry.py::test_packaged_schema_matches_repo_schema`, `::test_schema_resolves_inside_the_installed_package` |
+| I5 | Frozen strings and code defaults cannot silently diverge (wake bounds), and the packaged copies match the repo copies byte-for-byte — all seven prompt assets and the telemetry schema | `tests/unit/test_prompts.py::test_wake_bounds_in_frozen_prompt_match_code_defaults`, `::test_packaged_prompts_match_repo_prompts` (seven assets), `::test_init_materializes_every_asset`, `tests/unit/test_telemetry.py::test_packaged_schema_matches_repo_schema`, `::test_schema_resolves_inside_the_installed_package` |
 | I6 | Telemetry is append-only and crash-consistent: one line per event, validated before write, `write → flush → fsync` before the action it describes is complete; a crash loses at most the event being written | `TelemetryWriter.emit`; `tests/unit/test_telemetry.py::test_append_only_ordering`, `::test_appends_across_writer_instances`, and the rejection suite (`unknown event`, `missing required`, `bad enum`, `wrong type`, `extra field`, `non-UTC ts`) proving invalid events never land |
 | I7 | Telemetry is the source of truth for accounting; `state.json` is a cache rebuilt by folding the stream, and a crashed session is closed exactly once | `tests/unit/test_state.py::test_fold_recomputes_accounting_from_the_stream`, `::test_crashed_session_detected`, `tests/unit/test_runner.py::test_crash_recovery_writes_synthetic_end_and_refolds_accounting`, `::test_crash_recovery_is_idempotent` |
 | I8 | Every stop reason is enumerated and telemetered — the `session_end.reason` enum is closed and each value has a producing path | schema enum + `tests/unit/test_telemetry.py::test_schema_covers_exactly_the_spec_events`, `::test_bad_enum_value_rejected`; producers covered by `test_loop.py` (agent, token_cap, tool_cap, errors), `test_repetition.py` (repetition), `test_runner.py` (crash, harness-abort errors) |
@@ -1669,9 +1953,9 @@ the same daemon over the same socket.
 | I17 | Provider reasoning state is opaque, same-session, same-adapter, and never reaches telemetry | `tests/unit/test_provider_state.py` (capture, verbatim replay, foreign-state ignore per adapter, `test_loop_copies_state_verbatim_without_inspecting`, `test_transcript_records_state_as_sent`) |
 | I18 | The tool surface presented to the model is deterministic and collision-free | `tests/unit/test_loop.py::test_harness_scaffold_name_collision_rejected`, `tests/unit/test_harness_client.py::test_tools_hash_is_deterministic_and_sensitive` |
 | I19 | Tool schemas stay inside the subset all three providers accept | `tests/unit/test_scaffold_tools.py::test_tool_defs_cover_spec_surface` (no `oneOf`/`anyOf`/`allOf`) + the tri-provider tier parsing every call natively |
-| I20 | The agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress. `search_reference` adds a *view* of `reference/`, not a channel: it reads the same read-only tree `workspace_read` already serves | the scaffold tool list is exactly the base seven of P10 plus, per profile, the one added tool (`test_tool_defs_cover_spec_surface`, `tests/unit/test_profiles.py::test_the_surface_per_profile`); network-level closure is operator-owned (see *Unowned*, README) |
+| I20 | Below the shell rungs the agent's only channels are the harness tools, `reference/`, and `workspace/` — the scaffold exposes no web, shell, or other egress. `search_reference` adds a *view* of `reference/`, not a channel: it reads the same read-only tree `workspace_read` already serves. **On `shell` and `shell_keeper` (0.8.0) one channel is added, and only one**: the `shell` tool, whose commands run in the environment container (D8) — no network, no key, the workspace and the documentation mounted, and the world-state daemon (on `shell_keeper` also the keeper) reachable over a relayed socket and nothing else | the scaffold tool list is exactly the base eight of P10 plus, per profile, its added tools (`test_tool_defs_cover_spec_surface`, `tests/unit/test_profiles.py::test_the_surface_per_profile`, `tests/unit/test_shell_rungs.py::test_shell_rungs_carry_the_tool_and_lower_rungs_do_not`); the environment's closure by its definition (`tests/unit/test_shell_tool.py::test_the_environment_mounts_nothing_of_the_run_the_keys_or_docker`) and from inside a real container (`tests/smoke/test_environment_docker.py`); network-level closure of the agent container is operator-owned (`docs/packaging.md`) |
 | I21 | A harness error reaches the model verbatim — no rewording, no added judgment or advice, no swallowing — and the tool call behind it is dispatched exactly once | `tests/unit/test_loop.py::test_raised_outcome_reaches_the_model_verbatim_and_telemetry_by_field` (whole-message equality against the harness text, per terminal state), `::test_a_raised_outcome_is_executed_once_and_never_retried`, `tests/unit/test_harness_client.py::test_raised_terminal_states_reach_the_caller_verbatim` (through a real MCP child, whose error wrapping the classifier must tolerate) |
-| I22 | The post-broadcast terminal states — confirmed, reverted, unconfirmed, and from 0.7.0 proven not executed — plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing; `::test_not_executed_is_neither_unconfirmed_nor_reverted`, `::test_not_executed_lifts_its_own_hash_and_never_the_one_that_consumed_its_nonce`, `::test_a_returned_dropped_row_is_not_executed`, `::test_dropped_rows_inside_a_multi_transaction_payload_are_no_single_state`), `tests/unit/test_shape_tolerance.py::test_a_raised_not_executed_transaction_is_recorded_as_one`, `::test_a_returned_dropped_row_is_recorded_as_not_executed`, `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state` |
+| I22 | The post-broadcast terminal states — confirmed, reverted, unconfirmed, and from 0.7.0 proven not executed — plus the pre-signing rejection are recorded as distinct field values, and nothing else is ever recorded as one of them | `tests/unit/test_receipts.py` (per-state classification, MCP-wrapped and bare; batch messages never read as the item states they quote; non-transaction errors classify as nothing; `::test_not_executed_is_neither_unconfirmed_nor_reverted`, `::test_not_executed_lifts_its_own_hash_and_never_the_one_that_consumed_its_nonce`, `::test_a_returned_dropped_row_is_not_executed`, `::test_dropped_rows_inside_a_multi_transaction_payload_are_no_single_state`), `tests/unit/test_shape_tolerance.py::test_a_raised_not_executed_transaction_is_recorded_as_one`, `::test_a_returned_dropped_row_is_recorded_as_not_executed`, `tests/unit/test_telemetry.py::test_every_terminal_state_is_accepted`, `::test_invented_terminal_state_rejected` (closed enum), `tests/unit/test_loop.py::test_scaffold_failures_carry_no_terminal_state`, `::test_reads_carry_no_terminal_state`; from 0.8.0 keyed on the stable clauses and held to kami-harness 5.0.0's own texts (`tests/unit/test_receipts_500.py`, fixture generated from its exception classes; bare and MCP-wrapped) |
 | I23 | The pinned presentation mode reaches the harness child unvalidated and lands on every `session_start`; an unsupported mode is neither normalized nor caught | `tests/unit/test_cli.py::test_presentation_mode_reaches_the_harness_child`, `::test_presentation_mode_is_passed_through_unvalidated`, `::test_unpinned_presentation_mode_sets_nothing`, `::test_explicit_harness_env_still_wins`, `tests/unit/test_runner.py::test_pinned_presentation_mode_lands_on_every_session_start`, `::test_presentation_mode_is_recorded_as_given` |
 | I24 | The session-start brief is one call of the harness's own roster tool, executed before the first model call, injected verbatim as a tool result, attempted exactly once, separable in telemetry from what the agent chose — and it bounds nothing the agent does. **A surface without that tool starts no session** | `tests/unit/test_brief.py` — ordering (`test_brief_is_executed_before_the_first_model_call`), whole-message verbatimness (`::test_brief_result_is_injected_verbatim`), no-special-path (`::test_the_brief_names_a_tool_the_agent_can_call_itself`, `::test_full_per_kami_detail_stays_on_the_harness_surface`, `::test_no_arguments_are_sent_so_the_scaffold_never_names_the_account`), the requirement (`::test_a_surface_without_the_roster_tool_is_refused_before_any_model_call`), provenance (`::test_brief_is_telemetered_and_marked_scaffold_initiated_from_the_harness`, `::test_brief_records_the_freshness_of_what_it_injected`, `::test_an_unparseable_roster_costs_nothing`), cap/counter/breaker exclusion (`::test_brief_consumes_no_session_tool_cap`, `::test_a_failed_brief_does_not_advance_the_consecutive_error_counter`, `::test_brief_never_feeds_the_repetition_breaker`), degradation (`::test_a_harness_failure_is_injected_as_the_harness_own_words`, `::test_a_failing_brief_is_attempted_exactly_once`, `::test_no_brief_when_no_harness_is_configured`, `::test_an_oversized_brief_is_capped_like_any_tool_result`); end to end through the real CLI against a stand-in harness in the `cron-smoke` job, and natively per provider in the tri-provider tier |
 | I25 | A model request that was sent always leaves a record, whether or not its outcome did — and the write-ahead marker never inflates accounting | `tests/unit/test_loop.py::test_every_model_request_is_written_before_it_is_sent` (asserts the marker is on disk at the moment the request goes out), `::test_each_retry_is_its_own_request`, `::test_write_ahead_markers_never_contribute_to_accounting`, `::test_an_unnormalizable_response_is_recorded_instead_of_escaping`; recovery in `tests/unit/test_runner.py::test_a_request_that_never_completed_is_named_not_lost`, `::test_the_phantom_is_counted_by_the_crash_session_end`, `::test_phantom_recovery_is_idempotent`, `::test_a_completed_request_is_never_called_phantom`; pairing re-asserted per session by `tests/cron_smoke/check_telemetry.py` |
@@ -1679,13 +1963,17 @@ the same daemon over the same socket.
 | I27 | Transaction evidence survives into telemetry from both the returned and the raised path, and from every nesting level a multi-transaction payload uses | `tests/unit/test_receipts.py` (`test_raised_revert_and_unconfirmed_yield_their_transaction_hash`, `::test_a_batch_error_yields_no_single_hash`, `::test_a_pre_signing_rejection_has_no_hash_to_report`, `::test_a_hash_quoted_outside_the_contract_clause_is_not_read_as_the_transaction`), `tests/unit/test_harness_client.py::test_per_hop_receipts_are_copied_from_a_top_level_array`, `::test_per_row_receipts_are_copied_from_inside_a_batch_result_list`, `tests/unit/test_loop.py::test_a_reverted_transaction_records_its_hash_on_the_field`, `::test_in_band_receipts_and_error_shaped_results_reach_telemetry` |
 | I28 | **The session-start injections run in one fixed order — roster, balances, plan, journal — all before the first model call, each attempted exactly once, each injected verbatim, and none of them bounds anything the agent does** | `tests/unit/test_injections.py::test_the_four_injections_run_in_order_before_the_first_model_call`, `::test_call_seq_covers_the_injections_in_order`, `::test_balances_reach_the_model_verbatim`, `::test_the_balance_call_is_attempted_exactly_once`, `::test_balances_bound_nothing_the_agent_does`, `::test_a_failed_balance_call_does_not_advance_the_error_counter`, `::test_the_plan_injection_bounds_nothing_the_agent_does`; end to end under a cron environment, per profile, in `tests/cron_smoke/check_telemetry.py` |
 | I29 | **Every injection degrades visibly rather than vanishing**: a harness that raises is quoted verbatim, a surface without the balance tool yields the ordinary unknown-tool result, a missing plan file yields the ordinary not-found result — and an injection is skipped silently only when its whole source is unconfigured | `tests/unit/test_injections.py::test_a_surface_without_the_balance_tool_degrades_visibly`, `::test_a_failing_balance_call_is_injected_as_the_harness_own_words`, `::test_a_missing_plan_file_is_the_normal_not_found_error`, `::test_no_harness_means_no_balance_injection_and_no_telemetry`, `tests/unit/test_brief.py::test_no_brief_when_no_harness_is_configured`, `tests/unit/test_journal.py::test_the_first_session_gets_the_ordinary_not_found_result` |
-| I30 | **The profile selects the surface and the prompt, and both are byte-exact artifacts**: an unknown rung never starts a run, a rung whose asset is missing never starts a session, a profile below `search` cannot execute the search tool, and a profile that adds no tool hashes exactly as 0.4.0 did | `tests/unit/test_profiles.py::test_an_unknown_rung_fails_before_anything_starts`, `::test_the_surface_per_profile`, `::test_profile_added_defs_come_after_the_base_ones`, `::test_control_and_orientation_hash_exactly_as_the_base_surface_does`, `::test_a_profile_that_adds_a_tool_has_its_own_hash_by_design`, `::test_the_system_prompt_gains_one_appendix_per_rung`, `::test_a_missing_appendix_fails_loudly_and_names_the_rung`, `tests/unit/test_search.py::test_a_profile_below_search_cannot_execute_it_by_name`, `tests/unit/test_runner.py::test_the_profile_lands_on_every_session_start`, `::test_a_mis_provisioned_profile_starts_no_session` |
+| I30 | **The profile selects the surface and the prompt, and both are byte-exact artifacts**: an unknown rung never starts a run, a rung whose asset is missing never starts a session, a profile below `search` cannot execute the search tool, and a profile that adds no tool hashes exactly as 0.4.0 did | `tests/unit/test_profiles.py::test_an_unknown_rung_fails_before_anything_starts`, `::test_the_surface_per_profile`, `::test_profile_added_defs_come_after_the_base_ones`, `::test_control_and_orientation_hash_exactly_as_the_base_surface_does`, `::test_a_profile_that_adds_a_tool_has_its_own_hash_by_design`, `::test_the_system_prompt_gains_one_appendix_per_rung`, `::test_a_missing_appendix_fails_loudly_and_names_the_rung`, `tests/unit/test_search.py::test_a_profile_below_search_cannot_execute_it_by_name`, `tests/unit/test_runner.py::test_the_profile_lands_on_every_session_start`, `::test_a_mis_provisioned_profile_starts_no_session`; the shell rungs (0.8.0): `tests/unit/test_shell_rungs.py` (ladder, surface, `::test_the_two_shell_rungs_hash_alike_and_differ_from_planning_by_one_definition`, appendix order, `::test_a_missing_shell_appendix_starts_no_session`, `::test_a_shell_rung_without_an_environment_fails_before_anything_starts`), `tests/unit/test_environment_lifecycle.py` (`init` refuses a rung the environment does not match) |
 | I31 | **Reference search is deterministic and its hits are re-readable**: the same tree and query give byte-identical output, ties break on path then offset, spans never overlap or leave their file, and `workspace_read` with a hit's own offset and length returns that passage | `tests/unit/test_search.py::test_same_tree_and_query_give_byte_identical_results`, `::test_ordering_breaks_ties_on_path_then_offset`, `::test_chunk_spans_do_not_overlap_and_stay_inside_their_file`, `::test_hits_are_ordered_and_carry_a_re_readable_span`, `::test_k_is_clamped_to_the_allowed_range`, `::test_an_empty_tree_says_so` |
 | I32 | **A failed model call records what the provider said, in two places.** The provider's status, type and message land on the `llm_call` row — with explicit nulls where the provider served none — and a longer copy lands in `run/errors.jsonl` at the moment of the failure, which never raises into the session and is unreachable by any agent path | `tests/unit/test_error_diagnosability.py` — per-provider extraction (`::test_anthropic_carries_the_type_and_the_message_without_the_body_echo`, `::test_openai_carries_the_quota_type_the_incident_needed`, `::test_google_uses_its_canonical_status_as_the_type`, `::test_a_transport_failure_has_no_provider_type_and_says_so`), the row (`::test_a_failed_call_records_what_the_provider_said`, `::test_the_three_fields_are_present_as_nulls_when_the_provider_served_nothing`, `::test_a_successful_call_carries_none_of_them`, `::test_an_unnormalized_fault_keeps_its_class_out_of_the_type_field`), the artifact (`::test_the_artifact_is_written_at_the_moment_of_the_error`, `::test_every_retry_leaves_its_own_row`, `::test_the_artifact_never_raises_into_the_session`, `::test_the_artifact_is_not_reachable_by_any_agent_path`) |
 | I33 | **`wait` blocks within its bound, is clamped rather than rejected, is recorded as a requested/actual pair, is exempt from the repetition breaker and from nothing else, and still consumes `session_tool_cap`** | `tests/unit/test_wait.py` — surface and wording (`::test_it_is_on_the_base_surface_of_every_profile`, `::test_the_description_is_mechanism_only`), clamping (`::test_a_request_over_the_bound_is_clamped_and_the_clamp_is_visible`, `::test_a_negative_request_clamps_to_zero`, `::test_non_finite_and_non_numeric_requests_are_errors`), telemetry (`::test_both_durations_are_recorded_so_waiting_is_analyzable`, `::test_a_wait_that_never_reached_the_handler_records_no_durations`), and the two consequences (`::test_repeated_waits_never_trip_the_repetition_breaker`, `::test_a_repeated_non_wait_call_still_trips_it`, `::test_waits_still_consume_the_session_tool_cap`, `::test_the_watchdog_gives_wait_its_own_bound`, `::test_a_wait_longer_than_the_tool_timeout_still_completes`) |
 | I34 | **Every session is journaled whatever the model writes, the entry names no ending reason and no accounting, the file is bounded so a whole read never truncates, and the last entry reaches the next session as an ordinary re-readable slice** | `tests/unit/test_journal.py` — the entry (`::test_the_entry_carries_the_facts_a_successor_needs`, `::test_no_previous_entry_means_no_elapsed_figure_rather_than_zero`, `::test_the_entry_never_names_the_apparatus`, `::test_a_flood_of_transactions_cannot_crowd_out_every_other_session`), retention (`::test_retention_drops_oldest_entries_and_keeps_the_file_readable_whole`, `::test_the_newest_entry_is_kept_even_when_it_alone_exceeds_the_bound`, `::test_has_session_makes_a_second_write_detectable`), the tree (`::test_the_journal_is_readable_and_not_writable`, `::test_the_file_index_names_the_journal_with_its_size`, `::test_the_journal_does_not_count_against_the_workspace_quota`), the injection (`::test_the_last_entry_is_injected_as_a_readable_byte_slice`, `::test_the_first_session_gets_the_ordinary_not_found_result`, `::test_the_journal_injection_bounds_nothing_the_agent_does`) |
 | I35 | **Which lens daemon served a session is recorded on every `session_start`, never asserted against the manifest, and never reaches the agent** | `tests/unit/test_lens_provenance.py::test_the_serving_daemons_identity_lands_on_session_start`, `::test_the_enrichment_flag_makes_a_mis_provisioned_rung_detectable`, `::test_a_daemon_that_cannot_answer_costs_nothing`, `::test_a_daemon_serving_a_shape_we_did_not_expect_records_what_it_can`, `::test_no_daemon_means_no_provenance_and_no_query`, `::test_provenance_is_never_an_agent_visible_channel` |
-| I36 | **The harness's standing text reaches the model verbatim on every session, on every profile and through every provider adapter; it is fingerprinted, never copied, on `session_start`; a harness that sends none changes nothing; and a 4.x harness whose text did not arrive starts no session — visibly, as one `session_refused` event per attempt, consuming no session number** | `tests/unit/test_standing_text.py` — the field (`::test_line_one_alone_still_parses_and_carries_no_text`, `::test_a_hash_only_handshake_still_parses`, `::test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim`, `::test_the_remainder_is_not_reflowed_or_stripped`, `::test_tokens_are_read_from_line_one_only`, `::test_the_client_exposes_the_handshake_of_a_real_child`), the prompt (`::test_the_standing_text_is_in_the_system_prompt_of_every_profile`, `::test_no_text_means_the_prompt_is_exactly_what_it_was`, `::test_the_text_is_on_every_call_of_the_session`, `::test_the_text_never_enters_the_tool_surface_or_its_hash`), the wire (`::test_every_provider_adapter_sends_it_in_its_system_slot`, three real adapters × five profiles), the record (`::test_session_start_records_the_texts_fingerprint_and_size`, `::test_no_text_records_no_fingerprint_but_still_the_version`, `::test_the_text_is_never_in_telemetry_itself`), the refusal (`::test_a_4x_harness_whose_text_did_not_arrive_starts_no_session`, `::test_a_wrapper_that_drops_the_text_is_refused`, `::test_only_that_combination_is_refused`, `::test_bring_up_refuses_the_same_pairing_with_the_same_plain_message`, `::test_run_session_exits_with_the_plain_message_not_a_traceback`), the refusal's record (`::test_the_refusal_is_readable_from_telemetry_alone`, `::test_a_refused_attempt_consumes_no_session_number`, `::test_a_malformed_published_hash_cannot_mask_the_refusal`, `tests/unit/test_telemetry.py::test_a_malformed_refusal_is_rejected`); end to end under a cron environment against a stand-in serving a 4.x handshake (`tests/cron_smoke/check_telemetry.py`); natively per provider in the tri-provider tier once the recorded surface carries the text |
+| I36 | **The harness's standing text reaches the model verbatim on every session, on every profile and through every provider adapter; it is fingerprinted, never copied, on `session_start`; a harness that sends none changes nothing; and a 4.x harness whose text did not arrive starts no session — visibly, as one `session_refused` event per attempt, consuming no session number** | `tests/unit/test_standing_text.py` — the field (`::test_line_one_alone_still_parses_and_carries_no_text`, `::test_a_hash_only_handshake_still_parses`, `::test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim`, `::test_the_remainder_is_not_reflowed_or_stripped`, `::test_tokens_are_read_from_line_one_only`, `::test_the_client_exposes_the_handshake_of_a_real_child`), the prompt (`::test_the_standing_text_is_in_the_system_prompt_of_every_profile`, `::test_no_text_means_the_prompt_is_exactly_what_it_was`, `::test_the_text_is_on_every_call_of_the_session`, `::test_the_text_never_enters_the_tool_surface_or_its_hash`), the wire (`::test_every_provider_adapter_sends_it_in_its_system_slot`, three real adapters × every profile), the record (`::test_session_start_records_the_texts_fingerprint_and_size`, `::test_no_text_records_no_fingerprint_but_still_the_version`, `::test_the_text_is_never_in_telemetry_itself`), the refusal (`::test_a_4x_harness_whose_text_did_not_arrive_starts_no_session`, `::test_a_wrapper_that_drops_the_text_is_refused`, `::test_only_that_combination_is_refused`, `::test_bring_up_refuses_the_same_pairing_with_the_same_plain_message`, `::test_run_session_exits_with_the_plain_message_not_a_traceback`), the refusal's record (`::test_the_refusal_is_readable_from_telemetry_alone`, `::test_a_refused_attempt_consumes_no_session_number`, `::test_a_malformed_published_hash_cannot_mask_the_refusal`, `tests/unit/test_telemetry.py::test_a_malformed_refusal_is_rejected`); end to end under a cron environment against a stand-in serving a 4.x handshake (`tests/cron_smoke/check_telemetry.py`); natively per provider in the tri-provider tier once the recorded surface carries the text |
+| I38 | **The `shell` tool runs one command in the environment and nowhere else** (0.8.0): a `docker exec` as uid 1000 in `/workspace` with `HOME=/workspace` under `timeout -k 5 <t>`, `t` clamped to `[1, caps.shell_timeout_s]`; the result is the frozen shape with each stream capped separately; the whole output is in the run-dir log; a non-zero exit is a result and a docker failure an error; it is exempt from `tool_timeout_s`, counts against `session_tool_cap`, and the breaker keys it on its command text | `tests/unit/test_shell_tool.py` — the request (`::test_one_call_is_a_docker_exec_as_the_environment_user_in_the_workspace`, `::test_the_timeout_is_clamped_into_the_allowed_range`, `::test_a_non_finite_timeout_is_an_error`), the result and the log (`::test_the_result_text_is_the_frozen_shape`, `::test_each_stream_is_capped_separately_with_the_standard_marker`, `::test_the_whole_output_lands_in_the_run_dir_log`, `::test_the_log_is_bounded_and_says_where_it_cut`, `::test_timed_out_needs_the_wrapper_code_at_or_past_the_timeout`), the loop (`::test_a_non_zero_exit_is_a_result_not_an_error`, `::test_a_docker_failure_is_a_tool_error_with_the_daemons_words`, `::test_the_shell_tool_is_exempt_from_the_tool_watchdog`, `::test_shell_calls_count_against_the_session_tool_cap`, `::test_the_repetition_signature_is_the_command_text`, `::test_shell_rows_carry_their_record_and_validate`) |
+| I39 | **The environment matches its rung, is recorded at every boundary, and does not outlive the run** (0.8.0): `init` refuses a container that is absent or stopped, a keeper command on `shell` or none on `shell_keeper`, a keeper that does not answer from inside with the `lab` profile, a keeper image that does not name `pins.keeper_sha`, a lens that does not answer from inside; every session writes one `shell_state` at its start and one at its end; `run_complete` stops the keeper's books, then revokes, then reads the ledger, then stops the environment — whatever the keeper answers — and sessions never revoke | `tests/unit/test_environment_lifecycle.py` — `init` (`::test_init_passes_a_shell_environment_that_matches_its_rung` … `::test_init_checks_nothing_below_the_shell_rungs`, `::test_the_keeper_image_names_its_pin`), the boundaries (`::test_every_session_records_the_environment_at_both_ends`, `::test_a_stopped_environment_is_started_and_recorded_as_restarted`, `::test_a_restart_count_that_moved_between_sessions_is_recorded`, the two probe tests), persistence (`::test_a_background_process_persists_and_is_gone_after_run_complete`), the end of the run (`::test_run_complete_stops_the_books_then_revokes_then_stops_the_environment`, `::test_a_silent_keeper_is_recorded_and_the_run_still_completes`, `::test_a_refused_revoke_is_ok_false_with_the_keepers_words`, `::test_sessions_never_revoke`, `::test_the_final_ledger_read_lands_before_run_complete`, `::test_below_the_shell_rungs_the_end_of_the_run_is_what_it_was`); against a real container `tests/smoke/test_environment_docker.py` (P15–P17) |
+| I40 | **Every transaction the keeper signed is recorded once, as the keeper recorded it, and shown to nobody** (0.8.0): one `keeper_tx` per final receipt row, never on an `unconfirmed` receipt, deduplicated by hash across the stream; a late receipt with no lens basis is still found; a lost cursor costs a whole re-read and never a duplicate; a keeper that does not answer contributes nothing | `tests/unit/test_keeper_ledger.py` (`::test_three_receipts_and_one_unconfirmed_make_exactly_three_events`, `::test_a_re_read_from_the_same_cursor_emits_nothing_and_a_new_row_emits_one`, `::test_an_unconfirmed_receipt_is_not_final_and_its_late_receipt_is_found`, `::test_a_broadcast_seen_in_a_window_is_closed_in_the_same_read`, `::test_every_book_of_the_account_is_read_and_events_name_their_book`, `::test_a_keeper_that_does_not_answer_contributes_nothing`, `::test_the_event_carries_the_ledgers_own_values`, `::test_keeper_tx_events_follow_session_start_validate_and_dedup_across_sessions`, `::test_a_lost_cache_costs_a_whole_read_and_never_a_duplicate`, `::test_nothing_of_the_keeper_reaches_the_model`) |
+| I41 | **The session-start file index is bounded and never follows a symlink** (0.8.0): hidden entries and `__pycache__` / `node_modules` / `.venv` / `venv` left out, 200 entries then one "more" line; the `workspace_list` tool still lists everything; neither listing nor the byte count follows a symlink | `tests/unit/test_file_index.py` (`::test_a_big_home_is_capped_at_two_hundred_entries_and_a_more_line`, `::test_at_the_cap_there_is_no_more_line`, `::test_the_journal_and_reference_lines_follow_as_before`, `::test_the_workspace_list_tool_still_lists_everything`, `::test_a_session_prompt_carries_the_bounded_index`, `::test_a_symlink_is_never_followed_by_a_listing_or_a_byte_count`) |
 | I37 | **Result shapes new at harness 4.0.0 / lens 1.0.0 neither crash nor mis-record**: incomplete rows, `INCOMPLETE` / `NOT_APPLIED`, time-boxed loop results, a `notice` first key, and the not-executed / lane-blocked / cancelled outcomes reach the model verbatim and are recorded as no terminal state rather than a wrong one. From 0.7.1 also the harness 4.1.0 / 4.2.0 and lens 1.0.1 / 1.0.2 shapes: `fee_wei` (a string, or null — always null on a reverted row, kept as null in `tool_call.txs`) and `payouts` rows carrying `decode_error` on a write result, and a `portal_claim` with no `amount` and a `decode_error`, are a landed transaction — confirmed, its own hash, never error-shaped and never a breaker error; an `unregistered: true` inventory row passes untouched; `status.sync.reconcileRepairs` / `lastRepair` add nothing to `session_start`; and `meta.asOf.clockSampleAgoMs` past 300 s is never read as staleness (`lens_stale` is `meta.stale`). And the harness 4.3.0 shapes: a portal `dry_run` quote (no `status`, hash or fee) is no transaction — no terminal state, no hash, nothing journaled — and its refusal, the real call's pre-signing text, is `validation_rejected` even where that text says a deposit "lands and reverts"; `cooldowns` rows (null with a `decode_error` where unstated) leave a landed result confirmed and never error-shaped; `get_gas_balance`'s `*_wei` and `block` pass through the session-start injection verbatim and its `block` is no lens freshness field; and a `travel_to_room` `fee_wei` total of null keeps its legs, null leg fee included, in `tool_call.txs`. From 0.7.2 also the harness 4.4.0 early-run brief: `NOT_FOUND: no account is registered for owner wallet 0x… (account 'main')` as the roster brief's result — like 4.0.0–4.3.0's daemon `BAD_ARGS` before it — is sent once with no argument and never retried, reaches the model verbatim as an error result, is recorded as a `tool_call` with `initiator: "scaffold"` and `ok: false` and no terminal state or hash (a read sends nothing, so it is no rejection either), leaves the journal no roster, and the session proceeds | `tests/unit/test_shape_tolerance.py` (classification, hash lifting, receipts and the journal roster on each shape, through a session) |
 
 ---
@@ -1862,7 +2150,7 @@ a bug; changing one is a spec change, not a fix.
   mass stay identical across every arm — so the *environment* is provably
   constant while the scaffold varies.
 - **X25 — `pushed` is a recorded value with no agent-side behaviour.** Of
-  the five profiles, one changes nothing in this repo: its rung is result
+  the seven profiles, one changes nothing in this repo: its rung is result
   enrichment inside the lens and the harness, behind their own runtime
   flags. The scaffold records the name so the arm's provenance is
   self-describing, and does not read, verify, or assert the flags — a
@@ -1926,6 +2214,41 @@ a bug; changing one is a spec change, not a fix.
   It is the arrangement tool descriptions have always had (D1), applied
   to text the harness now says once instead of on every description.
 
+- **X32 — two capability rungs on what was a knowledge ladder.** `shell`
+  and `shell_keeper` add a channel, not documentation, and they sit above
+  `planning` on the same cumulative ladder rather than on a second axis:
+  each code arm is `planning` plus a channel, so the paired control is
+  inside every study, and nothing in this release needs "control + shell".
+  A later release can split the axis if a design asks for it. A
+  consequence that looks like drift and is not: `shell` and
+  `shell_keeper` record the SAME `tools_hash` (the keeper adds no tool; it
+  is reached through the shell) and differ by their appendix and their
+  environment image — `scaffold_profile` and `environment_image` tell them
+  apart.
+- **X33 — what the agent leaves running keeps running, until the run
+  ends.** A `shell` call's timeout bounds the foreground command only;
+  `nohup`, `&` and `setsid` survive the call and the session, and a
+  process left running can read the lens and drive the keeper between
+  sessions. That is the behaviour the rung measures ("set and forget"),
+  recorded in every `shell_state`, not a hole: such a process cannot sign,
+  reach the provider or the harness, and does not outlive the run, because
+  `run_complete` stops the environment. Likewise **sessions never revoke**
+  the keeper's grant — only the end of the run does.
+- **X34 — the workspace quota does not bound the shell, and the shell's
+  log is bounded.** `workspace_quota_bytes` is enforced on
+  `workspace_write`; the shell writes to the same tree through the
+  filesystem and is bounded by the host's disk (an operator obligation),
+  recorded as `shell_state.workspace_bytes`. The run-dir log of one call
+  keeps at most 32 MiB of each stream (the totals are always recorded), so
+  one command that writes forever cannot fill the run's disk through the
+  scaffold.
+- **X35 — a `keeper_tx` belongs to the session that READ it.** The keeper
+  acts between sessions and during them; the scaffold reads its ledger at
+  session start and at `run_complete`, so an event's `session` is the
+  reading session, and `ledger_ts` is when the keeper wrote it. A read at
+  every session end as well would move half the events one session
+  earlier and change nothing an analysis of gas needs.
+
 ---
 
 ## Non-goals
@@ -1953,8 +2276,11 @@ a bug; changing one is a spec change, not a fix.
   managed. From 0.4.0 the Anthropic half of this is **verified rather
   than asserted**: cache writes are recorded split by entry lifetime, so
   a 1-hour entry would show up as one (D2).
-- **N6** Web access, shell access, or any non-harness network channel
-  from the agent loop.
+- **N6** Web access, or any non-harness network channel from the agent
+  loop. Shell access exists from 0.8.0 on the two shell rungs only, inside
+  an environment with no network (D8); a network from that shell — an
+  egress allowlist with a package index or the chain RPC — and a loop that
+  runs inside the environment are a later release's questions.
 - **N7** Any UI.
 - **N8** Mid-session budget enforcement (X6), and any agent-visible
   budget channel while `budget_visible` is pinned false.
@@ -1980,6 +2306,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 2.10 | v0.8.0 | **Two capability rungs — `shell` and `shell_keeper` — a persistent environment container for the agent, the keeper behind it, telemetry schema 0.8.0, and the pins moved to kami-harness 5.0.0 and kami-lens 1.1.0.** *Cause: the shell rung is the first step of "play as code" — a persistent coding environment the agent is free in, with the stack's documentation, in which a script is as legitimate as a tool call — and the keeper is its scriptable write path.* **The rungs** (D3, P10, P13): `PROFILES` gains `shell` and `shell_keeper` above `planning`, cumulative as every rung is, and they are CAPABILITY rungs — they add a channel, not documentation — measured against `planning` (X32). `shell` adds one scaffold tool, `shell(command, timeout_s?)`, and the appendix `prompts/shell.txt`; `shell_keeper` adds no tool (the keeper is reached through the shell) and the appendix `prompts/shell_keeper.txt`. Both appendices and the tool description are frozen byte-exact and pass the keeper's own policy-word scrub plus `should`/`best`/`recommend`/`good` with zero hits (I3); `init` materializes all seven assets, and a missing one starts no session. **The `shell` tool** (P10, I38): one `docker exec` into the run's environment container through the Docker Engine API (stdlib HTTP over the mounted socket — no new dependency, no docker CLI in the image) as uid 1000 in `/workspace` with `HOME=/workspace`, under `timeout -k 5 <t> bash -c`, `t` clamped to `[1, caps.shell_timeout_s]` (default 120); stdout and stderr capped separately at half of `tool_result_max_bytes` less a 1 KiB reserve, the result in a fixed shape (`exit_code`, `timed_out`, `duration_s`, both streams with their byte counts); the whole output in `run_dir/shell/<session:03d>-<call_seq:04d>.log` (each stream up to 32 MiB, X34); exempt from `tool_timeout_s`'s watchdog as `wait` is; counts against `session_tool_cap`; a non-zero exit is a result, a docker failure is `ok: false` with the daemon's words; the repetition signature is the command text (P5.1). **The environment** (new D8, I39, `deploy/environment/`): one container per run, persistent across sessions, no network, no key, `--init`, read-only root, the workspace / reference / journal mounted and the daemons reached only through a socket relay; `Dockerfile.env` builds it per rung (no keeper client at all on `shell`), `compose.yaml` and `compose.keeper.yaml` define the lens, the relay (pinned by digest), the environment, the agent and on `shell_keeper` the keeper. `init` asserts at ≥ `shell` that the container runs, that `command -v keeper` fails on `shell` and succeeds on `shell_keeper`, that the keeper answers from inside with the `lab` profile and its image names `pins.keeper_sha`, and that the lens answers from inside — a mismatch starts no run — and gives the workspace to uid 1000. Every session start and end writes one `shell_state` (the container started again if it stopped; its process table; the socket probes from inside); `run_complete` stops the keeper's books and revokes the run's grant (two `tool_call` rows, `source: keeper`, `initiator: scaffold`; a silent keeper is `ok: false` and the run still completes), reads the ledger a last time, and stops the environment — no process the agent left running survives the run (X33). Sessions never revoke. **The keeper read** (`kami_agent/keeper.py`, D8, I40): at every session start and at `run_complete` the scaffold reads the run account's books and their ledgers over the keeper's socket and writes one `keeper_tx` per final receipt not yet recorded; `session_start` carries `keeper_version`. Never shown to the agent (I1). **The file index is bounded** (P1 step 11, I41): hidden entries and `__pycache__` / `node_modules` / `.venv` / `venv` left out, 200 entries then `… and N more entries`, on every profile; the `workspace_list` tool still lists everything; listings and byte counts never follow a symlink (P11). **Telemetry schema 0.7.0 → 0.8.0** (P9): two new events (`keeper_tx`, `shell_state`), the two rung values, `source` and `initiator` gain `keeper`, `tool_call` gains `exit_code` / `timed_out` / `stdout_bytes` / `stderr_bytes` / `shell_log` and `keeper_books_stopped` / `keeper_grants_after`, `session_start` gains `keeper_version` / `environment_image`, `run_start` gains `keeper_sha`, `run_complete` gains `environment_stopped` / `keeper_grants_after`; additive, and `unevaluatedProperties: false` is what forces the bump. `state.json` gains the keeper cursor (`keeper_cursor`, `keeper_open`), a cache like the rest of it. **The pins** (D1, D7): **kami-agent 0.8.0 pairs with kami-harness 5.0.0 or newer** — the enforced half of the pairing is 0.7.0's, unchanged (a MAJOR ≥ 4 harness must deliver its standing text) — and the dev pins are kami-harness 5.0.0 `659c205`, kami-lens 1.1.0 `7131a52`, kami-keeper `bbe3929`, kamigotchi-gdd `746be11` (image default, example manifest, live tier, recorded fixture). The recorded surface fixture is re-recorded at `659c205` under Python 3.13: 100 tools (the nine strategy-service tools gone; 18 descriptions reworded — the operator now signs trades, transfers, auction buys and gacha; the soulbind and `transfer_items` target refusals), published `tools_hash` `3291008d…a02a`, this scaffold's harness-only hash `sha256:ddbf03d8…a503`, standing text byte-identical to 4.0.0's (957 characters, sha256 `7c0e7ca6…ae4b`), `schema_version` 5.0.0. kami-lens 1.1.0 adds node and soulbind facts and serves the chain's own integer arithmetic; nothing the scaffold reads from it changes shape. **The small items.** (1) The terminal-state classifier keys on the harness's stable clauses — the earliest `transaction <hash> …` clause is the outcome and its hash, `no transaction sent` counts only in a refusal's first clause — so 5.0.0's deposit outcome after a landed approve is the deposit's own state, a refusal that quotes another transaction's clause stays a refusal, and every 5.0.0 text classifies as 0.7.5 classified it (I22, held to 5.0.0's own texts as a fixture). (2) `tests/smoke/conftest.py` names a manifest and a model that exist. (3) `session_start.lens_default_operator`'s schema description says what the field records and why it is still recorded: the roster brief has not depended on it since kami-harness 4.4.0. (4) Two key shapes documented end to end (D6, `docs/packaging.md`): owner + operator, or operator only; the keeper only ever receives the operator key. (5) The OpenAI-compatible path's cached tokens: the adapter already read `prompt_tokens_details.cached_tokens` and the accounting already applied the cache-read rate — no code change was needed, and both are now pinned against a recorded router response. (6) `provider: openai` gains `openai.base_url` (else `OPENAI_BASE_URL`) and `openai.extra_headers` (D2, D3), tested offline end to end, and the live tier gains an `openrouter` leg that runs only when `OPENROUTER_API_KEY` is set. Packaging (`docs/packaging.md`) is rewritten around the environment: the keys file `KAMI_KEYS_FILE=/srv/keys/.env`, the two key shapes, `shell/` among the run-dir internals, the environment's `network_mode: none`, and the `api.kamibots.xyz` egress row removed (5.0.0 contacts it no more). **Known, not changed (carried from 0.7.x):** usage an adapter discards on a response it cannot normalize is still recorded at cost 0 (P7.4); the window between deciding to send a model request and its write-ahead line reaching disk is still unobservable (P3); a deposit refused after its approve landed still records no terminal state and the approve's hash only in the message, now also when 5.0.0 reports the deposit's own outcome after it (the deposit's hash is lifted, the approve's is not); the dry-run "not performed" verdict is still `validation_rejected` with nothing marking it an infrastructure failure (a field for it would be a schema change); the repetition breaker still clips some productive loops (X1, X2); Google still serves no per-call request id (D2); the pairing check still refuses only a 4.x+ harness whose standing text is missing, never a harness for being older than the pinned one (N10). **Consequences for readers:** `session_start.tools_hash` moves on every profile (the harness surface moved: 100 tools; per rung over the recorded surface — `control` = `orientation` `sha256:6c37a391…51dc`, `search` = `pushed` = `planning` `sha256:37e63fd5…cb4d`, `shell` = `shell_keeper` `sha256:00fc636c…61a4`) and so does every floor; `session_start.harness_standing_text_sha256` does not; the file index — and with it call-1 context — can differ on any profile for an agent that writes hidden files or more than 200 of them; `initiator=scaffold` also marks the two keeper rows at `run_complete` (`source: keeper`); agent behaviour excludes `keeper_tx` from tool counts and includes it in gas sums. MINOR by this repo's practice: new rungs, a new scaffold tool, new telemetry events, nothing removed. New D8, invariants I38–I41, deviations X32–X35; N6 restated. |
 | 2.9 | v0.7.5 | **Pinned to kami-harness 4.7.0 and kami-lens 1.0.5 — the same 109 tools and the same standing text as 4.6.0, and three kinds of result now say what happened. No scaffold behaviour, prompt asset or telemetry schema moves.** *Cause: kami-harness 4.7.0 is published (by way of 4.6.1, which this scaffold never pinned) and pins kami-lens 1.0.5.* What 4.7.0 changes in what the model is told: a transport failure — an HTTP error, a timeout, a dropped connection — never stands in for a revert reason (a reverted `act_sequence` row always carries `reason`, "revert reason unavailable (replay inconclusive)" when nothing was recovered; a dry-run that meets one is refused as not performed, never as reverted; `quest_state`'s `revert_reason` is null on one); a roster label matches in any case on every tool that takes one, writes as well as reads; and a deposit refused after its approve landed says so first, naming the approve's hash, never "no transaction sent". No tool is added, removed, renamed or reworded: 109 tools (ACT 59 / PERCEIVE 34 / OUTSOURCE 9 / META 7), registry mass 76,197, published `tools_hash` `5a31220d…21a4` and the standing text (957 characters, sha256 `7c0e7ca6…ae4b`) are all 4.6.0's; `schema_version` 4.6.0 → 4.7.0. What kami-lens 1.0.5 changes: it serves `cooldownSec` rounded up, so it reads 0 only once the chain accepts the next action, and logs each write it skips as older; there is no query, field or envelope change (1.0.4 changed documentation only), so nothing this scaffold reads from the daemon moves, the lens pin is a text move, and 1.0.1 or newer stays required for correct reads (D7). *What this scaffold changes.* Nothing it does. The pins move — the image default, the example manifest's harness and lens pins, the live tier and the dev pin (D1, D7, README, `docs/packaging.md`) — and the recorded surface fixture is re-recorded at `df7129f` under Python 3.13: only its `harness` header moves (version and `schema_version` 4.6.0 → 4.7.0, sha `cf8c1bf` → `df7129f`); its 109 entries, its standing text, the published hash and this scaffold's harness-only hash (`sha256:c2b506db…4cd5`) are 4.6.0's byte for byte. The roster-brief fixture's provenance note is re-checked at 1.0.5: `roster` and the envelope's `meta` keys are unchanged. **Pairing rule unchanged: kami-agent ≥ 0.7.0 ↔ kami-harness ≥ 4.0.0** — the check keys on the MAJOR — with the dev pin now 4.7.0. **Consequences for readers:** `session_start.tools_hash`, `session_start.harness_tools_hash`, `session_start.harness_standing_text_sha256` and every context floor are the same on 4.6.0 and 4.7.0 runs, so a floor measured on one holds on the other; `session_start.harness_schema_version` reads 4.7.0, and `lens_version` 1.0.5 on a daemon at the pin. One operator-side record moves with the harness's text: the terminal-state classifier (P9) recognises a pre-send refusal by the harness's "validation failed; no transaction sent:" prefix, and 4.7.0 drops that prefix from a deposit refused after its approve landed, so that call's `tool_call.tx_terminal_state` is absent on 4.7.0 where earlier harnesses got `validation_rejected` — which was false, because the approve had landed and spent gas; the approve's hash is in the message, not in `tx_hash`. Telemetry schema unchanged (0.7.0). PATCH by this repo's practice: a pin bump that moves no scaffold behaviour, prompt asset or telemetry schema (as 0.2.1, 0.3.1 and 0.7.1–0.7.4 were). Pins: kami-harness 4.7.0 `df7129f`, kami-lens 1.0.5 `e604290`. |
 | 2.8 | v0.7.4 | **Pinned to kami-harness 4.6.0 — the strategy-service family is back on the surface: nine tools added and one description reworded, 109 tools. No scaffold behaviour, prompt asset or telemetry schema moves.** *Cause: kami-harness 4.6.0 restores the nine strategy-service (OUTSOURCE) tools that left the surface at 4.0.0.* The nine are `register_kamibots`, `kamibots_enable_strategies`, `start_strategy`, `stop_strategy`, `get_tier`, `get_all_strategies`, `get_all_strategy_statuses`, `get_strategy_status` and `get_strategy_logs`; the one reworded description is `list_accounts`', which says again that it shows whether the strategy service is registered (+46 characters, schema unchanged), and its result gains the field `kamibots_registered`. Nothing is removed or renamed: 109 tools (ACT 59 / PERCEIVE 34 / OUTSOURCE 9 / META 7), registry mass 71,133 → 76,197, published `tools_hash` `fb65e0db…fac0` → `5a31220d…21a4`, `schema_version` 4.5.0 → 4.6.0. **Its standing text is byte-identical to 4.0.0's** (957 characters, sha256 `7c0e7ca6…ae4b`), so the pairing check, `session_start.harness_standing_text_sha256` and the standing-text term of every floor are unchanged (D1). The OUTSOURCE tools contact the strategy service's host, `api.kamibots.xyz`, only when one of them is called; a call that cannot reach it fails with the harness's `OUTSOURCE_UNAVAILABLE` error, and no other tool is affected. *What this scaffold changes.* Nothing it does: it filters no harness tool by class, so the nine reach the model as every other harness tool does, every result still reaches the model verbatim, and it never reads the strategy-service credentials the harness writes when the agent registers. The pins move — the image default, the example manifest, the live tier and the dev pin (D1, README) — and the recorded surface fixture is re-recorded at `cf8c1bf` under Python 3.13: its `harness` header (version, `schema_version`, sha), the nine new entries, `list_accounts`' description and the published hash move, and so does this scaffold's harness-only hash (`sha256:21ad5efc…0354` → `sha256:c2b506db…4cd5`) because the tool set changes; its other 99 entries and its standing text are 4.5.0's. Packaging (P12, `docs/packaging.md`): the egress allowlist regains the `api.kamibots.xyz` row — a deployment that denies the host loses only the OUTSOURCE class, legibly — and the run `.env` note says the harness writes `{LABEL}_KAMIBOTS_API_KEY` and `{LABEL}_PRIVY_ID` through its own secret store when the agent registers. **Pairing rule unchanged: kami-agent ≥ 0.7.0 ↔ kami-harness ≥ 4.0.0** — the check keys on the MAJOR — with the dev pin now 4.6.0; kami-lens unchanged (≥ 1.0.1 required for correct reads, 1.0.3 recommended and pinned, D7). **Consequences for readers:** `session_start.tools_hash`, `session_start.harness_tools_hash` and every context floor differ between 4.5.0 and 4.6.0 runs on every profile — nine more descriptions and one longer one in the registry, 5,064 more characters of tool surface on every call — while `session_start.harness_standing_text_sha256` does not; a floor measured on a 4.5.0 harness is not a floor on 4.6.0. Telemetry schema unchanged (0.7.0). PATCH by this repo's practice: a pin bump that moves no scaffold behaviour, prompt asset or telemetry schema (as 0.2.1, 0.3.1, 0.7.1, 0.7.2 and 0.7.3 were). Pins: kami-harness 4.6.0 `cf8c1bf`, kami-lens 1.0.3 `7f9be7b`. |
 | 2.7 | v0.7.3 | **Pinned to kami-harness 4.5.0 — a failed receipt wait is unconfirmed, never `error`, never a second send. No scaffold behaviour, prompt asset or telemetry schema moves.** *Cause: kami-harness 4.4.0 did not type a receipt wait that failed rather than ran out of time.* When the endpoint answered a receipt read with an error, or could not be reached, an `act_sequence` row whose transaction had mined could read `"status": "error"` with its hash and no receipt fields, and a single send whose failure text carried one of the harness's retry markers could be sent a second time at the next nonce, its first hash in no result. From 4.5.0 such a wait is followed by one more receipt read: a readable receipt is the outcome (success, or a revert raised as before); otherwise the call raises the harness's unconfirmed error with the hash and the failure as `reason`, and a broadcast transaction is never sent again. An `act_sequence` row never reads `error`: it is one of `success`, `reverted`, `unconfirmed` or `not_sent`, a row whose wait failed is re-checked before the call returns, and the call's `notice` can name the steps the endpoint left unconfirmed. No tool, parameter, schema or description is added, removed, renamed or reworded: the surface is 4.4.0's byte for byte — 100 tools, registry mass 71,133, published `tools_hash` `fb65e0db…fac0` — and only `schema_version` moves (4.4.0 → 4.5.0). **Its standing text is byte-identical to 4.0.0's** (957 characters, sha256 `7c0e7ca6…ae4b`), so the pairing check, `session_start.harness_standing_text_sha256` and the standing-text term of every floor are unchanged (D1). *What this scaffold changes.* Nothing it does: the raised unconfirmed text still opens `transaction <hash> is UNCONFIRMED`, the marker this scaffold classifies as `tx_terminal_state` `unconfirmed` and the clause it lifts `tx_hash` from (P9), with the wait's failure appended after it, and every result still reaches the model verbatim. The pins move — the image default, the example manifest, the live tier and the dev pin (D1, README) — and the recorded surface fixture is re-recorded at `f04672a` under Python 3.13: only its `harness` header changes (version, `schema_version`, sha); its 100 tool entries, standing text, published hash and this scaffold's harness-only hash (`sha256:21ad5efc…0354`) are 4.4.0's. **Pairing rule unchanged: kami-agent ≥ 0.7.0 ↔ kami-harness ≥ 4.0.0** — the check keys on the MAJOR — with the dev pin now 4.5.0; kami-lens unchanged (≥ 1.0.1 required for correct reads, 1.0.3 recommended and pinned, D7). **Consequences for readers:** `session_start.tools_hash` and every floor are identical between 4.4.0 and 4.5.0 harnesses on every profile, so the two pins are told apart by `session_start.harness_schema_version` and the harness pin on `run_start`, never by a hash; on a 4.5.0 run a single send whose receipt wait failed records `tx_terminal_state` `unconfirmed` with its own hash, where on 4.4.0 the call could fail with the RPC library's own error and no terminal state, or send the action twice. Telemetry schema unchanged (0.7.0). PATCH by this repo's practice: a pin bump that moves no scaffold behaviour, prompt asset or telemetry schema (as 0.2.1, 0.3.1, 0.7.1 and 0.7.2 were). Pins: kami-harness 4.5.0 `f04672a`, kami-lens 1.0.3 `7f9be7b`. |
