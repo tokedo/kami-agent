@@ -69,8 +69,8 @@ first `up`.
      `Dockerfile` (it builds from a `git archive` of the pinned commit and
      refuses any other), `shell_keeper` only;
    - `kami-agent-env:<AGENT_VERSION>-<RUNG>` from `Dockerfile.env` here, with
-     `LENS_REPO` / `LENS_SHA`, and for `shell_keeper` `KEEPER_REPO` /
-     `KEEPER_SHA`;
+     `LENS_SHA`, and for `shell_keeper` `KEEPER_SHA` (the clients are cloned
+     from the public repositories; `LENS_REPO` / `KEEPER_REPO` override them);
    - `kami-agent:<AGENT_VERSION>` from this repository's `Dockerfile`.
 2. **Per-run inputs.** `/srv/run/config.yaml` — the manifest, with
    `scaffold_profile: shell` or `shell_keeper`, `environment.container:
