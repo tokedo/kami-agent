@@ -16,7 +16,7 @@ from fake_keeper import FakeKeeper, Ledger, Refuse, tx_row
 from kami_agent import cli
 from kami_agent.adapters.base import AdapterResponse, SamplingParams, StopReason, ToolCall, Usage
 from kami_agent.docker_api import DockerClient
-from kami_agent.environment import Environment, image_matches_pin
+from kami_agent.environment import Environment, EnvironmentCheckError, image_matches_pin
 from kami_agent.governor import PriceTable
 from kami_agent.keeper import KeeperClient
 from kami_agent.loop import LoopCaps
@@ -66,10 +66,11 @@ def shell_call(command, id_="s1"):
 class Machine:
     """A container that keeps a process table, enough to watch persistence."""
 
-    def __init__(self, *, keeper=False, lens_state="LIVE", keeper_exit=0):
+    def __init__(self, *, keeper=False, lens_state="LIVE", keeper_exit=0, keeper_profile="lab"):
         self.keeper = keeper
         self.lens_state = lens_state
         self.keeper_exit = keeper_exit
+        self.keeper_profile = keeper_profile
         self.next_pid = 500
 
     def __call__(self, container, call):
@@ -92,9 +93,9 @@ class Machine:
                 if not self.keeper:
                     return ExecReply(stderr=b"keeper: not found\n", exit_code=127)
                 body = (
-                    b'{"id": 1, "ok": true, "data": {"grants": []}, '
-                    b'"meta": {"profile": "lab", "keeperVersion": "1.0.0"}}'
-                )
+                    '{"id": 1, "ok": true, "data": {"grants": []}, '
+                    f'"meta": {{"profile": "{self.keeper_profile}", "keeperVersion": "1.0.0"}}}}'
+                ).encode()
                 return ExecReply(stdout=body, exit_code=self.keeper_exit)
             return ExecReply(exit_code=0)
         if command.startswith("nohup sleep"):
@@ -219,6 +220,28 @@ def test_init_refuses_a_keeper_that_does_not_answer_from_inside(run_dir):
     with FakeDocker(env, keeper) as docker:
         with pytest.raises(SystemExit, match="keeper status from inside the environment"):
             cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
+
+
+def test_init_refuses_a_keeper_that_runs_another_profile(run_dir):
+    """shell_keeper needs the keeper's `lab` profile: a keeper that answers
+    from inside with any other is refused, by name, and nothing else about
+    it (its image names the pin, the lens answers) rescues the bring-up."""
+    keeper = FakeContainer("kami-keeper", image=f"kami-keeper:{KEEPER_PIN}")
+    env = FakeContainer("kami-env", on_exec=Machine(keeper=True, keeper_profile="fleet"))
+    with FakeDocker(env, keeper) as docker:
+        environment = Environment(
+            DockerClient(docker.socket_path),
+            "kami-env",
+            run_dir,
+            keeper_rung=True,
+            keeper_container="kami-keeper",
+        )
+        with pytest.raises(EnvironmentCheckError) as refused:
+            environment.bring_up_checks(keeper_sha=KEEPER_PIN)
+        with pytest.raises(SystemExit, match="'fleet'"):
+            cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
+    assert "'fleet'" in str(refused.value)
+    assert "'lab'" in str(refused.value)
 
 
 def test_init_refuses_an_environment_that_is_not_running_or_has_no_lens(run_dir):
