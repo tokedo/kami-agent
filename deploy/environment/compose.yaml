@@ -12,7 +12,16 @@ services:
     network_mode: host       # its egress is the host firewall's business
     volumes: ["/srv/lens:/data"]
     environment: {NODE_OPTIONS: "--max-old-space-size=8192"}
-    healthcheck: {test: ["CMD", "kami-lens", "health"], interval: 30s, timeout: 10s, retries: 40}
+    # `kami-lens health` exits 0 only once the daemon is LIVE, and a first
+    # start loads the whole world (more than ten minutes measured): the
+    # start period keeps a slow cold boot from being declared unhealthy,
+    # which would fail every `service_healthy` dependency on it.
+    healthcheck:
+      test: ["CMD", "kami-lens", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 40
+      start_period: 30m
     restart: unless-stopped
   sockets:                   # the relay: the environment sees sockets, never the daemons' data
     image: alpine/socat:1.8.1.3@sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842

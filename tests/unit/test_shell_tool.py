@@ -382,6 +382,25 @@ def test_the_environment_mounts_nothing_of_the_run_the_keys_or_docker(files, exp
         assert key not in env
 
 
+def _service(file, name):
+    doc = yaml.safe_load((REPO / "deploy" / "environment" / file).read_text())
+    return doc["services"][name]
+
+
+def test_the_lens_healthcheck_waits_out_a_cold_boot():
+    """`kami-lens health` answers 0 only when LIVE, and a first start loads the
+    whole world for more than ten minutes: without a start period the relay,
+    the environment and the keeper (all `service_healthy` on the lens) would
+    fail on a slow cold boot. The keeper starts in seconds and needs none."""
+    lens = _service("compose.yaml", "lens")["healthcheck"]
+    assert lens["test"] == ["CMD", "kami-lens", "health"]
+    assert lens["start_period"] == "30m"
+    keeper = _service("compose.keeper.yaml", "keeper")["healthcheck"]
+    assert "start_period" not in keeper
+    for file, name in (("compose.yaml", "sockets"), ("compose.keeper.yaml", "keeper")):
+        assert _service(file, name)["depends_on"]["lens"]["condition"] == "service_healthy"
+
+
 def test_one_filesystem_seen_two_ways(run_dir):
     """A file the environment's shell writes to /workspace is the workspace
     tools' file: the definition mounts run_dir/workspace there."""
