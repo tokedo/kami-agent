@@ -20,16 +20,16 @@ on:
   workflow_dispatch:
 
 env:
-  # 4.7.0 (df7129f): 109 tools, harness tools_hash 5a31220d...21a4, and a
+  # 5.0.0 (659c205): 100 tools, harness tools_hash 3291008d...a02a, and a
   # handshake whose standing text this scaffold shows the model (SPEC D1;
-  # kami-agent 0.7.0+ pairs with 4.0.0+; the text is byte-identical to
+  # kami-agent 0.8.0 pairs with 5.0.0+; the text is byte-identical to
   # 4.0.0's, sha256 7c0e7ca6...ae4b). The committed fixture was
   # re-recorded at this ref under Python 3.13
   # (scripts/record_harness_surface.py), standing text included, and the
   # live-vs-recorded assertions below compare that text byte for byte. No
   # kami-lens daemon runs here, so the roster brief degrades to the
   # harness's own unavailability error, as tier 4 always has.
-  HARNESS_PIN: df7129f0b762e91994cb75c793e8755777bbd037 # kami-harness 4.7.0 (df7129f, tag v4.7.0)
+  HARNESS_PIN: 659c20549442e8ca8e6dcb219350fb05433fd349 # kami-harness 5.0.0 (659c205)
 
 jobs:
   live:

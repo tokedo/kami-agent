@@ -5,8 +5,8 @@
 FROM python:3.13-slim
 
 ARG HARNESS_REPO=https://github.com/tokedo/kami-harness
-# kami-harness 4.7.0 (any 4.x pairs with kami-agent 0.7.0+)
-ARG HARNESS_SHA=df7129f0b762e91994cb75c793e8755777bbd037
+# kami-harness 5.0.0 (kami-agent 0.8.0 pairs with kami-harness 5.0.0 or newer)
+ARG HARNESS_SHA=659c20549442e8ca8e6dcb219350fb05433fd349
 # GDD_SHA: the manifest's pins.gdd_sha (manifests/example.yaml names one matching this harness)
 ARG GDD_REPO=
 ARG GDD_SHA=

@@ -5,6 +5,14 @@ run_id: dev-smoke-001
 provider: anthropic # anthropic | openai | google
 model: claude-haiku-4-5
 
+# provider: openai reaches any OpenAI-compatible endpoint (SPEC D2, D3): a
+# router such as OpenRouter among them. Unset base_url falls back to
+# OPENAI_BASE_URL, then the SDK's own default; OPENAI_API_KEY holds that
+# endpoint's key. Headers are sent on every request, verbatim (strings).
+# openai:
+#   base_url: https://openrouter.ai/api/v1
+#   extra_headers: {X-Title: kami-agent}
+
 price_table: # pinned list prices, USD per million tokens (cache-aware, SPEC P7.2)
   input_usd_per_mtok: 1.0
   output_usd_per_mtok: 5.0
@@ -39,18 +47,40 @@ caps: # SPEC D3 (session_token_cap sized per model — no default)
   repetition_window: 30 # repetition breaker: trailing-call window size
   repetition_min_distinct: 4 # repetition breaker: distinct-signature floor in a full window
   repetition_same_tool_error_cap: 8 # repetition breaker: consecutive same-tool error/revert run
+  shell_timeout_s: 120 # shell rungs only: the upper bound of ONE shell call's
+    # timeout (SPEC P10; the call's own timeout_s is clamped to [1, this]).
+    # The shell tool is exempt from tool_timeout_s, as wait is: it is bounded
+    # by this plus the wrapper's 5-second kill grace
 
-# Knowledge-delivery rung (SPEC D3, P10, P13). Cumulative, in order:
-#   control     — base scaffold + session-start gas balances
-#   orientation — + the pinned core-loop paragraph (prompts/orientation.txt)
-#   search      — + the search_reference tool over reference/
-#   pushed      — + lens/harness result enrichment (THEIR runtime flags:
-#                 nothing changes agent-side beyond the recorded value)
-#   planning    — + prompts/planning.txt and the plan-file injection
+# Scaffold rung (SPEC D3, P10, P13). Cumulative, in order:
+#   control      — base scaffold + session-start gas balances
+#   orientation  — + the pinned core-loop paragraph (prompts/orientation.txt)
+#   search       — + the search_reference tool over reference/
+#   pushed       — + lens/harness result enrichment (THEIR runtime flags:
+#                  nothing changes agent-side beyond the recorded value)
+#   planning     — + prompts/planning.txt and the plan-file injection
+#   shell        — + the shell tool in the run's environment container and
+#                  prompts/shell.txt (a CAPABILITY rung; needs `environment`)
+#   shell_keeper — + a keeper daemon reachable from that shell and
+#                  prompts/shell_keeper.txt (needs pins.keeper_sha)
 # Absent = control. An unknown value fails at build_run_config. A profile
-# at or above `search` carries one more scaffold tool, so its
-# session_start.tools_hash differs from a lower profile's BY DESIGN.
+# at or above `search` carries one more scaffold tool, and one at or above
+# `shell` one more again, so session_start.tools_hash differs between them
+# BY DESIGN; shell and shell_keeper hash alike.
 scaffold_profile: control
+
+# The environment container of the shell rungs (SPEC D8), ignored below
+# them. deploy/environment/ defines it; `init` asserts the container runs
+# and matches the rung (a keeper command on shell_keeper and none on
+# shell), and on shell_keeper that the keeper container's image names
+# pins.keeper_sha. Unset container falls back to KAMI_ENV_CONTAINER;
+# docker_socket to DOCKER_HOST (unix://) then /var/run/docker.sock;
+# keeper_socket to KAMI_KEEPER_SOCKET then /srv/keeper/keeper.sock.
+# environment:
+#   container: kami-env
+#   keeper_container: kami-keeper
+#   docker_socket: null
+#   keeper_socket: null
 
 budget_usd: 10.0
 t_max_days: 30
@@ -103,6 +133,7 @@ lens:
 
 pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
-  harness_sha: df7129f0b762e91994cb75c793e8755777bbd037 # kami-harness 4.7.0 (4.0.0+ pairs with kami-agent 0.7.0+)
-  lens_sha: e60429094b312e1bf4799b42d12c70ef3d66827f # kami-lens 1.0.5 (1.0.1+ required for correct reads)
-  gdd_sha: 875b7da6231ebcdebdfc79419d09f3bf749a74c3 # kamigotchi-gdd main (2026-10-03), synced to upstream ffda3963 — the upstream pin of the harness and lens above
+  harness_sha: 659c20549442e8ca8e6dcb219350fb05433fd349 # kami-harness 5.0.0 (pairs with kami-agent 0.8.0)
+  lens_sha: 7131a52b6bd9308c9b4283d9f6eb147a740f5be3 # kami-lens 1.1.0 (1.0.1+ required for correct reads)
+  keeper_sha: bbe3929 # kami-keeper (shell_keeper only; checked at init against the keeper image)
+  gdd_sha: 746be1163ac380957824689d5d90041e5e2eded0 # kamigotchi-gdd main (2026-10-23), the world documentation matching the harness and lens above
