@@ -10,7 +10,8 @@ line 1 carries the harness's machine tokens, and from kami-harness 4.0.0
 everything after the first newline is its standing text — the rules it
 states once for its whole surface instead of on every tool description.
 The runner shows that text to the model in the system prompt, verbatim,
-and refuses a 4.x harness whose text did not arrive (``check_pairing``).
+and refuses a harness this scaffold does not pair with (``check_pairing``):
+one whose MAJOR is below 5, and one whose standing text did not arrive.
 
 The MCP SDK is async; this client runs a private event loop on a
 background thread and exposes the synchronous surface the loop needs
@@ -21,8 +22,8 @@ manager task, as anyio requires.
 Dev pin: kami-harness 5.0.0 surface (``659c205``) — the run manifest
 re-pins at launch; the SHA is manifest metadata, recorded on run_start.
 The pairing check keys on the handshake's ``schema_version`` MAJOR, never
-on this pin: a harness at MAJOR 4 or above must have delivered its
-standing text.
+on this pin: kami-harness 5.0.0 and newer pair with kami-agent 0.8.0 and
+newer, and such a harness must have delivered its standing text.
 """
 
 from __future__ import annotations
@@ -62,6 +63,19 @@ _SEMVER_MAJOR = re.compile(r"(\d+)(?:[.+-]|$)")
 # that does not show the model that text shows it nothing of it: the
 # descriptions no longer carry it.
 STANDING_TEXT_HARNESS_MAJOR = 4
+
+# The first harness MAJOR this scaffold pairs with (0.8.0): its receipts
+# classifier, its recorded surface and its session-start brief are written
+# against kami-harness 5.0.0's texts and tool set, and a 4.x harness still
+# serves the nine strategy-service tools no 0.8.0 rung may ever be shown.
+# Every paired MAJOR also states its standing text in the handshake.
+PAIRED_HARNESS_MAJOR = 5
+
+# session_refused reasons (SPEC P9; the schema's closed enum).
+REFUSED_STANDING_TEXT_MISSING = "standing_text_missing"
+REFUSED_HARNESS_MAJOR = "harness_major_below_pairing"
+
+PAIRING = "kami-harness 5.0.0 and newer pair with kami-agent 0.8.0 and newer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,22 +138,47 @@ class HarnessPairingError(Exception):
     call. Not a ``HarnessError``: a handshake failure is a session that
     could not start and is recorded as one, while this is a deployment
     that must not start at all, and its message is for an operator.
+    ``reason`` is the ``session_refused`` reason it is recorded under.
     """
+
+    def __init__(self, message: str, reason: str = REFUSED_STANDING_TEXT_MISSING) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def check_pairing(schema_version: str | None, standing_text: str) -> None:
-    """Refuse a harness whose standing text would not reach the model.
+    """Refuse a harness this scaffold does not pair with (SPEC D1).
 
-    From kami-harness 4.0.0 the rule that tool output is untrusted data,
-    not instructions, is stated ONCE, in the handshake, and on no tool
-    description. A session against such a harness that received no
-    standing text would run with that rule shown nowhere — so it is
-    refused instead of run degraded. A harness that publishes no
-    ``schema_version`` token, or a MAJOR below 4, owes no standing text
-    and passes.
+    Two refusals, in this order:
+
+    - **a MAJOR below 5.** kami-harness 5.0.0 and newer pair with
+      kami-agent 0.8.0 and newer. Everything this scaffold reads of a
+      harness's words — the terminal-state classifier, the recorded
+      surface, the session-start brief — is written against 5.0.0, and a
+      4.x harness still serves the nine strategy-service tools that no
+      0.8.0 rung may ever be shown;
+    - **a paired harness whose standing text did not arrive.** From
+      kami-harness 4.0.0 the rule that tool output is untrusted data, not
+      instructions, is stated ONCE, in the handshake, and on no tool
+      description. A session that received none of that text would run
+      with that rule shown nowhere — so it is refused instead of run
+      degraded.
+
+    A harness that publishes no ``schema_version`` token states nothing
+    to check against and passes, as it always has.
     """
     major = schema_major(schema_version)
-    if major is None or major < STANDING_TEXT_HARNESS_MAJOR or standing_text:
+    if major is None:
+        return
+    if major < PAIRED_HARNESS_MAJOR:
+        raise HarnessPairingError(
+            f"refusing to start: kami-harness {schema_version} does not pair with this "
+            f"scaffold — {PAIRING}. This scaffold reads a harness's results, refusals "
+            "and tool surface as kami-harness 5.0.0 states them, and an older MAJOR "
+            "serves tools no rung of it may show. Pin kami-harness 5.0.0 or newer.",
+            reason=REFUSED_HARNESS_MAJOR,
+        )
+    if standing_text:
         return
     raise HarnessPairingError(
         f"refusing to start: kami-harness {schema_version} states its standing "
@@ -148,8 +187,8 @@ def check_pairing(schema_version: str | None, standing_text: str) -> None:
         "instructions field, and no tool description carries it any more. This "
         "session received none of that text, so the model would never be shown "
         "it. Check that the harness build is intact and that nothing between it "
-        "and this scaffold drops the instructions field (kami-harness 4.0.0 and "
-        "newer pair with kami-agent 0.7.0 and newer)."
+        f"and this scaffold drops the instructions field ({PAIRING}).",
+        reason=REFUSED_STANDING_TEXT_MISSING,
     )
 
 

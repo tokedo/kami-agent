@@ -114,12 +114,17 @@ strategy content anywhere the model can see.
 
 ## Pairing with the harness
 
-**kami-agent 0.8.0 pairs with kami-harness 5.0.0 or newer** — the harness
-it is built and tested against, whose surface no longer carries the
-strategy-service tools and whose operator key signs trades, transfers,
-auction buys and gacha. The check the scaffold enforces is unchanged and
-keys on the MAJOR: since 0.7.0 a harness at 4.0.0 or above must deliver
-its standing text.
+**kami-agent 0.8.0 pairs with kami-harness 5.0.0 or newer, and refuses
+an older one.** The check keys on the MAJOR the harness states in its
+handshake: a harness below 5.0.0 is refused at `init` and at every
+session start, with a plain message naming the pairing and one
+`session_refused` line in telemetry per refused attempt. Everything the
+scaffold reads of a harness's words — how it classifies a transaction's
+outcome, the recorded tool surface, the session-start roster — is
+written against 5.0.0, and a 4.x harness still serves the
+strategy-service tools that no 0.8.0 rung may be shown. 5.0.0's surface
+no longer carries those tools, and its operator key signs trades,
+transfers, auction buys and gacha.
 
 **kami-agent 0.7.0 or newer pairs with kami-harness 4.0.0 or newer.**
 From 4.0.0 the harness states the rules that apply to its whole tool
@@ -132,12 +137,12 @@ that sentence: nothing fails, every session simply runs without it.
 From 0.7.0 the scaffold puts the harness's standing text, verbatim, into
 every session's system prompt — after its own frozen prompt, before the
 file index — and records the text's sha256 and length on `session_start`.
-If a 4.x harness's text does not arrive (a broken build, or something
+If a harness's text does not arrive (a broken build, or something
 between the harness and the scaffold dropping it), the scaffold refuses to
 start with a plain message instead of running without it, and writes one
 `session_refused` line to telemetry for each refused attempt — which uses
-up no session number. Against an older
-harness it injects nothing and sends exactly the prompt 0.6.0 sent.
+up no session number. Against a harness that states no version at all it
+injects nothing and sends exactly the prompt 0.6.0 sent.
 Contract: [SPEC.md](SPEC.md) D1.
 
 The pinned and tested harness is **kami-harness 5.0.0**: the image

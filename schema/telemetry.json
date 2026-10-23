@@ -518,8 +518,8 @@
       "properties": {
         "event": { "const": "session_refused" },
         "reason": {
-          "enum": ["standing_text_missing"],
-          "description": "Closed enum. standing_text_missing: the harness's handshake stated schema_version MAJOR 4 or above — a harness that states its standing text, including the rule that tool output is untrusted data and never instructions, ONLY in the handshake — and none of that text reached the session, so the model would have been shown it nowhere"
+          "enum": ["standing_text_missing", "harness_major_below_pairing"],
+          "description": "Closed enum. standing_text_missing: the harness's handshake stated a schema_version this scaffold pairs with — a harness that states its standing text, including the rule that tool output is untrusted data and never instructions, ONLY in the handshake — and none of that text reached the session, so the model would have been shown it nowhere. harness_major_below_pairing (schema 0.8.0): the handshake stated a schema_version MAJOR below 5 — kami-harness 5.0.0 and newer pair with kami-agent 0.8.0 and newer, whose readings of a harness's results and surface are written against 5.0.0, and a 4.x harness serves tools no 0.8.0 rung may be shown. A harness that states no schema_version is refused for neither"
         },
         "message": {
           "type": "string",

@@ -245,7 +245,7 @@ class GameTools(Protocol):
     ``harness_tools_hash``, ``harness_schema_version`` and
     ``standing_text`` (SPEC D1). A wrapper around ``HarnessClient`` must
     forward all three — a wrapper that forwards the version and drops the
-    text is refused against a 4.x harness rather than run without it.
+    text is refused against a paired harness rather than run without it.
     """
 
     @property

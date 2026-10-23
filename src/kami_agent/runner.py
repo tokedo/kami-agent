@@ -53,7 +53,12 @@ from kami_agent.adapters.base import (
 from kami_agent.environment import Environment
 from kami_agent.errorlog import ERRORS_FILENAME, ErrorLog
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
-from kami_agent.harness import HarnessError, HarnessPairingError, check_pairing, tools_hash
+from kami_agent.harness import (
+    HarnessError,
+    HarnessPairingError,
+    check_pairing,
+    tools_hash,
+)
 from kami_agent.keeper import (
     RUN_ACCOUNT,
     KeeperClient,
@@ -108,8 +113,8 @@ SESSION_ABORTED = "session_aborted"
 TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_MANUAL = "manual"
 
-# session_refused reasons (SPEC P9; closed enum in the schema).
-REFUSED_STANDING_TEXT_MISSING = "standing_text_missing"
+# session_refused reasons (SPEC P9; closed enum in the schema) live beside
+# the pairing check that raises them (harness.py), on HarnessPairingError.
 
 # shell_state phases (SPEC P9).
 PHASE_SESSION_START = "session_start"
@@ -498,7 +503,7 @@ def _run_one_session(
             # consumes no number, and the cache claimed above is given back
             # so `status` agrees with the stream.
             refused_fields: dict[str, Any] = {
-                "reason": REFUSED_STANDING_TEXT_MISSING,
+                "reason": exc.reason,
                 "message": str(exc),
                 "trigger": trigger,
             }
@@ -838,7 +843,7 @@ def _standing_text_of(game: GameTools | None) -> str:
     Read off the game tools as an optional attribute: a stand-in or a
     wrapper that does not carry it yields "" — and if it does carry the
     harness's schema version, ``check_pairing`` refuses that combination
-    against a 4.x harness rather than letting the text go missing.
+    against a paired harness rather than letting the text go missing.
     """
     text = getattr(game, "standing_text", "") if game is not None else ""
     return text if isinstance(text, str) else ""
