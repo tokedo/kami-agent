@@ -155,6 +155,25 @@ PROVIDERS = {
         ),
         "adapter": lambda model: GoogleAdapter(model, api_key=os.environ.get("GEMINI_API_KEY")),
     },
+    # The OpenAI-compatible path (SPEC D2, D3; 0.8.0): the same adapter
+    # against a router's Chat Completions endpoint. Runs only when its key
+    # is set. Prices are the routed model's list prices at pin time.
+    "openrouter": {
+        "key_env": "OPENROUTER_API_KEY",
+        "model_env": "SMOKE_OPENROUTER_MODEL",
+        "default_model": "openai/gpt-4o-mini",
+        "prices": PriceTable(
+            input_usd_per_mtok=0.15,
+            output_usd_per_mtok=0.60,
+            cache_read_usd_per_mtok=0.075,
+            cache_write_usd_per_mtok=0.15,
+        ),
+        "adapter": lambda model: OpenAIAdapter(
+            model,
+            api_key=os.environ.get("OPENROUTER_API_KEY"),
+            base_url=os.environ.get("SMOKE_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        ),
+    },
 }
 
 # The harness account label the canned session queries. "main" suits the

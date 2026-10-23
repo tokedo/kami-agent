@@ -11,6 +11,15 @@ which needs the loaded game tools. The hard constraint — the session
 counter is persisted before the first model call (P1.7), so crashes never
 reuse a session number — is preserved.
 
+On the ``shell`` rungs (0.8.0, SPEC D8) every session boundary also
+records the run's environment container (one ``shell_state`` event at
+session start and at session end), and on ``shell_keeper`` the session
+start reads the keeper's ledger for the transactions it signed since the
+last read (``keeper_tx`` events). ``run_complete`` tears the run down in a
+fixed order — the keeper's ``stop --all`` and ``revoke``, the last ledger
+read, the environment stopped — before it is emitted. Nothing of any of it
+reaches the model (I1).
+
 The profile's prompt assets are read before that spawn (P1, P13): they
 are a pure filesystem read, and a profile whose pinned asset is missing
 from the run directory is a mis-provisioned arm, which must fail loudly
@@ -25,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -40,21 +50,36 @@ from kami_agent.adapters.base import (
     ToolResultMessage,
     UserMessage,
 )
+from kami_agent.environment import Environment
 from kami_agent.errorlog import ERRORS_FILENAME, ErrorLog
 from kami_agent.governor import PriceTable, boundary_check, overspend_usd
 from kami_agent.harness import HarnessError, HarnessPairingError, check_pairing, tools_hash
+from kami_agent.keeper import (
+    RUN_ACCOUNT,
+    KeeperClient,
+    KeeperError,
+    LedgerCursor,
+    frame_error,
+    read_keeper_receipts,
+)
 from kami_agent.lens import STATUS_QUERY, LensQuery
 from kami_agent.loop import (
     CARRIED_APPLIED,
     CARRIED_INVALID,
+    INITIATOR_SCAFFOLD,
+    SOURCE_KEEPER,
     AgentLoop,
     GameTools,
     LoopCaps,
 )
 from kami_agent.state import (
     RUN_COMPLETE,
+    RunState,
+    carry_keeper_cursor,
     crashed_session,
     fold_telemetry,
+    keeper_tx_hashes,
+    last_restart_count,
     phantom_requests,
     save_state,
     session_totals,
@@ -65,8 +90,11 @@ from kami_agent.tools.scaffold import (
     DEFAULT_PROFILE,
     PROFILE_ORIENTATION,
     PROFILE_PLANNING,
+    PROFILE_SHELL,
+    PROFILE_SHELL_KEEPER,
     ScaffoldTools,
     profile_at_least,
+    workspace_bytes,
 )
 
 # run_session outcomes (operator-facing, never agent-visible)
@@ -82,6 +110,19 @@ TRIGGER_MANUAL = "manual"
 
 # session_refused reasons (SPEC P9; closed enum in the schema).
 REFUSED_STANDING_TEXT_MISSING = "standing_text_missing"
+
+# shell_state phases (SPEC P9).
+PHASE_SESSION_START = "session_start"
+PHASE_SESSION_END = "session_end"
+PHASE_RUN_COMPLETE = "run_complete"
+
+# The two scaffold-initiated keeper calls at run_complete (SPEC P1, P9).
+KEEPER_STOP_ALL_TOOL = "keeper_stop_all"
+KEEPER_REVOKE_TOOL = "keeper_revoke"
+
+# The uid:gid of the environment's user (SPEC D8), which must be able to
+# change what the scaffold's own workspace_write creates.
+ENVIRONMENT_OWNER = (1000, 1000)
 
 _BARE_SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -124,12 +165,19 @@ def run_session(
     *,
     harness_factory: Callable[[], GameTools] | None = None,
     lens_factory: Callable[[], LensQuery] | None = None,
+    environment_factory: Callable[[], Environment] | None = None,
+    keeper_factory: Callable[[], KeeperClient] | None = None,
     trigger: str = TRIGGER_SCHEDULED,
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], None] | None = None,
     disable_supervisor: Callable[[], None] | None = None,
 ) -> str:
-    """Execute the full SPEC P1 lifecycle once; returns an outcome constant."""
+    """Execute the full SPEC P1 lifecycle once; returns an outcome constant.
+
+    ``environment_factory`` and ``keeper_factory`` exist on the shell
+    rungs only (``keeper_factory`` on ``shell_keeper``); below them both
+    are None and nothing of this release's environment code runs.
+    """
     clock = clock or (lambda: datetime.now(UTC))
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +191,8 @@ def run_session(
     try:
         events = list(read_events(telemetry_path)) if telemetry_path.exists() else []
         state = fold_telemetry(events)
+        # The one cache field that is not folded from the stream (state.py).
+        carry_keeper_cursor(state, state_path)
 
         # P1.3 wake gating: exit unless due (manual runs bypass).
         if (
@@ -216,6 +266,22 @@ def run_session(
                 now=clock(),
             )
             if stop_reason is not None:
+                # The end of the run on the shell rungs (SPEC P1): the
+                # keeper's books stopped and its grant revoked, the last of
+                # its transactions read, the environment stopped — all
+                # BEFORE run_complete, which records how that went. A run
+                # that dies in here has no run_complete, so the next
+                # invocation trips the same boundary and does it all again:
+                # every step is idempotent.
+                end_fields = _end_of_run(
+                    writer=writer,
+                    session=state.session_counter,
+                    state=state,
+                    events=events,
+                    run_dir=run_dir,
+                    environment=environment_factory() if environment_factory else None,
+                    keeper=keeper_factory() if keeper_factory else None,
+                )
                 writer.emit(
                     "run_complete",
                     session=state.session_counter,
@@ -227,6 +293,7 @@ def run_session(
                         "cumulative_tokens": state.cumulative_tokens,
                         "overspend_usd": overspend_usd(state.cumulative_usd, config.budget_usd),
                     },
+                    **end_fields,
                 )
                 state.run_status = RUN_COMPLETE
                 save_state(state, state_path)
@@ -246,6 +313,9 @@ def run_session(
                 error_log=error_log,
                 harness_factory=harness_factory,
                 lens_factory=lens_factory,
+                environment_factory=environment_factory,
+                keeper_factory=keeper_factory,
+                events=events,
                 trigger=trigger,
                 clock=clock,
                 sleep=sleep,
@@ -266,6 +336,9 @@ def _run_one_session(
     error_log: ErrorLog,
     harness_factory: Callable[[], GameTools] | None,
     lens_factory: Callable[[], LensQuery] | None,
+    environment_factory: Callable[[], Environment] | None,
+    keeper_factory: Callable[[], KeeperClient] | None,
+    events: list[dict[str, Any]],
     trigger: str,
     clock: Callable[[], datetime],
     sleep: Callable[[float], None] | None,
@@ -280,6 +353,9 @@ def _run_one_session(
     # cause, leaving no unmatched session_start for recovery to close.
     prompts = _load_prompts(run_dir, config.scaffold_profile)
 
+    # The run's environment container (shell rungs, D8). Constructing the
+    # client opens nothing, so it cannot fail here.
+    environment = environment_factory() if environment_factory is not None else None
     scaffold = ScaffoldTools(
         run_dir,
         session_number=session,
@@ -288,6 +364,10 @@ def _run_one_session(
         wake_min_minutes=config.wake_min_minutes,
         wake_max_minutes=config.wake_max_minutes,
         wait_max_seconds=config.caps.wait_max_seconds,
+        environment=environment,
+        shell_timeout_s=config.caps.shell_timeout_s,
+        tool_result_max_bytes=config.caps.tool_result_max_bytes,
+        workspace_owner=ENVIRONMENT_OWNER if environment is not None else None,
         clock=clock,
         emit=lambda event, fields: writer.emit(event, session=session, **fields),
     )
@@ -297,6 +377,7 @@ def _run_one_session(
         published: str | None = None,
         lens_provenance: dict[str, Any] | None = None,
         harness_provenance: dict[str, Any] | None = None,
+        environment_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         elapsed = 0.0
         if state.first_session_at is not None:
@@ -328,6 +409,10 @@ def _run_one_session(
         # only: session_start is not an agent-visible channel (P9, I1).
         if lens_provenance:
             fields.update(lens_provenance)
+        # Which environment image and keeper served it (D8), on the shell
+        # rungs; recorded, never asserted against the pins at runtime.
+        if environment_provenance:
+            fields.update(environment_provenance)
         return writer.emit("session_start", session=session, **fields)
 
     def emit_schedule(scaffold_tools: ScaffoldTools, carried_wake: str | None = None) -> None:
@@ -430,14 +515,44 @@ def _run_one_session(
             raise
 
         game_defs = list(game.tool_defs) if game is not None else []
+        # The environment and the keeper, read BEFORE session_start so the
+        # event can name the image and the keeper version that served the
+        # session; their own events follow it. The environment is started
+        # again here if it stopped between sessions (a host reboot).
+        snapshot = (
+            environment.snapshot(last_restart_count=last_restart_count(events))
+            if environment is not None
+            else None
+        )
+        keeper = keeper_factory() if keeper_factory is not None else None
+        keeper_events: list[dict[str, Any]] = []
+        keeper_version: str | None = None
+        if keeper is not None:
+            keeper_events, keeper_version = _keeper_read(keeper, state, events)
+        provenance: dict[str, Any] = {}
+        if snapshot is not None and snapshot.image is not None:
+            provenance["environment_image"] = snapshot.image
+        if keeper_version is not None:
+            provenance["keeper_version"] = keeper_version
         start_record = emit_session_start(
             tools_hash(game_defs + list(scaffold.tool_defs)),
             getattr(game, "harness_tools_hash", None),
             _lens_provenance(lens),
             _harness_provenance(schema_version, standing_text),
+            provenance,
         )
         if state.first_session_at is None:
             state.first_session_at = start_record["ts"]
+        if snapshot is not None and environment is not None:
+            writer.emit(
+                "shell_state",
+                session=session,
+                **snapshot.fields(
+                    PHASE_SESSION_START, environment.container, scaffold.workspace_bytes_used()
+                ),
+            )
+        for fields in keeper_events:
+            writer.emit("keeper_tx", session=session, **fields)
 
         # 5. Build context: frozen system prompt + this profile's pinned
         # appendices + the harness's standing text, verbatim, when it sent
@@ -449,7 +564,7 @@ def _run_one_session(
             [
                 *prompts["system_parts"],
                 *([standing_text] if standing_text else []),
-                scaffold.workspace_list(),
+                scaffold.file_index(),
             ]
         )
 
@@ -486,6 +601,19 @@ def _run_one_session(
         if result.repetition is not None:
             end_fields["repetition_rule"] = result.repetition.rule
             end_fields.update(result.repetition.fields)
+        if environment is not None:
+            # What the session left running (P9): the record of "set and
+            # forget", taken before the session's own end is written.
+            closing = environment.snapshot(
+                last_restart_count=snapshot.restart_count if snapshot else None
+            )
+            writer.emit(
+                "shell_state",
+                session=session,
+                **closing.fields(
+                    PHASE_SESSION_END, environment.container, scaffold.workspace_bytes_used()
+                ),
+            )
         end_record = writer.emit("session_end", session=session, **end_fields)
         # The session's own record, written whatever the model wrote for
         # itself (P15). AFTER session_end so the entry's ended_at is the
@@ -524,6 +652,128 @@ def _run_one_session(
             close = getattr(component, "close", None)
             if callable(close):
                 close()
+
+
+def _keeper_read(
+    keeper: KeeperClient, state: RunState, events: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The keeper's new final receipts since the last read (SPEC P9 keeper_tx).
+
+    Scaffold-side and never agent-visible: the agent learns what its
+    keeper did only by asking it through its own shell. Updates the
+    cursor cache on ``state``; the dedup set is folded from the stream.
+    """
+    cursor = LedgerCursor(blocks=dict(state.keeper_cursor), open=dict(state.keeper_open))
+    emitted = keeper_tx_hashes(events)
+    found, version = read_keeper_receipts(keeper, cursor, emitted)
+    state.keeper_cursor = cursor.blocks
+    state.keeper_open = cursor.open
+    return found, version
+
+
+def _keeper_call(
+    keeper: KeeperClient,
+    tool: str,
+    cmd: str,
+    args: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """One scaffold-initiated keeper call at run_complete, as a tool_call row.
+
+    Returns ``(frame or None, row fields)``; the caller adds what the
+    answer says and emits the row. A keeper that does not answer is
+    ``ok: false`` and the run still completes (SPEC P1).
+    """
+    start = time.perf_counter()
+    try:
+        frame: dict[str, Any] | None = keeper.request(cmd, args)
+        error = None if frame.get("ok") else frame_error(frame)
+    except KeeperError as exc:
+        frame, error = None, str(exc)
+    fields: dict[str, Any] = {
+        "tool": tool,
+        "source": SOURCE_KEEPER,
+        "initiator": INITIATOR_SCAFFOLD,
+        "duration_ms": (time.perf_counter() - start) * 1000,
+        "ok": error is None,
+    }
+    if error is not None:
+        fields["error"] = error
+    return (frame if error is None else None), fields
+
+
+def _end_of_run(
+    *,
+    writer: TelemetryWriter,
+    session: int,
+    state: RunState,
+    events: list[dict[str, Any]],
+    run_dir: Path,
+    environment: Environment | None,
+    keeper: KeeperClient | None,
+) -> dict[str, Any]:
+    """Tear the run down before ``run_complete`` (SPEC P1, D8); its extra fields.
+
+    In this order, each step whatever the one before it did:
+
+    1. ``stop --all`` for the run's account, then ``revoke`` — two
+       ``tool_call`` rows, ``source: keeper``, ``initiator: scaffold``. A
+       session never revokes: the keeper is meant to run between
+       sessions. The run's end is the one place a grant must not survive,
+       because nothing will ever look at it again.
+    2. The last ``keeper_tx`` read, so the transactions of the final
+       stretch are in the record.
+    3. ``docker stop`` with its grace period: no process the agent left
+       running survives the run. Then one ``shell_state`` at
+       ``run_complete`` showing it.
+    """
+    out: dict[str, Any] = {}
+    if keeper is not None:
+        frame, row = _keeper_call(
+            keeper,
+            KEEPER_STOP_ALL_TOOL,
+            "stop",
+            {"all": True, "account": RUN_ACCOUNT},
+        )
+        data = frame.get("data") if frame else None
+        if isinstance(data, dict) and isinstance(data.get("stopped"), list):
+            row["keeper_books_stopped"] = len(data["stopped"])
+        writer.emit("tool_call", session=session, **row)
+
+        frame, row = _keeper_call(keeper, KEEPER_REVOKE_TOOL, "revoke", {"account": RUN_ACCOUNT})
+        if frame is not None:
+            grants = _grants_after(keeper)
+            if grants is not None:
+                row["keeper_grants_after"] = grants
+                out["keeper_grants_after"] = grants
+        writer.emit("tool_call", session=session, **row)
+
+        found, _version = _keeper_read(keeper, state, events)
+        for fields in found:
+            writer.emit("keeper_tx", session=session, **fields)
+    if environment is not None:
+        out["environment_stopped"] = environment.stop()
+        snap = environment.snapshot(
+            last_restart_count=last_restart_count(events), start_if_stopped=False, probe=False
+        )
+        writer.emit(
+            "shell_state",
+            session=session,
+            **snap.fields(
+                PHASE_RUN_COMPLETE, environment.container, workspace_bytes(run_dir / "workspace")
+            ),
+        )
+    return out
+
+
+def _grants_after(keeper: KeeperClient) -> int | None:
+    """How many grants the keeper still holds, from its own ``status``."""
+    try:
+        frame = keeper.request("status")
+    except KeeperError:
+        return None
+    data = frame.get("data") if frame.get("ok") else None
+    grants = data.get("grants") if isinstance(data, dict) else None
+    return len(grants) if isinstance(grants, list) else None
 
 
 def _journal_crashed_session(
@@ -700,6 +950,10 @@ def _load_prompts(run_dir: Path, profile: str = DEFAULT_PROFILE) -> dict[str, An
         system_parts.append(read("orientation.txt"))
     if profile_at_least(profile, PROFILE_PLANNING):
         system_parts.append(read("planning.txt"))
+    if profile_at_least(profile, PROFILE_SHELL):
+        system_parts.append(read("shell.txt"))
+    if profile_at_least(profile, PROFILE_SHELL_KEEPER):
+        system_parts.append(read("shell_keeper.txt"))
     return {
         "system_parts": system_parts,
         "kickoff": read("kickoff.txt"),

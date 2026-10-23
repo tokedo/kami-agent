@@ -1,4 +1,4 @@
-"""Scaffold tools (SPEC P10): workspace/reference file tools, scheduling, status, end_session.
+"""Scaffold tools (SPEC P10): file tools, scheduling, status, end_session, wait, shell.
 
 All strings the model can see — tool names, descriptions, results, error
 messages — are mechanism-only: no budget, spend, horizon, or cap
@@ -6,16 +6,19 @@ information (I1), no strategy or memory-structure hints (I3).
 
 The surface is **profile-selected** from 0.5.0 (SPEC P10, D3): the base
 tools below are present for every run, and a profile at or above
-``search`` adds ``search_reference``. Profile-added definitions are
-appended AFTER the base ones, so the base surface's serialization — and
-therefore ``session_start.tools_hash`` for a profile that adds nothing —
-is unchanged from 0.4.0 at the same harness pin.
+``search`` adds ``search_reference``, and from 0.8.0 a profile at or
+above ``shell`` adds ``shell`` (a command in the run's environment
+container, SPEC D8). Profile-added definitions are appended AFTER the base
+ones, so the base surface's serialization — and therefore
+``session_start.tools_hash`` for a profile that adds nothing — is
+unchanged from 0.4.0 at the same harness pin.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -23,6 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from kami_agent.adapters.base import ToolDef
+from kami_agent.docker_api import DockerError
+from kami_agent.environment import (
+    DEFAULT_SHELL_TIMEOUT_S,
+    Environment,
+    ShellResult,
+    clamp_shell_timeout,
+)
 from kami_agent.journal import JOURNAL_ROOT
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.sandbox import SandboxError, resolve_path
@@ -46,6 +56,15 @@ DEFAULT_WAIT_MAX_SECONDS = 300.0
 # to the asset by a unit test, exactly as the wake bounds above are (I5).
 PLAN_FILE_MAX_BYTES = 8192
 
+# The session-start file index's bound (SPEC P1 step 11). From 0.8.0 the
+# workspace is also the home of a persistent environment, and a home
+# accumulates what an index should not carry into every session — a
+# Python venv alone is hundreds of files. Hidden entries and these
+# directories are left out; past the cap one line says how many more there
+# are. The workspace_list TOOL is not bounded: it lists everything.
+FILE_INDEX_MAX_ENTRIES = 200
+FILE_INDEX_SKIPPED_DIRS = frozenset({"__pycache__", "node_modules", ".venv", "venv"})
+
 # --- scaffold profiles (SPEC D3) ----------------------------------------------
 #
 # The knowledge-delivery ladder, cumulative and in order: each profile is
@@ -55,11 +74,18 @@ PLAN_FILE_MAX_BYTES = 8192
 # `pushed` adds nothing agent-side — its rung is result enrichment behind
 # the lens's and harness's own runtime flags — but it sits above `search`,
 # so it carries the search tool like every profile above that rung.
+#
+# `shell` and `shell_keeper` (0.8.0) are CAPABILITY rungs — they add a
+# channel, not documentation — measured against `planning`. `shell` adds
+# the shell tool and its appendix; `shell_keeper` adds a keeper reachable
+# from that shell and its appendix, and no tool of its own.
 PROFILE_CONTROL = "control"
 PROFILE_ORIENTATION = "orientation"
 PROFILE_SEARCH = "search"
 PROFILE_PUSHED = "pushed"
 PROFILE_PLANNING = "planning"
+PROFILE_SHELL = "shell"
+PROFILE_SHELL_KEEPER = "shell_keeper"
 
 PROFILES: tuple[str, ...] = (
     PROFILE_CONTROL,
@@ -67,6 +93,8 @@ PROFILES: tuple[str, ...] = (
     PROFILE_SEARCH,
     PROFILE_PUSHED,
     PROFILE_PLANNING,
+    PROFILE_SHELL,
+    PROFILE_SHELL_KEEPER,
 )
 
 DEFAULT_PROFILE = PROFILE_CONTROL
@@ -201,11 +229,40 @@ SEARCH_TOOL_DEF = ToolDef(
     },
 )
 
+# Added by profiles at or above `shell` (SPEC P10, D8): one command in the
+# run's persistent environment container. Mechanism only — what runs where,
+# what persists, that output is cut and the timeout clamped — and frozen
+# byte-exact: the description is part of what the shell arms are measured
+# on.
+SHELL_TOOL_DEF = ToolDef(
+    name="shell",
+    description=(
+        "Run a bash command in your environment. The working directory is the "
+        "workspace; files, installed state and background processes persist "
+        "between calls and sessions until the run ends. Output is truncated past "
+        "a size limit. A timeout in seconds bounds the foreground command; values "
+        "outside the allowed range are clamped."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "timeout_s": {"type": "number"},
+        },
+        "required": ["command"],
+    },
+)
+
 # Every tool any profile can add. The harness/scaffold name-collision
 # check runs against the UNION (base + all profile-added), so a mis-pinned
 # harness is refused identically on every arm rather than only on the arms
-# whose profile happens to carry the name.
-PROFILE_TOOL_DEFS: dict[str, list[ToolDef]] = {PROFILE_SEARCH: [SEARCH_TOOL_DEF]}
+# whose profile happens to carry the name. `shell_keeper` adds no tool: the
+# keeper is reached through the shell, so its surface — and tools_hash —
+# equal `shell`'s.
+PROFILE_TOOL_DEFS: dict[str, list[ToolDef]] = {
+    PROFILE_SEARCH: [SEARCH_TOOL_DEF],
+    PROFILE_SHELL: [SHELL_TOOL_DEF],
+}
 
 ALL_SCAFFOLD_TOOL_NAMES = SCAFFOLD_TOOL_NAMES | {
     tool.name for defs in PROFILE_TOOL_DEFS.values() for tool in defs
@@ -260,6 +317,10 @@ class ScaffoldTools:
         wake_min_minutes: float = DEFAULT_WAKE_MIN_MINUTES,
         wake_max_minutes: float = DEFAULT_WAKE_MAX_MINUTES,
         wait_max_seconds: float = DEFAULT_WAIT_MAX_SECONDS,
+        environment: Environment | None = None,
+        shell_timeout_s: float = DEFAULT_SHELL_TIMEOUT_S,
+        tool_result_max_bytes: int = 65536,
+        workspace_owner: tuple[int, int] | None = None,
         budget_visible: bool = False,
         budget_remaining_usd: float | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -275,6 +336,15 @@ class ScaffoldTools:
         self.wake_min_minutes = wake_min_minutes
         self.wake_max_minutes = wake_max_minutes
         self.wait_max_seconds = wait_max_seconds
+        # The run's environment container (D8), on the shell rungs only.
+        self.environment = environment
+        self.shell_timeout_s = shell_timeout_s
+        self.tool_result_max_bytes = tool_result_max_bytes
+        # Who owns what workspace_write creates, when the environment's user
+        # (uid 1000) must be able to change it from its shell: the scaffold
+        # runs as root in its container, and a root-owned file in a shared
+        # directory is read-only to everyone else.
+        self.workspace_owner = workspace_owner
         # Mechanism for a future budget-visible configuration; pinned False —
         # enabling it is a deliberate code change, not a config flip (X10, I1).
         self.budget_visible = budget_visible
@@ -308,6 +378,11 @@ class ScaffoldTools:
         # reason and by the same mechanism (P9): waiting must be
         # analyzable, and only the tool knows what it was asked for.
         self.last_wait: tuple[float, float] | None = None
+        # The record of the last shell call (P9), and the call_seq its
+        # tool_call row will carry — set by the loop before dispatch, so the
+        # call's log file is named by the row that records it.
+        self.last_shell: ShellResult | None = None
+        self.shell_call_seq = 0
 
     def execute(self, name: str, args: dict[str, Any]) -> str:
         if name not in self.tool_names:
@@ -338,10 +413,12 @@ class ScaffoldTools:
                 f"({projected} of {self.workspace_quota_bytes} bytes)"
             )
         try:
+            created = _missing_parents(resolved.parent, self.workspace_root.resolve())
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_bytes(data)
         except OSError as exc:
             raise ToolError(f"cannot write {path!r}: {exc.strerror or exc}") from exc
+        self._give_to_owner([*created, resolved])
         rel = self._rel(resolved)
         self._emit(
             "workspace_write",
@@ -403,6 +480,33 @@ class ScaffoldTools:
             {"path": rel, "workspace_total_bytes": self.workspace_bytes_used()},
         )
         return f"Deleted {rel}."
+
+    def shell(self, command: str, timeout_s: float | None = None) -> str:
+        """One command in the run's environment container (profiles ≥ shell).
+
+        A command that ran is a result, whatever its exit code — that is
+        the agent's command speaking, so it never advances the error
+        counter. A docker failure (no container, exec refused) is a tool
+        error carrying the daemon's own words.
+        """
+        try:
+            timeout = clamp_shell_timeout(timeout_s, self.shell_timeout_s)
+        except (TypeError, ValueError) as exc:
+            raise ToolError("timeout_s must be a finite number") from exc
+        if self.environment is None:
+            raise ToolError("the command could not be run: no environment is configured")
+        try:
+            result = self.environment.shell(
+                str(command),
+                timeout,
+                session=self.session_number,
+                call_seq=self.shell_call_seq,
+                result_max_bytes=self.tool_result_max_bytes,
+            )
+        except DockerError as exc:
+            raise ToolError(f"the command could not be run in the environment: {exc}") from exc
+        self.last_shell = result
+        return result.text
 
     def search_reference(self, query: str, k: int | None = None) -> str:
         """Top-k reference passages for a query (profiles ≥ search).
@@ -485,7 +589,45 @@ class ScaffoldTools:
     # --- helpers -------------------------------------------------------------
 
     def workspace_bytes_used(self) -> int:
-        return sum(f.stat().st_size for f in self.workspace_root.rglob("*") if f.is_file())
+        return workspace_bytes(self.workspace_root)
+
+    def file_index(self) -> str:
+        """The session-start file index (SPEC P1 step 11), bounded from 0.8.0.
+
+        The ``workspace_list`` listing, with two differences that keep a
+        persistent home from flooding every session's prompt: entries whose
+        name begins with ``.`` and the directories ``__pycache__``,
+        ``node_modules``, ``.venv`` and ``venv`` are left out, and past
+        ``FILE_INDEX_MAX_ENTRIES`` one line says how many more there are.
+        The journal line and the reference summary follow, as before.
+        """
+        files = [
+            p
+            for p in _regular_files(self.workspace_root)
+            if not _index_skips(p.relative_to(self.workspace_root))
+        ]
+        lines = [
+            f"workspace/{p.relative_to(self.workspace_root)} {p.stat().st_size}"
+            for p in files[:FILE_INDEX_MAX_ENTRIES]
+        ]
+        if len(files) > FILE_INDEX_MAX_ENTRIES:
+            lines.append(f"… and {len(files) - FILE_INDEX_MAX_ENTRIES} more entries")
+        if not lines:
+            lines = ["workspace/ (empty)"]
+        lines.extend(self._journal_lines())
+        lines.append(self._reference_summary())
+        return "\n".join(lines)
+
+    def _give_to_owner(self, paths: list[Path]) -> None:
+        """Best-effort chown of what workspace_write created (see __init__)."""
+        if self.workspace_owner is None:
+            return
+        uid, gid = self.workspace_owner
+        for path in paths:
+            try:
+                os.chown(path, uid, gid)
+            except OSError:
+                pass
 
     def _rel(self, resolved: Path) -> str:
         return str(resolved.relative_to(self.run_dir.resolve()))
@@ -493,8 +635,7 @@ class ScaffoldTools:
     def _tree_lines(self, root: Path, prefix: str) -> list[str]:
         if not root.is_dir():
             return []
-        files = sorted(p for p in root.rglob("*") if p.is_file())
-        return [f"{prefix}/{p.relative_to(root)} {p.stat().st_size}" for p in files]
+        return [f"{prefix}/{p.relative_to(root)} {p.stat().st_size}" for p in _regular_files(root)]
 
     def _journal_lines(self) -> list[str]:
         lines = self._tree_lines(self.journal_root, JOURNAL_ROOT)
@@ -523,3 +664,43 @@ class ScaffoldTools:
         files = [p for p in self.reference_root.rglob("*") if p.is_file()]
         total = sum(p.stat().st_size for p in files)
         return f"reference/ {len(files)} files, {total} bytes, read-only"
+
+
+def _regular_files(root: Path) -> list[Path]:
+    """Every regular file under ``root``, sorted, never through a symlink.
+
+    From 0.8.0 the agent's own shell can create symlinks in the
+    workspace, and a symlink to a file outside it — a run-directory
+    internal, say — would otherwise be listed with the TARGET's size and
+    counted in the workspace's bytes. Neither the listing nor the sum
+    follows one; the read tools already refuse to (P11).
+    """
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        for name in filenames:
+            path = Path(dirpath) / name
+            if not path.is_symlink() and path.is_file():
+                found.append(path)
+    return sorted(found)
+
+
+def workspace_bytes(root: Path) -> int:
+    """Bytes of every regular file under ``root``, never through a symlink."""
+    return sum(p.stat().st_size for p in _regular_files(root))
+
+
+def _index_skips(rel: Path) -> bool:
+    return any(part.startswith(".") or part in FILE_INDEX_SKIPPED_DIRS for part in rel.parts)
+
+
+def _missing_parents(parent: Path, root: Path) -> list[Path]:
+    """The directories ``mkdir(parents=True)`` is about to create, outermost first."""
+    missing: list[Path] = []
+    current = parent
+    while current != root and not current.exists() and root in current.parents:
+        missing.append(current)
+        current = current.parent
+    return list(reversed(missing))

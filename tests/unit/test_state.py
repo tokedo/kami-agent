@@ -126,4 +126,6 @@ def test_saved_file_is_plain_json(tmp_path):
         "next_wake_at",
         "run_status",
         "first_session_at",
+        "keeper_cursor",
+        "keeper_open",
     }

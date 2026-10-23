@@ -62,8 +62,17 @@ def manifest(**overrides):
 # --- the ladder ---------------------------------------------------------------
 
 
-def test_the_ladder_is_the_five_rungs_in_order():
-    assert PROFILES == ("control", "orientation", "search", "pushed", "planning")
+def test_the_ladder_is_the_seven_rungs_in_order():
+    """Five knowledge rungs, then the two capability rungs of 0.8.0."""
+    assert PROFILES == (
+        "control",
+        "orientation",
+        "search",
+        "pushed",
+        "planning",
+        "shell",
+        "shell_keeper",
+    )
 
 
 def test_profiles_are_cumulative():
@@ -82,7 +91,10 @@ def test_absent_key_is_control(tmp_path):
 
 @pytest.mark.parametrize("profile", PROFILES)
 def test_every_rung_is_accepted(tmp_path, profile):
-    config = cli.build_run_config(manifest(scaffold_profile=profile), tmp_path)
+    # The shell rungs also name the container their shell runs in (D8).
+    config = cli.build_run_config(
+        manifest(scaffold_profile=profile, environment={"container": "kami-env"}), tmp_path
+    )
     assert config.scaffold_profile == profile
 
 
@@ -108,6 +120,8 @@ def test_the_example_manifest_pins_a_valid_rung():
         (PROFILE_SEARCH, BASE_NAMES | {"search_reference"}),
         (PROFILE_PUSHED, BASE_NAMES | {"search_reference"}),
         (PROFILE_PLANNING, BASE_NAMES | {"search_reference"}),
+        ("shell", BASE_NAMES | {"search_reference", "shell"}),
+        ("shell_keeper", BASE_NAMES | {"search_reference", "shell"}),
     ],
 )
 def test_the_surface_per_profile(profile, expected):
@@ -141,7 +155,7 @@ def test_a_profile_that_adds_a_tool_has_its_own_hash_by_design():
 
 def test_the_collision_check_covers_every_profiles_names():
     """A mis-pinned harness must be refused identically on every arm."""
-    assert ALL_SCAFFOLD_TOOL_NAMES == BASE_NAMES | {"search_reference"}
+    assert ALL_SCAFFOLD_TOOL_NAMES == BASE_NAMES | {"search_reference", "shell"}
     assert scaffold_tool_names(PROFILE_CONTROL) < ALL_SCAFFOLD_TOOL_NAMES
 
 
@@ -196,6 +210,8 @@ def materialize(run_dir, *, skip=()):
         (PROFILE_SEARCH, 2),
         (PROFILE_PUSHED, 2),
         (PROFILE_PLANNING, 3),
+        ("shell", 4),
+        ("shell_keeper", 5),
     ],
 )
 def test_the_system_prompt_gains_one_appendix_per_rung(tmp_path, profile, parts):
@@ -206,8 +222,12 @@ def test_the_system_prompt_gains_one_appendix_per_rung(tmp_path, profile, parts)
     assert loaded[0].startswith("You are an autonomous agent in Kamigotchi")
     if parts >= 2:
         assert loaded[1].startswith("You own kamis (creatures).")
-    if parts == 3:
+    if parts >= 3:
         assert loaded[2].startswith("The file workspace/plan.md")
+    if parts >= 4:
+        assert loaded[3].startswith("The shell tool runs a bash command")
+    if parts == 5:
+        assert loaded[4].startswith("A keeper daemon is reachable")
 
 
 def test_the_gas_sentence_is_in_every_profiles_prompt(tmp_path):

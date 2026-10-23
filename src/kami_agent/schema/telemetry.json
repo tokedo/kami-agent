@@ -3,7 +3,7 @@
   "$id": "https://raw.githubusercontent.com/tokedo/kami-agent/main/schema/telemetry.json",
   "title": "kami-agent telemetry event (SPEC P9)",
   "description": "One JSONL line in telemetry.jsonl. telemetry.jsonl is the source of truth for all accounting (SPEC P3); every event is flushed synchronously before the action it describes is considered complete.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "oneOf": [
     { "$ref": "#/$defs/run_start" },
     { "$ref": "#/$defs/session_start" },
@@ -15,7 +15,9 @@
     { "$ref": "#/$defs/schedule_next" },
     { "$ref": "#/$defs/session_end" },
     { "$ref": "#/$defs/run_complete" },
-    { "$ref": "#/$defs/session_refused" }
+    { "$ref": "#/$defs/session_refused" },
+    { "$ref": "#/$defs/keeper_tx" },
+    { "$ref": "#/$defs/shell_state" }
   ],
   "$defs": {
     "common": {
@@ -43,7 +45,11 @@
         "agent_sha": { "type": "string" },
         "gdd_sha": { "type": "string" },
         "harness_tools": { "type": "array", "items": { "type": "string" } },
-        "price_table": { "type": "object" }
+        "price_table": { "type": "object" },
+        "keeper_sha": {
+          "type": "string",
+          "description": "The manifest's pins.keeper_sha (schema 0.8.0): the kami-keeper commit the shell_keeper rung runs beside, recorded like the other pins and checked once, at init, against the keeper container's image reference (SPEC D8). Empty string on every rung below shell_keeper, which has no keeper. Absent in streams written before 0.8.0"
+        }
       },
       "required": [
         "manifest_hash",
@@ -68,8 +74,8 @@
           "description": "The SCAFFOLD's sha256:-prefixed fingerprint of the surface presented to the model (harness tools + scaffold tools). The harness publishes its own bare-hex hash of its own registry over a different serialization; the two values are different by construction and must never be equated (SPEC D1)"
         },
         "scaffold_profile": {
-          "enum": ["control", "orientation", "search", "pushed", "planning"],
-          "description": "The knowledge-delivery rung this run's scaffold is, from the manifest (SPEC D3, P10, P13). Cumulative: each value is everything to its left plus its own rung — control (the base scaffold plus session-start gas balances), orientation (+ the pinned core-loop paragraph), search (+ search_reference), pushed (+ lens/harness result enrichment, which is THEIR runtime flags: nothing changes agent-side beyond this recorded value), planning (+ the plan-file appendix and its session-start injection). It is why tools_hash above differs between arms of one family: a profile at or above search carries one more scaffold tool BY DESIGN, while the harness's own registry hash is identical across every arm. Closed enum, unlike presentation_mode, because this set is the scaffold's own. Present from schema 0.5.0 on; absence means a stream written before it, i.e. the control surface"
+          "enum": ["control", "orientation", "search", "pushed", "planning", "shell", "shell_keeper"],
+          "description": "The rung this run's scaffold is, from the manifest (SPEC D3, P10, P13). Cumulative: each value is everything to its left plus its own rung — control (the base scaffold plus session-start gas balances), orientation (+ the pinned core-loop paragraph), search (+ search_reference), pushed (+ lens/harness result enrichment, which is THEIR runtime flags: nothing changes agent-side beyond this recorded value), planning (+ the plan-file appendix and its session-start injection), shell (schema 0.8.0: + the shell tool, a bash command in the run's own environment container, and its appendix), shell_keeper (schema 0.8.0: + a keeper daemon reachable from that shell, and its appendix; no tool of its own). The first five are knowledge rungs — they vary how documentation reaches the agent; shell and shell_keeper are CAPABILITY rungs — they add a channel, not documentation — measured against planning. It is why tools_hash above differs between arms of one family: a profile at or above search carries one more scaffold tool BY DESIGN, and one at or above shell one more again (shell and shell_keeper hash alike), while the harness's own registry hash is identical across every arm. Closed enum, unlike presentation_mode, because this set is the scaffold's own. Present from schema 0.5.0 on; absence means a stream written before it, i.e. the control surface"
         },
         "presentation_mode": {
           "type": "string",
@@ -89,7 +95,7 @@
         },
         "lens_default_operator": {
           "type": "string",
-          "description": "The account index the serving lens daemon fills in for an operator-argument query when the caller sends none, from the same status query (SPEC D7). The roster brief depends on it being set, and until provisioning sets it the brief degrades visibly every session; recording it makes 'the brief failed because the daemon had no default operator' readable from the stream instead of inferrable from the error text. Absent when the daemon has none configured"
+          "description": "The account index the serving lens daemon fills in for an operator-argument query when the caller sends none, from the same status query (SPEC D7), verbatim. From kami-harness 4.4.0 the session-start roster brief does not depend on it: the harness names the run's own account (its account labelled main) on a read called with no account, so a brief that fails early in a run says no account is registered, whatever this field holds. It is still recorded because it is part of which daemon configuration served the session — a harness with no main label, or one before 4.4.0, still reads through it — and because a direct daemon query (init's lens check) answers for it. Absent when the daemon has none configured"
         },
         "harness_tools_hash": {
           "type": "string",
@@ -109,6 +115,14 @@
           "type": "integer",
           "minimum": 1,
           "description": "Length in characters (Unicode code points) of the same injected standing text, the unit every other prompt-size term is quoted in (SPEC D1 cap arithmetic). Present and absent together with harness_standing_text_sha256"
+        },
+        "keeper_version": {
+          "type": "string",
+          "description": "shell_keeper only (schema 0.8.0): the keeper daemon's meta.keeperVersion, read by the scaffold over the keeper's socket before this event (SPEC D8). Recorded, never asserted. Absent on every other rung, and when the keeper did not answer"
+        },
+        "environment_image": {
+          "type": "string",
+          "description": "shell rungs only (schema 0.8.0): the image reference of the run's environment container, from the docker API's inspect of it before this event (SPEC D8) — which build the agent's commands ran in this session. Absent below the shell rungs, and when the docker API could not be read"
         }
       },
       "required": ["trigger", "budget_remaining_usd", "wallclock_elapsed_s", "tools_hash"],
@@ -237,12 +251,12 @@
         "event": { "const": "tool_call" },
         "tool": { "type": "string" },
         "source": {
-          "enum": ["harness", "scaffold", "lens"],
-          "description": "Which layer owns the thing that was called. harness: a tool on the pinned MCP surface. scaffold: a tool this scaffold implements, and also any unknown tool name, since the scaffold layer is what rejects those (SPEC X15). lens: the world-state daemon, queried directly by the scaffold over its own socket — neither of the other two, because the harness does not own the call and the scaffold does not own the answer. The lens value exists from schema 0.4.0; a stream written before it can only carry the first two"
+          "enum": ["harness", "scaffold", "lens", "keeper"],
+          "description": "Which layer owns the thing that was called. harness: a tool on the pinned MCP surface. scaffold: a tool this scaffold implements (the shell tool included), and also any unknown tool name, since the scaffold layer is what rejects those (SPEC X15). lens: the world-state daemon, queried directly by the scaffold over its own socket — neither of the other two, because the harness does not own the call and the scaffold does not own the answer. keeper (schema 0.8.0): the keeper daemon, called directly by the scaffold over its socket — the two rows it writes at run_complete on shell_keeper, tool keeper_stop_all then keeper_revoke, both initiator scaffold. The lens value exists from schema 0.4.0; a stream written before it can only carry the first two"
         },
         "initiator": {
-          "enum": ["model", "scaffold"],
-          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — the session-start injections (SPEC P1.12), issued before the first model call and injected as tool results. From schema 0.5.0 there are up to THREE of them per session, so initiator=scaffold is no longer a synonym for the status brief and must be split on `tool`: the roster brief (source=lens), the wallets' gas balances (source=harness, the balance tool), and on the planning profile the plan-file read (source=scaffold, workspace_read of plan.md). Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
+          "enum": ["model", "scaffold", "keeper"],
+          "description": "Who asked for the call, as distinct from source, which names the layer that owns the tool. model: an intent the agent returned. scaffold: a call the scaffold made on its own — the session-start injections (SPEC P1.12), issued before the first model call and injected as tool results. From schema 0.5.0 there are up to THREE of them per session, so initiator=scaffold is no longer a synonym for the status brief and must be split on `tool`: the roster brief (source=lens), the wallets' gas balances (source=harness, the balance tool), and on the planning profile the plan-file read (source=scaffold, workspace_read of plan.md). Analysis of agent behaviour must exclude scaffold-initiated calls: they consume no session_tool_cap, never advance the consecutive-error counter, and never feed the repetition breaker. From schema 0.8.0 scaffold also marks the two keeper rows at run_complete (source keeper). keeper (schema 0.8.0) is reserved for analysis joins and never emitted on a tool_call: what the keeper itself signs is a keeper_tx event. Optional here so streams written under schema 0.3.0 and earlier still validate; emitted on every tool_call from 0.3.1 on, so absence in a 0.3.1+ stream would itself be a defect"
         },
         "call_seq": {
           "type": "integer",
@@ -302,6 +316,38 @@
           "type": "integer",
           "minimum": 0,
           "description": "search_reference calls only: how many passages the search returned (0 to k). Zero means the query matched nothing in the reference tree, or the tree holds no indexable file at all — the two are distinguished by the result body, not here. Present from schema 0.5.0"
+        },
+        "exit_code": {
+          "type": ["integer", "null"],
+          "description": "shell rows only (schema 0.8.0): the command's exit code as the docker API reported it, null when it reported none. 124 or 137 at or past the call's timeout is the timeout wrapper's (timed_out). A non-zero exit is the agent's command speaking, NOT a tool error: ok stays true and the consecutive-error counter is untouched (SPEC P10). Absent when docker could not run the command at all — that row is ok false with error"
+        },
+        "timed_out": {
+          "type": "boolean",
+          "description": "shell rows only (schema 0.8.0): the timeout wrapper fired — exit 124 or 137 at or past the clamped timeout. What the command had detached (nohup, setsid) keeps running; that is the environment's persistence, not a hole in the timeout"
+        },
+        "stdout_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "shell rows only (schema 0.8.0): the bytes the command wrote to stdout, in full. The result the model saw carries at most half of tool_result_max_bytes of it (less a fixed reserve for its header), with the standard truncation marker"
+        },
+        "stderr_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "shell rows only (schema 0.8.0): the same for stderr"
+        },
+        "shell_log": {
+          "type": "string",
+          "description": "shell rows only (schema 0.8.0): run-dir-relative path of this call's full log, shell/<session:03d>-<call_seq:04d>.log — the command, how it ended, and both streams (each kept up to a fixed bound, and the log says where it cut). A run-dir internal: never mounted into the environment, pulled at close-out"
+        },
+        "keeper_books_stopped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "keeper_stop_all rows only (schema 0.8.0): how many books the keeper's stop --all for the run's account stopped at run_complete. Absent when the keeper did not answer (ok false)"
+        },
+        "keeper_grants_after": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "keeper_revoke rows only (schema 0.8.0): how many grants the keeper still held after the revoke, from its own status answer — expected 0. Absent when the revoke or that status read got no answer"
         },
         "duration_ms": { "type": "number", "minimum": 0 },
         "ok": {
@@ -452,6 +498,15 @@
             "overspend_usd"
           ],
           "additionalProperties": false
+        },
+        "environment_stopped": {
+          "type": "boolean",
+          "description": "shell rungs only (schema 0.8.0): the run's environment container was stopped before this event (docker stop with a grace period), so no process the agent left running outlives the run. false when the docker API refused or could not be reached. Absent below the shell rungs"
+        },
+        "keeper_grants_after": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "shell_keeper only (schema 0.8.0): the grants the keeper still held after the scaffold's revoke at the end of the run — expected 0; the same value as the keeper_revoke row's. Absent when the keeper did not answer"
         }
       },
       "required": ["reason", "totals"],
@@ -482,6 +537,59 @@
         }
       },
       "required": ["reason", "message", "trigger"],
+      "unevaluatedProperties": false
+    },
+    "keeper_tx": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "description": "One transaction the keeper daemon signed for the run's account (schema 0.8.0, shell_keeper only, SPEC D8, P9): one per final receipt row of the keeper's ledger — a tx row at stage receipt whose status is not unconfirmed — read by the scaffold over the keeper's socket at every session start and at run_complete, deduplicated by hash across the whole stream. The keeper signs with the run's own operator key, so this gas is the agent's: analysis of agent behaviour EXCLUDES keeper_tx from the tool counts and INCLUDES it in the gas sums. session is the session whose start (or the run_complete) read it, not when it was signed — ledger_ts says that. Never shown to the agent",
+      "properties": {
+        "event": { "const": "keeper_tx" },
+        "book": { "type": "string", "description": "The keeper book whose ledger holds the row" },
+        "tx_hash": { "type": "string", "description": "The transaction's hash, verbatim from the ledger row's tx.txHash" },
+        "action": { "type": "string", "description": "The game system the transaction called, verbatim from the ledger row's tx.system (e.g. system.harvest.collect)" },
+        "status": { "type": "string", "description": "The ledger row's tx.status, verbatim: success, reverted, or not_sent (closed without a receipt; that hash spent no gas)" },
+        "initiator": { "const": "keeper" },
+        "source": { "const": "keeper" },
+        "block": { "type": "integer", "minimum": 0, "description": "The block the receipt was mined in (tx.block)" },
+        "nonce": { "type": "integer", "minimum": 0, "description": "The operator nonce it used (tx.nonce)" },
+        "gas_used": { "type": "integer", "minimum": 0, "description": "Gas the receipt reports (tx.gasUsed)" },
+        "ledger_ts": { "type": "string", "description": "When the keeper wrote the receipt row (the row's own `at`, UTC)" },
+        "receipt_stage": { "type": "string", "description": "The row's tx.stage, verbatim (receipt)" }
+      },
+      "required": ["book", "tx_hash", "action", "status", "initiator", "source"],
+      "unevaluatedProperties": false
+    },
+    "shell_state": {
+      "allOf": [{ "$ref": "#/$defs/common" }],
+      "description": "The run's environment container at one boundary (schema 0.8.0, shell rungs only, SPEC D8, P9): at session start (before the injections), at session end (before session_end), and at run_complete (after the container was stopped). The scaffold's record of the environment — what the agent left running between sessions is the record of 'set and forget' — and never shown to the agent",
+      "properties": {
+        "event": { "const": "shell_state" },
+        "phase": { "enum": ["session_start", "session_end", "run_complete"] },
+        "container": { "type": "string", "description": "The container's name, from the manifest" },
+        "running": { "type": "boolean", "description": "Running after this boundary's inspect (and start, when the scaffold started it). false also when the docker API could not be read: nothing confirmed it ran" },
+        "restarted": { "type": "boolean", "description": "The container's RestartCount moved since the last snapshot that read one, or the scaffold itself started it here: files survived, processes the agent left did not" },
+        "process_count": { "type": "integer", "minimum": 0, "description": "Processes in the container's process table (the docker API's top), its init and idle process included; 0 when it is not running" },
+        "workspace_bytes": { "type": "integer", "minimum": 0, "description": "Bytes of the regular files under the run's workspace/, the environment's /workspace — what the agent's shell wrote included, which the workspace quota does not bound" },
+        "processes": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "properties": {
+              "pid": { "type": "integer" },
+              "comm": { "type": "string" },
+              "args": { "type": "string", "maxLength": 200 }
+            },
+            "required": ["pid", "comm", "args"],
+            "additionalProperties": false
+          },
+          "description": "The first 50 rows of the process table (host pids), args cut at 200 characters"
+        },
+        "restart_count": { "type": "integer", "minimum": 0, "description": "The container's RestartCount as inspect reported it" },
+        "lens_socket_ok": { "type": "boolean", "description": "A probe from INSIDE the environment, as the agent's user, got an answer from the world-state daemon through its relayed socket (kami-lens health printed a daemon state). Absent at run_complete" },
+        "keeper_socket_ok": { "type": "boolean", "description": "shell_keeper only: the same for the keeper (keeper status returned a frame). Absent elsewhere and at run_complete" }
+      },
+      "required": ["phase", "container", "running", "restarted", "process_count", "workspace_bytes"],
       "unevaluatedProperties": false
     }
   }

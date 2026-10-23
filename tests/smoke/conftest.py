@@ -27,8 +27,8 @@ KAMI_SMOKE_REASONING_EFFORT, KAMI_SMOKE_MANIFEST):
     keeps sending ``max_tokens=4096`` and nothing else. To validate a
     manifest before a launch, point the tier at the manifest itself::
 
-        KAMI_SMOKE_MANIFEST=manifests/006-sonnet5-control.yaml \
-        SMOKE_ANTHROPIC_MODEL=claude-sonnet-5 uv run pytest tests/smoke -q -s
+        KAMI_SMOKE_MANIFEST=manifests/example.yaml \
+        SMOKE_ANTHROPIC_MODEL=claude-haiku-4-5 uv run pytest tests/smoke -q -s
 
     which reads that file's frozen ``params:`` block and sends exactly
     it. The three individual knobs override the manifest per field, so a
@@ -36,9 +36,16 @@ KAMI_SMOKE_REASONING_EFFORT, KAMI_SMOKE_MANIFEST):
     effective parameters are printed in the SMOKE summary line, so the
     log records what was actually sent rather than what was intended.
 
-    Note that the manifest also pins provider and model, which this tier
-    does not read: it is parametrized across all three providers, so the
-    model comes from SMOKE_<PROVIDER>_MODEL as it always has.
+    (``manifests/example.yaml`` is the template this repository ships; a
+    run's own frozen manifest is named the same way.) Note that the
+    manifest also pins provider and model, which this tier does not read:
+    it is parametrized across its providers, so the model comes from
+    SMOKE_<PROVIDER>_MODEL as it always has.
+
+OpenAI-compatible leg (0.8.0): ``openrouter`` runs the OpenAI adapter
+against OpenRouter's Chat Completions endpoint, and only when
+OPENROUTER_API_KEY is set (SMOKE_OPENROUTER_MODEL picks the model,
+SMOKE_OPENROUTER_BASE_URL the endpoint).
 """
 
 import os

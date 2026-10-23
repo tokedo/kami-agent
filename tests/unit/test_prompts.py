@@ -1,7 +1,8 @@
 """The frozen prompt assets (SPEC P13): exact content + leak discipline.
 
-Three strings ship for every run and two more are the profile appendices
-(P10, P13): each is a separate pinned file, frozen byte-exact here, so
+Three strings ship for every run and four more are the profile appendices
+(P10, P13) — two knowledge rungs' and, from 0.8.0, the two shell rungs':
+each is a separate pinned file, frozen byte-exact here, so
 what a rung showed the agent is an artifact rather than a string built at
 runtime. Any reword is deliberate and re-freezes its literal in the same
 commit.
@@ -14,7 +15,15 @@ import pytest
 
 PROMPTS = Path(__file__).parents[2] / "prompts"
 
-ASSET_NAMES = ("system.txt", "kickoff.txt", "continue.txt", "orientation.txt", "planning.txt")
+ASSET_NAMES = (
+    "system.txt",
+    "kickoff.txt",
+    "continue.txt",
+    "orientation.txt",
+    "planning.txt",
+    "shell.txt",
+    "shell_keeper.txt",
+)
 
 # The frozen wording, reviewed and approved. Any change is deliberate:
 # update this test in the same commit that re-freezes the string.
@@ -52,6 +61,18 @@ PLANNING = """\
 The file workspace/plan.md is where your goals and plan live. Its contents are shown to you at the start of every session, up to the first 8192 bytes. Keeping it current is up to you.
 """
 
+# Appendices for the two capability rungs (P13, 0.8.0): what the shell is,
+# where it works and what is installed; that a keeper is reachable from it
+# and where its documentation is. Mechanism only, scrubbed in
+# test_shell_rungs.py with the keeper's own policy-word list.
+SHELL = """\
+The shell tool runs a bash command in an environment of your own. Its working directory is /workspace, the same directory the workspace tools read and write; /reference holds the same documentation the workspace tools read, and /journal the same session journal. Files, installed state and background processes in the environment persist between calls and sessions until the run ends. The environment has no network and holds no wallet key. Installed: bash, coreutils, grep, sed, awk, jq, git, sqlite3, python3, node, less, nano, and the kami-lens command, whose --help documents the world-state reader it reaches.
+"""
+
+SHELL_KEEPER = """\
+A keeper daemon is reachable from the shell as the keeper command. keeper --help and keeper describe are its documentation. Once granted for this run's account, it signs with the account's operator key; a grant is made and removed through it.
+"""
+
 # I1: no budget, cost, tokens, compute limits, run duration, session caps,
 # forced truncation, or study existence. I3: no strategy hints, no vendor
 # idioms, no XML-tag formatting. Applied to every agent-visible string the
@@ -87,6 +108,8 @@ def test_profile_appendices_are_exactly_as_reviewed():
     """Each rung's appendix is frozen on the same terms as the base prompt."""
     assert (PROMPTS / "orientation.txt").read_text(encoding="utf-8") == ORIENTATION
     assert (PROMPTS / "planning.txt").read_text(encoding="utf-8") == PLANNING
+    assert (PROMPTS / "shell.txt").read_text(encoding="utf-8") == SHELL
+    assert (PROMPTS / "shell_keeper.txt").read_text(encoding="utf-8") == SHELL_KEEPER
 
 
 def test_the_gas_sentence_states_the_resource_and_where_it_is_shown():
@@ -136,7 +159,7 @@ def test_packaged_prompts_match_repo_prompts():
 
 
 def test_init_materializes_every_asset():
-    """`init` writes all five, so a profile can never lack its appendix."""
+    """`init` writes all seven, so a profile can never lack its appendix."""
     from kami_agent.cli import PROMPT_NAMES
 
     assert set(PROMPT_NAMES) == set(ASSET_NAMES)

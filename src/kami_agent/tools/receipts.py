@@ -10,23 +10,34 @@ Nothing in this module changes what the agent sees. The message the
 harness produced is passed to the model verbatim (SPEC P2); this is a
 read-only observation of it for the operator-side event stream.
 
-Markers are the harness's own contract text, not incidental wording:
+The classifier keys on the harness's STABLE CLAUSES (from 0.8.0), not on
+any one sentence of its prose — the contract text of its SPEC P4:
 
-- ``PreTxValidationError.PREFIX`` — a fixed prefix the harness SPEC
-  states is always present, guaranteeing the transaction was never sent.
-- ``OnChainRevertError`` / ``TxUnconfirmedError`` — the two raised
-  post-broadcast terminal states, each with distinct fixed phrasing.
-- ``TxNotExecutedError`` (kami-harness 4.0.0) — its two subclasses,
-  ``TxNonceCollisionError`` and ``TxDroppedError``, report a broadcast
-  transaction the harness PROVED will never execute; both open with
-  ``transaction <hash> was NOT executed`` and say the hash spent no gas.
-  The same verdict on a per-leg row is ``status: "dropped"``.
+- every post-broadcast terminal state names its transaction in a clause
+  that opens ``transaction <hash>``: ``… landed on-chain in block N and
+  REVERTED`` (``OnChainRevertError``), ``… is UNCONFIRMED``
+  (``TxUnconfirmedError``), ``… was NOT executed``
+  (``TxNotExecutedError``: ``TxNonceCollisionError`` and
+  ``TxDroppedError``, kami-harness 4.0.0). The EARLIEST such clause in a
+  message is its outcome: the harness puts what it reports first and may
+  quote other transactions after it. From 5.0.0 a deposit whose approve
+  landed reports its own outcome after a lead naming the approve
+  (``the approve <hash> landed …; the deposit: transaction <hash> …``),
+  which the clause finds where it stands;
+- a refusal before signing says ``no transaction sent`` in its FIRST
+  clause (the text before the first ``": "``), the harness's
+  ``PreTxValidationError.PREFIX`` among others. Read in the first clause
+  only: a later quote of those words, or of a transaction clause inside a
+  refusal's detail, does not move the outcome. A refusal after an earlier
+  transaction of the same call landed (``RefusedAfterLandedError``, 4.7.0)
+  leads with what landed instead, and is therefore no single state;
 - ``BatchTxError`` — a multi-transaction call in which at least one item
   failed; its message itemizes every outcome, successes included.
 
 The MCP server wraps a raised tool exception as
-``Error executing tool <name>: <message>``, so markers are matched as
-substrings rather than anchored at position 0.
+``Error executing tool <name>: <message>``; the wrapper is stripped
+before the first clause is read, and the transaction clauses are found
+wherever they stand.
 
 An unrecognized message classifies as ``None`` (field omitted): most
 harness errors are not transaction outcomes at all, and inventing a
@@ -69,39 +80,56 @@ TERMINAL_STATES = (
     NOT_EXECUTED,
 )
 
-# Ordered: a BatchTxError message embeds per-item outcomes whose text can
-# contain any of the single-transaction markers, so it is tested first.
-_ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (BATCH_ERROR, ("Per-item outcomes:", "are final")),
-    # Before UNCONFIRMED on purpose: a nonce collision's text says it is
-    # "not an unconfirmed transaction".
-    (NOT_EXECUTED, ("was NOT executed", "spent no gas")),
-    (UNCONFIRMED, ("is UNCONFIRMED",)),
-    (REVERTED, ("landed on-chain in block", "REVERTED")),
-    (VALIDATION_REJECTED, ("validation failed; no transaction sent:",)),
+# A BatchTxError message embeds per-item outcomes whose text can contain
+# any of the single-transaction clauses, so it is recognized first.
+_BATCH_MARKERS = ("Per-item outcomes:", "are final")
+
+# The phrase a refusal before signing carries in its first clause.
+_NO_TRANSACTION_SENT = "no transaction sent"
+
+# The MCP server's wrapper around a raised tool exception.
+_MCP_WRAPPER = re.compile(r"^Error executing tool [^:\s]+: ")
+
+# The post-broadcast clauses, each naming its transaction first: the
+# harness's own contract phrasing (SPEC P4 of kami-harness). The hash is
+# group 1, so it is recoverable without parsing the rest of the prose.
+_TX_CLAUSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        REVERTED,
+        re.compile(r"transaction (0x[0-9a-fA-F]+) landed on-chain in block \d+ and REVERTED"),
+    ),
+    (UNCONFIRMED, re.compile(r"transaction (0x[0-9a-fA-F]+) is UNCONFIRMED")),
+    (NOT_EXECUTED, re.compile(r"transaction (0x[0-9a-fA-F]+) was NOT executed")),
 )
 
 
-# The transaction hash a raised terminal state names in its first clause.
-# The raised single-transaction states — reverted, unconfirmed, and from
-# 4.0.0 not executed — all open with "transaction <hash> ",
-# which is the harness's own contract phrasing (the same phrasing the
-# markers above match on), so the hash is recoverable without parsing the
-# rest of the prose. Anchored at the start of the clause rather than
-# matched anywhere, so a hash quoted later in a message — a batch message
-# itemizing several — is never mistaken for THE transaction: a batch has
-# no single hash, and inventing one would be worse than reporting none.
-_RAISED_TX_HASH = re.compile(
-    r"transaction (0x[0-9a-fA-F]+) (?:landed on-chain|is UNCONFIRMED|was NOT executed)"
-)
+def _first_clause(message: str) -> str:
+    """The message up to its first ``": "``, with the MCP wrapper removed."""
+    text = _MCP_WRAPPER.sub("", message, count=1)
+    return text.split(": ", 1)[0]
+
+
+def _earliest_tx_clause(message: str) -> tuple[str, str] | None:
+    """(state, hash) of the transaction clause that opens earliest, or None."""
+    found = [
+        (match.start(), state, match.group(1))
+        for state, pattern in _TX_CLAUSES
+        if (match := pattern.search(message)) is not None
+    ]
+    if not found:
+        return None
+    _, state, tx_hash = min(found)
+    return state, tx_hash
 
 
 def classify_error(message: str) -> str | None:
     """Terminal state of a failed harness tool call, or None if not a tx outcome."""
-    for state, markers in _ERROR_MARKERS:
-        if all(marker in message for marker in markers):
-            return state
-    return None
+    if all(marker in message for marker in _BATCH_MARKERS):
+        return BATCH_ERROR
+    if _NO_TRANSACTION_SENT in _first_clause(message):
+        return VALIDATION_REJECTED
+    clause = _earliest_tx_clause(message)
+    return clause[0] if clause is not None else None
 
 
 def tx_hash_from_error(message: str) -> str | None:
@@ -123,10 +151,10 @@ def tx_hash_from_error(message: str) -> str | None:
     validation rejections (nothing was ever broadcast, so there is no
     hash to report), and for anything unrecognized.
     """
-    if classify_error(message) == BATCH_ERROR:
+    if classify_error(message) in (BATCH_ERROR, VALIDATION_REJECTED, None):
         return None
-    match = _RAISED_TX_HASH.search(message)
-    return match.group(1) if match else None
+    clause = _earliest_tx_clause(message)
+    return clause[1] if clause is not None else None
 
 
 def error_shaped_payload(content: str) -> bool:

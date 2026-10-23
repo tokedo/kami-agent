@@ -1,0 +1,61 @@
+# kami-agent environment definition (SPEC D8) — the `shell` rung.
+# For `shell_keeper` add the override:
+#   docker compose -f compose.yaml -f compose.keeper.yaml up -d
+# Every ${VAR} is named in .env.example. Host layout (root-owned, 755):
+#   /srv/run (the run directory), /srv/keys (the keys file, 0600),
+#   /srv/lens (the lens daemon's data), /srv/keeper (the keeper's data),
+#   /srv/sockets/lens and /srv/sockets/keeper (the relay's sockets).
+name: kami-agent-run
+services:
+  lens:                      # kami-lens at the pin, built from its own Dockerfile
+    image: kami-lens:${LENS_SHA}
+    network_mode: host       # its egress is the host firewall's business
+    volumes: ["/srv/lens:/data"]
+    environment: {NODE_OPTIONS: "--max-old-space-size=8192"}
+    healthcheck: {test: ["CMD", "kami-lens", "health"], interval: 30s, timeout: 10s, retries: 40}
+    restart: unless-stopped
+  sockets:                   # the relay: the environment sees sockets, never the daemons' data
+    image: alpine/socat:1.8.1.3@sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842
+    entrypoint: ["/bin/sh", "-c"]   # the image's own entrypoint is socat
+    command:
+      - >-
+        exec socat UNIX-LISTEN:/srv/sockets/lens/kami-lens.sock,fork,mode=666,unlink-early
+        UNIX-CONNECT:/srv/lens/kami-lens.sock
+    volumes: ["/srv/lens:/srv/lens:ro", "/srv/sockets:/srv/sockets"]
+    depends_on: {lens: {condition: service_healthy}}
+    restart: unless-stopped
+  env:                       # the agent's machine (SPEC D8): no network, no key
+    image: kami-agent-env:${AGENT_VERSION}-${RUNG}
+    container_name: kami-env
+    network_mode: none
+    init: true
+    user: "1000:1000"
+    read_only: true
+    tmpfs: ["/tmp:size=256m,mode=1777"]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 1
+    volumes:
+      - /srv/run/workspace:/workspace
+      - /srv/run/reference:/reference:ro
+      - /srv/run/journal:/journal:ro
+      - /srv/sockets/lens:/srv/lens          # the relay's lens socket only
+    depends_on: [sockets]
+    restart: unless-stopped
+  agent:                     # the LOOP: scaffold + harness (stdio child) + the keys
+    image: kami-agent:${AGENT_VERSION}
+    network_mode: host       # the host firewall is the egress allowlist (SPEC I20)
+    volumes:
+      - /srv/run:/srv/run
+      - /srv/keys:/srv/keys
+      - /srv/lens:/srv/lens:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      KAMI_KEYS_FILE: /srv/keys/.env
+      KAMI_LENS_SOCKET: /srv/lens/kami-lens.sock
+      KAMI_ENV_CONTAINER: kami-env
+    # The periodic invoker (SPEC D4): one run-session per poll. After
+    # run_complete every poll answers already_complete and does nothing.
+    command: ["sh", "-c", "while :; do kami-agent run-session --run-dir /srv/run; sleep ${POLL_SECONDS:-300}; done"]
+    depends_on: [env]
+    restart: unless-stopped

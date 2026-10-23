@@ -55,6 +55,7 @@ from kami_agent.adapters.base import (
     ToolResultMessage,
     UserMessage,
 )
+from kami_agent.environment import DEFAULT_SHELL_TIMEOUT_S, KILL_GRACE_S
 from kami_agent.errorlog import ErrorLog
 from kami_agent.governor import PriceTable, cost_usd
 from kami_agent.journal import (
@@ -80,6 +81,7 @@ from kami_agent.tools.scaffold import (
     PLAN_FILE_MAX_BYTES,
     PROFILE_PLANNING,
     SEARCH_TOOL_DEF,
+    SHELL_TOOL_DEF,
     ScaffoldTools,
     profile_at_least,
 )
@@ -103,9 +105,13 @@ _FILE_TOOLS = frozenset({"workspace_write", "workspace_read", "workspace_list", 
 
 # Who issued a tool call (tool_call.initiator, SPEC P9). "model" is every
 # intent the agent returned; "scaffold" is a call the scaffold made on its
-# own — currently only the session-start status brief.
+# own — the session-start injections, and from 0.8.0 the keeper revoke at
+# run_complete. "keeper" (schema 0.8.0) is reserved for analysis joins: the
+# scaffold never emits a tool_call with it — the keeper's own acts are
+# keeper_tx events.
 INITIATOR_MODEL = "model"
 INITIATOR_SCAFFOLD = "scaffold"
+INITIATOR_KEEPER = "keeper"
 
 # Which layer owns the thing that was called (tool_call.source, SPEC P9).
 SOURCE_HARNESS = "harness"
@@ -116,6 +122,9 @@ SOURCE_SCAFFOLD = "scaffold"
 # validating, and it stays named here so a reader of those streams can
 # find out what it meant.
 SOURCE_LENS = "lens"
+# The keeper daemon (0.8.0), reached directly by the scaffold over its
+# socket: the two revoke rows at run_complete, and every keeper_tx event.
+SOURCE_KEEPER = "keeper"
 
 # Session-start status brief (SPEC P1.12). The compact roster: one line
 # per kami (index, state, [hp, hpTotal]) plus the room the account is
@@ -195,6 +204,12 @@ WAIT_TOOL = "wait"
 # catch a hung harness call.
 _WAIT_WATCHDOG_MARGIN_S = 5.0
 
+# The shell tool (P10) is exempt from tool_timeout_s on the same terms: it
+# is bounded by its own clamp plus the wrapper's kill grace, and this
+# margin covers docker's own round trips, never a second command.
+SHELL_TOOL = SHELL_TOOL_DEF.name
+_SHELL_WATCHDOG_MARGIN_S = 10.0
+
 _BACKOFF_BASE_S = 1.0
 _BACKOFF_MAX_S = 60.0
 
@@ -254,6 +269,7 @@ class LoopCaps:
     tool_timeout_s: float = 120.0
     tool_result_max_bytes: int = 65536
     wait_max_seconds: float = DEFAULT_WAIT_MAX_SECONDS
+    shell_timeout_s: float = DEFAULT_SHELL_TIMEOUT_S
     journal_max_bytes: int = DEFAULT_JOURNAL_MAX_BYTES
     repetition_identical_cap: int = DEFAULT_IDENTICAL_CAP
     repetition_window: int = DEFAULT_WINDOW
@@ -1036,9 +1052,16 @@ class AgentLoop:
             is_wait = intent.name == WAIT_TOOL
             if is_wait:
                 self._scaffold.last_wait = None
+            # And for the shell tool, which also needs to know the call_seq
+            # its row will carry: the call's log file is named by it (P10).
+            is_shell = intent.name == SHELL_TOOL
+            if is_shell:
+                self._scaffold.last_shell = None
+                self._scaffold.shell_call_seq = self._call_seq + 1
             outcome = self._execute_intent(intent)
             search = self._scaffold.last_search if is_search else None
             waited = self._scaffold.last_wait if is_wait else None
+            shell = self._scaffold.last_shell if is_shell else None
             messages.append(
                 ToolResultMessage(
                     tool_call_id=intent.id,
@@ -1066,6 +1089,7 @@ class AgentLoop:
                 hits=search[1] if search is not None else None,
                 wait_requested_s=waited[0] if waited is not None else None,
                 wait_actual_s=waited[1] if waited is not None else None,
+                shell=shell,
             )
             # Journal material (P15): the agent's OWN calls, and the
             # transaction evidence its results carried. Accumulated here
@@ -1099,7 +1123,7 @@ class AgentLoop:
                     if is_wait
                     else self._repetition.record(
                         intent.name,
-                        intent.args,
+                        _signature_args(intent),
                         error_or_revert=outcome["error_or_revert"],
                     )
                 )
@@ -1221,6 +1245,8 @@ class AgentLoop:
         """
         if name == WAIT_TOOL:
             return self._caps.wait_max_seconds + _WAIT_WATCHDOG_MARGIN_S
+        if name == SHELL_TOOL:
+            return self._caps.shell_timeout_s + KILL_GRACE_S + _SHELL_WATCHDOG_MARGIN_S
         return self._caps.tool_timeout_s
 
     def _run_with_timeout(
@@ -1291,6 +1317,7 @@ class AgentLoop:
         hits: int | None = None,
         wait_requested_s: float | None = None,
         wait_actual_s: float | None = None,
+        shell: Any = None,
     ) -> None:
         self._call_seq += 1
         fields: dict[str, Any] = {
@@ -1358,6 +1385,16 @@ class AgentLoop:
             fields["query"] = query
         if hits is not None:
             fields["hits"] = hits
+        # A shell call that ran (P10): how it ended and how much it said,
+        # and where the whole of it is — the result the model saw is capped
+        # per stream, the run-dir log is not. Absent when docker could not
+        # run the command at all (the row then carries `error`).
+        if shell is not None:
+            fields["exit_code"] = shell.exit_code
+            fields["timed_out"] = shell.timed_out
+            fields["stdout_bytes"] = shell.stdout_bytes
+            fields["stderr_bytes"] = shell.stderr_bytes
+            fields["shell_log"] = shell.log_rel
         self._tool_events += 1
         self._telemetry.emit("tool_call", session=self._session, **fields)
 
@@ -1408,6 +1445,18 @@ class AgentLoop:
             journal_tx_hashes=list(self._journal_tx_hashes),
             journal_roster=self._journal_roster,
         )
+
+
+def _signature_args(intent: ToolCall) -> dict[str, Any]:
+    """What the repetition breaker keys a call on (SPEC P5.1).
+
+    The arguments, except for the shell tool, whose signature is its
+    command text alone: the same command run again with another timeout
+    is the same command.
+    """
+    if intent.name == SHELL_TOOL:
+        return {"command": intent.args.get("command")}
+    return intent.args
 
 
 def _roster_provenance(content: str) -> tuple[bool | None, int | None, Any]:

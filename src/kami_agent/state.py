@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,15 @@ class RunState:
     next_wake_at: str | None = None
     run_status: str = RUN_ACTIVE
     first_session_at: str | None = None
+    # The keeper ledger cursor (shell_keeper, 0.8.0; keeper.LedgerCursor):
+    # the highest lens block read per book, and per book the hashes seen
+    # broadcast whose final receipt has not been read yet. Not folded from
+    # telemetry, and not accounting: it only saves re-reading each book
+    # whole. Losing it costs that one re-read and never a duplicate
+    # keeper_tx event, because the set of hashes already emitted IS folded
+    # from the stream (keeper_tx_hashes below).
+    keeper_cursor: dict[str, int] = field(default_factory=dict)
+    keeper_open: dict[str, list[str]] = field(default_factory=dict)
 
 
 def load_state(path: str | Path) -> RunState:
@@ -36,6 +45,46 @@ def load_state(path: str | Path) -> RunState:
     if not p.exists():
         return RunState()
     return RunState(**json.loads(p.read_text(encoding="utf-8")))
+
+
+def carry_keeper_cursor(state: RunState, path: str | Path) -> None:
+    """Copy the keeper cursor from the on-disk cache onto a freshly folded state.
+
+    Best-effort by design: an unreadable cache leaves the cursor empty,
+    which means one whole re-read of each book and nothing worse.
+    """
+    try:
+        cached = load_state(path)
+    except (OSError, ValueError, TypeError):
+        return
+    if isinstance(cached.keeper_cursor, dict):
+        state.keeper_cursor = {
+            str(k): v for k, v in cached.keeper_cursor.items() if isinstance(v, int)
+        }
+    if isinstance(cached.keeper_open, dict):
+        state.keeper_open = {
+            str(k): [h for h in v if isinstance(h, str)]
+            for k, v in cached.keeper_open.items()
+            if isinstance(v, list)
+        }
+
+
+def keeper_tx_hashes(events: Iterable[dict[str, Any]]) -> set[str]:
+    """Every transaction hash already recorded as a ``keeper_tx`` event (P9)."""
+    return {
+        e["tx_hash"]
+        for e in events
+        if e.get("event") == "keeper_tx" and isinstance(e.get("tx_hash"), str)
+    }
+
+
+def last_restart_count(events: Iterable[dict[str, Any]]) -> int | None:
+    """The environment's RestartCount at the last ``shell_state`` that read one."""
+    last: int | None = None
+    for e in events:
+        if e.get("event") == "shell_state" and isinstance(e.get("restart_count"), int):
+            last = e["restart_count"]
+    return last
 
 
 def save_state(state: RunState, path: str | Path) -> None:

@@ -1,0 +1,1 @@
+A keeper daemon is reachable from the shell as the keeper command. keeper --help and keeper describe are its documentation. Once granted for this run's account, it signs with the account's operator key; a grant is made and removed through it.
