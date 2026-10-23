@@ -24,7 +24,8 @@ GAME_DEFS = [
     ToolDef(name="lens_node", description="d", input_schema={"type": "object", "properties": {}})
 ]
 
-# The frozen texts (design sitting 2, ARTEFACTS A.1–A.3). Any change is a
+# The frozen texts (design sitting 2, ARTEFACTS A.1–A.3; A.1 amended to
+# name procps, which the environment image installs). Any change is a
 # re-freeze in the same commit, and a change to what the shell arms are
 # measured on.
 SHELL = (
@@ -33,9 +34,9 @@ SHELL = (
     "/reference holds the same documentation the workspace tools read, and /journal the "
     "same session journal. Files, installed state and background processes in the "
     "environment persist between calls and sessions until the run ends. The environment "
-    "has no network and holds no wallet key. Installed: bash, coreutils, grep, sed, awk, "
-    "jq, git, sqlite3, python3, node, less, nano, and the kami-lens command, whose --help "
-    "documents the world-state reader it reaches.\n"
+    "has no network and holds no wallet key. Installed: bash, coreutils, procps, grep, sed, "
+    "awk, jq, git, sqlite3, python3, node, less, nano, and the kami-lens command, whose "
+    "--help documents the world-state reader it reaches.\n"
 )
 SHELL_KEEPER = (
     "A keeper daemon is reachable from the shell as the keeper command. keeper --help and "
