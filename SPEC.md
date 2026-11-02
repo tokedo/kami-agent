@@ -1827,7 +1827,7 @@ the same daemon over the same socket.
   queried, so an unreachable daemon can never abort a session; it is
   discovered by the brief and degrades there.
 - **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.1.0
-  recommended and pinned** (`7131a52`, new at 0.8.0; 1.0.5 `e604290` from
+  recommended and pinned** (`379d2e7`, new at 0.8.0; 1.0.5 `e604290` from
   0.7.5, 1.0.3 `7f9be7b` from 0.7.1). kami-lens 1.0.0 could keep an EARLIER transaction's
   write when several transactions in
   one block wrote the same key — a kami's health, a timestamp, a

@@ -2,7 +2,7 @@
   "harness": {
     "name": "kamigotchi-executor",
     "version": "5.0.0",
-    "sha": "659c205",
+    "sha": "e92df16",
     "recorded_under_python": "3.13",
     "schema_version": "5.0.0",
     "call_budget_s": null
