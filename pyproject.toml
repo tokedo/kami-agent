@@ -1,6 +1,6 @@
 [project]
 name = "kami-agent"
-version = "0.7.5"
+version = "0.8.0"
 description = "Model-agnostic reference agent scaffold for KamiBench"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -50,3 +50,6 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "docker: needs a reachable docker daemon and a running environment container (tests/smoke/test_environment_docker.py); skips without them",
+]

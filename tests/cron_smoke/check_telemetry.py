@@ -85,9 +85,9 @@ def main() -> int:
     )
 
     # The harness's standing text reached this session (SPEC D1, P9): the
-    # stand-in states a 4.x handshake, and session_start fingerprints the
+    # stand-in states a 5.x handshake, and session_start fingerprints the
     # text that went into the system prompt — never the text itself.
-    assert starts[0].get("harness_schema_version") == "4.0.0", starts[0]
+    assert starts[0].get("harness_schema_version") == "5.0.0", starts[0]
     expected_sha = hashlib.sha256(STANDING_TEXT.encode("utf-8")).hexdigest()
     assert starts[0].get("harness_standing_text_sha256") == expected_sha, (
         "session_start does not fingerprint the standing text the harness sent"

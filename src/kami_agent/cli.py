@@ -2,7 +2,8 @@
 
 - ``init``: validate the manifest, write the run directory from it, run
   connectivity checks (chain RPC, mainnet RPC, provider API, MCP
-  handshake), emit ``run_start``. init never generates, imports, or
+  handshake, and on the shell rungs the environment container), emit
+  ``run_start``. init never generates, imports, or
   writes any key — operator-wallet creation is a harness tool
   (``create_operator_wallet``) the agent calls in-run, and the key is
   generated and persisted inside the harness server process.
@@ -36,15 +37,24 @@ from kami_agent.adapters.anthropic import AnthropicAdapter
 from kami_agent.adapters.base import ModelAdapter, SamplingParams, UserMessage
 from kami_agent.adapters.google import GoogleAdapter
 from kami_agent.adapters.openai import OpenAIAdapter
+from kami_agent.docker_api import DockerClient
+from kami_agent.environment import Environment, EnvironmentCheckError
 from kami_agent.governor import PriceTable
 from kami_agent.harness import HarnessClient, HarnessPairingError, check_pairing
+from kami_agent.keeper import KeeperClient
 from kami_agent.lens import ROSTER_QUERY, LensClient, LensQueryError, LensUnavailableError
 from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, LoopCaps
-from kami_agent.runner import RunConfig, run_session
+from kami_agent.runner import ENVIRONMENT_OWNER, RunConfig, _load_prompts, run_session
 from kami_agent.state import load_state
 from kami_agent.supervisor import uninstall_cron
 from kami_agent.telemetry import TelemetryWriter
-from kami_agent.tools.scaffold import DEFAULT_PROFILE, PROFILES
+from kami_agent.tools.scaffold import (
+    DEFAULT_PROFILE,
+    PROFILE_SHELL,
+    PROFILE_SHELL_KEEPER,
+    PROFILES,
+    profile_at_least,
+)
 
 PROVIDERS = ("anthropic", "openai", "google")
 
@@ -58,7 +68,18 @@ PROMPT_NAMES = (
     "continue.txt",
     "orientation.txt",
     "planning.txt",
+    "shell.txt",
+    "shell_keeper.txt",
 )
+
+# The environment container's name when the manifest names none (SPEC D8):
+# the deployment's compose file passes it to the agent container.
+ENV_CONTAINER_ENV = "KAMI_ENV_CONTAINER"
+DEFAULT_KEEPER_CONTAINER = "kami-keeper"
+# An OpenAI-compatible endpoint (provider: openai) when the manifest names
+# none: the OpenAI SDK's own variable, read explicitly so the choice is
+# visible here (SPEC D2, D3).
+OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL"
 
 
 def _prompts_source() -> Any:
@@ -94,9 +115,7 @@ def build_run_config(manifest: dict[str, Any], run_dir: Path) -> RunConfig:
     # unknown rung is a manifest error, not a run to start (as with an
     # unknown provider). Absent = control, which is the 0.4.0 scaffold
     # plus gas visibility.
-    profile = manifest.get("scaffold_profile", DEFAULT_PROFILE)
-    if profile not in PROFILES:
-        raise SystemExit(f"unknown scaffold_profile {profile!r}; expected one of {PROFILES}")
+    profile = validated_profile(manifest)
     return RunConfig(
         run_dir=run_dir,
         run_id=manifest["run_id"],
@@ -127,16 +146,101 @@ def build_run_config(manifest: dict[str, Any], run_dir: Path) -> RunConfig:
     )
 
 
+def validated_profile(manifest: dict[str, Any]) -> str:
+    """The manifest's rung, or exit: an unknown rung is a manifest error (D3).
+
+    The shell rungs also need the environment container their shell runs
+    in (D8): an arm that names none is mis-provisioned and refused the
+    same way, before any lock, telemetry or session number — at `init` as
+    at every `run-session`.
+    """
+    profile = manifest.get("scaffold_profile", DEFAULT_PROFILE)
+    if profile not in PROFILES:
+        raise SystemExit(f"unknown scaffold_profile {profile!r}; expected one of {PROFILES}")
+    if profile_at_least(profile, PROFILE_SHELL) and environment_container(manifest) is None:
+        raise SystemExit(
+            f"scaffold_profile {profile!r} needs environment.container "
+            f"(or {ENV_CONTAINER_ENV}): the container its shell runs in"
+        )
+    return profile
+
+
 def build_adapter(manifest: dict[str, Any]) -> ModelAdapter:
     provider = manifest["provider"]
     model = manifest["model"]
     if provider == "anthropic":
         return AnthropicAdapter(model)
     if provider == "openai":
-        return OpenAIAdapter(model)
+        base_url, headers = openai_endpoint(manifest)
+        return OpenAIAdapter(model, base_url=base_url, default_headers=headers)
     if provider == "google":
         return GoogleAdapter(model, api_key=os.environ.get("GEMINI_API_KEY"))
     raise SystemExit(f"unknown provider {provider!r}; expected one of {PROVIDERS}")
+
+
+def openai_endpoint(manifest: dict[str, Any]) -> tuple[str | None, dict[str, str] | None]:
+    """``openai.base_url`` / ``openai.extra_headers`` from the manifest (SPEC D2, D3).
+
+    The OpenAI-compatible path: the same adapter against any endpoint that
+    speaks the Chat Completions API — a router such as OpenRouter among
+    them. The base URL falls back to ``OPENAI_BASE_URL``; absent both, the
+    SDK's own default endpoint. The key is ``OPENAI_API_KEY`` either way:
+    for another endpoint it holds that endpoint's key. Headers are sent on
+    every request, verbatim, and must be strings.
+    """
+    block = manifest.get("openai") or {}
+    if not isinstance(block, dict):
+        raise SystemExit("manifest key `openai` must be a mapping (base_url, extra_headers)")
+    base_url = block.get("base_url") or os.environ.get(OPENAI_BASE_URL_ENV) or None
+    headers = block.get("extra_headers")
+    if headers is not None and not (
+        isinstance(headers, dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items())
+    ):
+        raise SystemExit("openai.extra_headers must map header names to string values")
+    return base_url, (dict(headers) if headers else None)
+
+
+def environment_container(manifest: dict[str, Any]) -> str | None:
+    """The environment container's name: the manifest, then ``KAMI_ENV_CONTAINER``."""
+    block = manifest.get("environment") or {}
+    name = block.get("container") if isinstance(block, dict) else None
+    return name or os.environ.get(ENV_CONTAINER_ENV) or None
+
+
+def environment_factory(manifest: dict[str, Any], run_dir: Path):
+    """The run's environment container (D8), on the shell rungs; else None."""
+    profile = manifest.get("scaffold_profile", DEFAULT_PROFILE)
+    if not profile_at_least(profile, PROFILE_SHELL):
+        return None
+    block = manifest.get("environment") or {}
+    container = environment_container(manifest)
+    if container is None:
+        return None
+
+    def factory() -> Environment:
+        return Environment(
+            DockerClient(block.get("docker_socket")),
+            container,
+            run_dir,
+            keeper_rung=profile_at_least(profile, PROFILE_SHELL_KEEPER),
+            keeper_container=block.get("keeper_container") or DEFAULT_KEEPER_CONTAINER,
+        )
+
+    return factory
+
+
+def keeper_factory(manifest: dict[str, Any]):
+    """The scaffold's own keeper client (D8), on ``shell_keeper`` only; else None."""
+    profile = manifest.get("scaffold_profile", DEFAULT_PROFILE)
+    if not profile_at_least(profile, PROFILE_SHELL_KEEPER):
+        return None
+    block = manifest.get("environment") or {}
+
+    def factory() -> KeeperClient:
+        return KeeperClient(block.get("keeper_socket"))
+
+    return factory
 
 
 def harness_factory(manifest: dict[str, Any]):
@@ -284,6 +388,48 @@ def check_lens(manifest: dict[str, Any]) -> str:
     return f"lens ok (daemon serving at {client.socket_path})"
 
 
+def check_environment(manifest: dict[str, Any], run_dir: Path) -> list[str]:
+    """Bring-up assertions at ≥ ``shell`` (D8, P12): a mismatch starts no run.
+
+    The container runs; ``command -v keeper`` fails on ``shell`` and
+    succeeds on ``shell_keeper``; on ``shell_keeper`` the keeper answers
+    from inside with the ``lab`` profile and its container's image names
+    ``pins.keeper_sha``; ``kami-lens`` answers from inside; the rung's
+    prompt appendices are in the run directory.
+    """
+    factory = environment_factory(manifest, run_dir)
+    if factory is None:
+        return []
+    profile = manifest.get("scaffold_profile", DEFAULT_PROFILE)
+    keeper_sha = (manifest.get("pins") or {}).get("keeper_sha") or None
+    try:
+        lines = factory().bring_up_checks(keeper_sha=keeper_sha)
+        _load_prompts(run_dir, profile)
+    except (EnvironmentCheckError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    return lines
+
+
+def give_workspace_to_environment(run_dir: Path) -> str:
+    """The environment's user (uid 1000) must be able to write its own home (D8).
+
+    The workspace is created by this process, which runs as root in the
+    agent container; the environment mounts the same directory as its
+    ``/workspace``. Best-effort, reported either way.
+    """
+    workspace = run_dir / "workspace"
+    try:
+        os.chown(workspace, *ENVIRONMENT_OWNER)
+    except OSError as exc:
+        return (
+            f"environment WARNING: cannot give {workspace} to uid {ENVIRONMENT_OWNER[0]} "
+            f"({exc.strerror or exc}); the environment's user must be able to write it"
+        )
+    return (
+        f"workspace owned by {ENVIRONMENT_OWNER[0]}:{ENVIRONMENT_OWNER[1]} (the environment's user)"
+    )
+
+
 def check_harness(manifest: dict[str, Any]) -> tuple[str, list[str]]:
     """Bring-up check for the harness surface, including the two tools the
     scaffold depends on by name.
@@ -348,6 +494,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     load_env_file(run_dir / ".env")
+    profile = validated_profile(manifest)
 
     # No key path through init: the operator wallet is created in-run by
     # the harness tool create_operator_wallet, and the owner key arrives
@@ -367,6 +514,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             )
     (run_dir / "workspace").mkdir(exist_ok=True)
     (run_dir / "transcripts").mkdir(exist_ok=True)
+    if profile_at_least(profile, PROFILE_SHELL):
+        print(give_workspace_to_environment(run_dir))
     if not (run_dir / "reference").exists():
         print("warning: reference/ missing — provision the GDD snapshot", file=sys.stderr)
 
@@ -388,6 +537,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         harness_line, harness_tool_names = check_harness(manifest)
         print(harness_line)
         print(check_lens(manifest))
+        for line in check_environment(manifest, run_dir):
+            print(line)
 
     pins = manifest.get("pins", {})
     with TelemetryWriter(run_dir / "telemetry.jsonl", run_id=manifest["run_id"]) as writer:
@@ -401,6 +552,13 @@ def cmd_init(args: argparse.Namespace) -> int:
             gdd_sha=pins.get("gdd_sha", ""),
             harness_tools=harness_tool_names,
             price_table=manifest["price_table"],
+            # The keeper pin (D8): the manifest's, on shell_keeper; empty on
+            # every rung below it, which runs no keeper.
+            keeper_sha=(
+                pins.get("keeper_sha") or ""
+                if profile_at_least(profile, PROFILE_SHELL_KEEPER)
+                else ""
+            ),
         )
     print(f"initialized {run_dir} (run_id {manifest['run_id']})")
     return 0
@@ -418,6 +576,8 @@ def cmd_run_session(args: argparse.Namespace) -> int:
             adapter,
             harness_factory=harness_factory(manifest),
             lens_factory=lens_factory(manifest),
+            environment_factory=environment_factory(manifest, run_dir),
+            keeper_factory=keeper_factory(manifest),
             trigger="manual" if args.manual else "scheduled",
             disable_supervisor=uninstall_cron,
         )

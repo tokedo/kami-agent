@@ -20,11 +20,12 @@ profile reads the roster and the wallets' gas balances, and ``planning``
 also re-reads ``workspace/plan.md``. Run it for the two ends of the ladder
 and the whole injection set is covered under cron conditions.
 
-The stand-in harness answers the MCP handshake the way kami-harness 4.0.0
-does — a token line, then its standing text after the first newline
-(SPEC D1) — so the path that puts that text in the system prompt runs
-here end to end: the stub adapter refuses any call whose system prompt
-lacks it, and check_telemetry.py asserts its fingerprint on session_start.
+The stand-in harness answers the MCP handshake the way kami-harness 5.0.0
+does (the first MAJOR this scaffold pairs with) — a token line, then its
+standing text after the first newline (SPEC D1) — so the path that puts
+that text in the system prompt runs here end to end: the stub adapter
+refuses any call whose system prompt lacks it, and check_telemetry.py
+asserts its fingerprint on session_start.
 
 Exit code is the CLI's own; the workflow judges the printed markers
 ("initialized ...", "session_ran") and telemetry via check_telemetry.py,
@@ -55,7 +56,7 @@ STANDING_TEXT = (
     "time_boxed: true and `remaining`, what was not attempted."
 )
 HANDSHAKE_INSTRUCTIONS = (
-    f"tools_hash={'0' * 64} schema_version=4.0.0 error_snippets=off\n{STANDING_TEXT}"
+    f"tools_hash={'0' * 64} schema_version=5.0.0 error_snippets=off\n{STANDING_TEXT}"
 )
 
 # What the stand-in daemon answers the roster query with: the compact

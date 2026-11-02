@@ -32,6 +32,8 @@ SPEC_EVENT_TYPES = {
     "session_end",
     "run_complete",
     "session_refused",
+    "keeper_tx",
+    "shell_state",
 }
 
 # One representative payload per P9 event type, optional fields included.
@@ -128,6 +130,30 @@ EXAMPLE_PAYLOADS = {
         "trigger": "scheduled",
         "harness_schema_version": "4.0.0",
         "harness_tools_hash": "7fc11fe95b85ebeed4f898e774c50833cd63314d56c3ed18b5afa56989f75262",
+    },
+    "keeper_tx": {
+        "book": "auto-1",
+        "tx_hash": "0xabc",
+        "action": "system.harvest.collect",
+        "status": "success",
+        "initiator": "keeper",
+        "source": "keeper",
+        "block": 77,
+        "nonce": 3,
+        "gas_used": 21000,
+        "ledger_ts": "2026-10-23T11:00:00.000Z",
+        "receipt_stage": "receipt",
+    },
+    "shell_state": {
+        "phase": "session_end",
+        "container": "kami-env",
+        "running": True,
+        "restarted": False,
+        "process_count": 2,
+        "workspace_bytes": 10,
+        "processes": [{"pid": 1, "comm": "sleep", "args": "sleep infinity"}],
+        "restart_count": 0,
+        "lens_socket_ok": True,
     },
 }
 
@@ -331,7 +357,7 @@ def test_optional_fields_can_be_omitted(writer):
 
 def test_schema_version_is_pinned():
     """Additive changes require a version bump (unevaluatedProperties: false)."""
-    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.7.0"
+    assert json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["version"] == "0.8.0"
 
 
 # --- schema 0.7.0 additions: what the harness handshake stated (SPEC D1) ----------

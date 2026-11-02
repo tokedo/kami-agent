@@ -38,5 +38,18 @@ def cap_tool_result(
     hint = ""
     if path is not None:
         hint = f" Re-read it in slices with workspace_read(path={path!r}, offset, length)."
-    marker = f"\n[truncated: showing the first {max_bytes} bytes of {original}.{hint}]"
-    return CappedResult(content=head + marker, truncated=True, original_bytes=original)
+    return CappedResult(
+        content=head + truncation_marker(max_bytes, original, hint),
+        truncated=True,
+        original_bytes=original,
+    )
+
+
+def truncation_marker(max_bytes: int, original: int, hint: str = "") -> str:
+    """The standard marker, appended where a result was cut (I16).
+
+    One wording for every cut result: the tool-result cap above, and the
+    per-stream caps of the ``shell`` result (P10), whose totals are known
+    without the whole output ever being held in memory.
+    """
+    return f"\n[truncated: showing the first {max_bytes} bytes of {original}.{hint}]"

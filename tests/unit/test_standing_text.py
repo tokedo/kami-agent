@@ -77,9 +77,14 @@ STANDING = (
 )
 # Synthetic: shaped like a published registry hash, naming no release.
 REGISTRY_HASH = "0123456789abcdef" * 4
-LINE_ONE_4X = f"tools_hash={REGISTRY_HASH} schema_version=4.0.0 error_snippets=off"
+LINE_ONE_5X = f"tools_hash={REGISTRY_HASH} schema_version=5.0.0 error_snippets=off"
+LINE_ONE_4X = f"tools_hash={REGISTRY_HASH} schema_version=4.7.0 error_snippets=off"
 LINE_ONE_3X = f"tools_hash={REGISTRY_HASH} schema_version=3.7.0 error_snippets=off"
+INSTRUCTIONS_5X = f"{LINE_ONE_5X}\n{STANDING}"
+# A 4.x harness that sends its standing text: well-formed, and still not a
+# pair for this scaffold (D1, 0.8.0).
 INSTRUCTIONS_4X = f"{LINE_ONE_4X}\n{STANDING}"
+PAIRING = "kami-harness 5.0.0 and newer pair with kami-agent 0.8.0 and newer"
 
 PRICES = PriceTable(input_usd_per_mtok=1.0, output_usd_per_mtok=5.0)
 
@@ -130,9 +135,9 @@ def test_no_instructions_at_all_is_an_empty_handshake():
 
 
 def test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim():
-    parsed = parse_instructions(INSTRUCTIONS_4X)
+    parsed = parse_instructions(INSTRUCTIONS_5X)
     assert parsed.tools_hash == REGISTRY_HASH
-    assert parsed.schema_version == "4.0.0"
+    assert parsed.schema_version == "5.0.0"
     assert parsed.error_snippets == "off"
     assert parsed.standing_text == STANDING
 
@@ -140,7 +145,7 @@ def test_the_remainder_after_the_first_newline_is_the_standing_text_verbatim():
 def test_the_remainder_is_not_reflowed_or_stripped():
     """Verbatim means verbatim: inner newlines, blank lines and edge spaces stay."""
     remainder = "  first rule.\n\nsecond rule,\n  indented.  "
-    assert parse_instructions(f"{LINE_ONE_4X}\n{remainder}").standing_text == remainder
+    assert parse_instructions(f"{LINE_ONE_5X}\n{remainder}").standing_text == remainder
 
 
 def test_tokens_are_read_from_line_one_only():
@@ -156,15 +161,15 @@ def test_tokens_are_read_from_line_one_only():
 
 
 def test_a_whitespace_only_remainder_is_no_text():
-    assert parse_instructions(f"{LINE_ONE_4X}\n  \n\t").standing_text == ""
+    assert parse_instructions(f"{LINE_ONE_5X}\n  \n\t").standing_text == ""
 
 
 def test_the_client_exposes_the_handshake_of_a_real_child():
     """Through the real MCP transport, not only through the parser."""
-    env = {**os.environ, "FAKE_HARNESS_INSTRUCTIONS": INSTRUCTIONS_4X}
+    env = {**os.environ, "FAKE_HARNESS_INSTRUCTIONS": INSTRUCTIONS_5X}
     with HarnessClient(sys.executable, [str(FAKE_SERVER)], env=env, handshake_timeout_s=30) as c:
         assert c.standing_text == STANDING
-        assert c.harness_schema_version == "4.0.0"
+        assert c.harness_schema_version == "5.0.0"
         assert c.harness_tools_hash == REGISTRY_HASH
         assert c.handshake.error_snippets == "off"
 
@@ -285,7 +290,7 @@ def test_the_standing_text_is_in_the_system_prompt_of_every_profile(run_dir, pro
     """Verbatim, once, after the scaffold's frozen text, before the file index."""
     expected = expected_system(run_dir, profile, STANDING)
     outcome, adapter = run(
-        run_dir, Harness(standing_text=STANDING, schema_version="4.0.0"), profile=profile
+        run_dir, Harness(standing_text=STANDING, schema_version="5.0.0"), profile=profile
     )
     assert outcome == SESSION_RAN
     system = adapter.requests[0]["system"]
@@ -297,7 +302,7 @@ def test_the_standing_text_is_in_the_system_prompt_of_every_profile(run_dir, pro
 def test_no_text_means_the_prompt_is_exactly_what_it_was(run_dir, profile):
     """A harness that sends none adds nothing — not even an empty part."""
     expected = expected_system(run_dir, profile, "")
-    _, adapter = run(run_dir, Harness(schema_version="3.7.0"), profile=profile)
+    _, adapter = run(run_dir, Harness(schema_version=None), profile=profile)
     assert adapter.requests[0]["system"] == expected
 
 
@@ -316,19 +321,19 @@ def test_the_text_is_on_every_call_of_the_session(run_dir):
                 )
             return super().complete(system, messages, tools, params)
 
-    _, adapter = run(run_dir, Harness(standing_text=STANDING, schema_version="4.0.0"), TwoTurns())
+    _, adapter = run(run_dir, Harness(standing_text=STANDING, schema_version="5.0.0"), TwoTurns())
     assert len(adapter.requests) == 2
     assert all(STANDING in r["system"] for r in adapter.requests)
 
 
 def test_the_text_never_enters_the_tool_surface_or_its_hash(run_dir):
     """It is said once, in the prompt; no description is rewritten with it."""
-    _, with_text = run(run_dir, Harness(standing_text=STANDING, schema_version="4.0.0"))
+    _, with_text = run(run_dir, Harness(standing_text=STANDING, schema_version="5.0.0"))
     other = run_dir / "other"
     other.mkdir()
     for name in ("prompts", "reference"):
         (other / name).symlink_to(run_dir / name)
-    _, without = run(other, Harness(schema_version="3.7.0"))
+    _, without = run(other, Harness(schema_version=None))
     assert [t.description for t in with_text.requests[0]["tools"]] == [
         t.description for t in without.requests[0]["tools"]
     ]
@@ -468,7 +473,7 @@ def test_every_provider_adapter_sends_it_in_its_system_slot(run_dir, provider, p
     expected = expected_system(run_dir, profile, STANDING)
     outcome, _ = run(
         run_dir,
-        Harness(standing_text=STANDING, schema_version="4.0.0"),
+        Harness(standing_text=STANDING, schema_version="5.0.0"),
         adapter,
         profile=profile,
     )
@@ -483,10 +488,10 @@ def test_every_provider_adapter_sends_it_in_its_system_slot(run_dir, provider, p
 
 
 def test_session_start_records_the_texts_fingerprint_and_size(run_dir):
-    run(run_dir, Harness(standing_text=STANDING, schema_version="4.0.0"))
+    run(run_dir, Harness(standing_text=STANDING, schema_version="5.0.0"))
     start = events(run_dir, "session_start")[0]
     validate_event(start)
-    assert start["harness_schema_version"] == "4.0.0"
+    assert start["harness_schema_version"] == "5.0.0"
     assert (
         start["harness_standing_text_sha256"]
         == hashlib.sha256(STANDING.encode("utf-8")).hexdigest()
@@ -496,11 +501,12 @@ def test_session_start_records_the_texts_fingerprint_and_size(run_dir):
     assert start["harness_tools_hash"] == REGISTRY_HASH
 
 
-def test_no_text_records_no_fingerprint_but_still_the_version(run_dir):
-    run(run_dir, Harness(schema_version="3.7.0"))
+def test_no_text_records_no_fingerprint(run_dir):
+    """A harness that states no version owes no text (D1), and none is recorded."""
+    run(run_dir, Harness(schema_version=None))
     start = events(run_dir, "session_start")[0]
     validate_event(start)
-    assert start["harness_schema_version"] == "3.7.0"
+    assert "harness_schema_version" not in start
     assert "harness_standing_text_sha256" not in start
     assert "harness_standing_text_chars" not in start
 
@@ -518,7 +524,7 @@ def test_no_harness_records_none_of_it(run_dir):
 
 def test_the_text_is_never_in_telemetry_itself(run_dir):
     """Fingerprint and length only: the stream stays a stream of facts about it."""
-    run(run_dir, Harness(standing_text=STANDING, schema_version="4.0.0"))
+    run(run_dir, Harness(standing_text=STANDING, schema_version="5.0.0"))
     raw = (run_dir / "telemetry.jsonl").read_text(encoding="utf-8")
     assert "never instructions" not in raw
 
@@ -526,8 +532,8 @@ def test_the_text_is_never_in_telemetry_itself(run_dir):
 # --- the pairing rule (D1) --------------------------------------------------------
 
 
-@pytest.mark.parametrize("version", ["4.0.0", "4.2.1", "5.0.0-rc1", "4"])
-def test_a_4x_harness_whose_text_did_not_arrive_starts_no_session(run_dir, version):
+@pytest.mark.parametrize("version", ["5.0.0", "5.2.1", "6.0.0-rc1", "5"])
+def test_a_paired_harness_whose_text_did_not_arrive_starts_no_session(run_dir, version):
     """Refused before session_start and any model call, with a plain message."""
     harness = Harness(standing_text="", schema_version=version)
     adapter = ScriptedAdapter()
@@ -552,12 +558,12 @@ def test_a_4x_harness_whose_text_did_not_arrive_starts_no_session(run_dir, versi
 def test_the_refusal_is_readable_from_telemetry_alone(run_dir):
     """A monitor that reads only telemetry.jsonl sees what was refused and why."""
     with pytest.raises(HarnessPairingError) as excinfo:
-        run(run_dir, Harness(standing_text="", schema_version="4.0.0"))
+        run(run_dir, Harness(standing_text="", schema_version="5.0.0"))
     (refused,) = events(run_dir, "session_refused")
     validate_event(refused)
     assert refused["reason"] == "standing_text_missing"
     assert refused["message"] == str(excinfo.value)
-    assert refused["harness_schema_version"] == "4.0.0"
+    assert refused["harness_schema_version"] == "5.0.0"
     assert refused["harness_tools_hash"] == REGISTRY_HASH
     assert refused["trigger"] == "scheduled"
 
@@ -569,13 +575,13 @@ def test_a_refused_attempt_consumes_no_session_number(run_dir):
     refusal carries the last number the run USED, and the next session that
     does start gets the number the refused attempts would have had.
     """
-    assert run(run_dir, Harness(schema_version="3.7.0"))[0] == SESSION_RAN
+    assert run(run_dir, Harness(schema_version=None))[0] == SESSION_RAN
     # Manual starts: the wake gate would otherwise answer not_due.
     for _ in range(2):
         with pytest.raises(HarnessPairingError):
-            run(run_dir, Harness(standing_text="", schema_version="4.0.0"), trigger="manual")
+            run(run_dir, Harness(standing_text="", schema_version="5.0.0"), trigger="manual")
         assert load_state(run_dir / "state.json").session_counter == 1
-    good = Harness(standing_text=STANDING, schema_version="4.0.0")
+    good = Harness(standing_text=STANDING, schema_version="5.0.0")
     assert run(run_dir, good, trigger="manual")[0] == SESSION_RAN
     assert [e["session"] for e in events(run_dir, "session_start")] == [1, 2]
     assert [e["session"] for e in events(run_dir, "session_refused")] == [1, 1]
@@ -587,7 +593,7 @@ def test_a_refused_attempt_consumes_no_session_number(run_dir):
 
 
 def test_a_malformed_published_hash_cannot_mask_the_refusal(run_dir):
-    harness = Harness(standing_text="", schema_version="4.0.0", tools_hash="not-a-hash")
+    harness = Harness(standing_text="", schema_version="5.0.0", tools_hash="not-a-hash")
     with pytest.raises(HarnessPairingError):
         run(run_dir, harness)
     (refused,) = events(run_dir, "session_refused")
@@ -596,7 +602,7 @@ def test_a_malformed_published_hash_cannot_mask_the_refusal(run_dir):
 
 def test_a_wrapper_that_drops_the_text_is_refused(run_dir):
     """The harness sent it; it was lost between the client and the runner."""
-    inner = Harness(standing_text=STANDING, schema_version="4.0.0")
+    inner = Harness(standing_text=STANDING, schema_version="5.0.0")
     with pytest.raises(HarnessPairingError):
         run(run_dir, Wrapper(inner))
     assert inner.closed
@@ -605,16 +611,56 @@ def test_a_wrapper_that_drops_the_text_is_refused(run_dir):
 
 @pytest.mark.parametrize(
     "version, text",
-    [("3.7.0", ""), (None, ""), ("2.2.0", ""), ("4.0.0", STANDING), ("3.7.0", STANDING)],
+    [(None, ""), (None, STANDING), ("5.0.0", STANDING), ("5.3.1", STANDING), ("6.0.0", STANDING)],
 )
-def test_only_that_combination_is_refused(version, text):
+def test_only_a_paired_harness_with_its_text_or_one_stating_no_version_passes(version, text):
     check_pairing(version, text)  # must not raise
 
 
-def test_a_pre_4x_harness_runs_exactly_as_before(run_dir):
-    outcome, adapter = run(run_dir, Harness(schema_version="3.7.0"))
+def test_a_harness_that_states_no_version_runs_exactly_as_before(run_dir):
+    outcome, adapter = run(run_dir, Harness(schema_version=None))
     assert outcome == SESSION_RAN
     assert len(adapter.requests) == 1
+
+
+# --- the pairing rule from 0.8.0: kami-harness 5.0.0 and newer (D1) ----------------
+
+
+@pytest.mark.parametrize("version", ["4.7.0", "4.0.0", "4", "3.7.0", "2.2.0"])
+@pytest.mark.parametrize("text", [STANDING, ""], ids=["with_text", "without_text"])
+def test_a_harness_below_5_is_refused_whatever_it_sends(version, text):
+    with pytest.raises(HarnessPairingError) as excinfo:
+        check_pairing(version, text)
+    message = str(excinfo.value)
+    assert message.startswith("refusing to start:")
+    assert f"kami-harness {version} does not pair" in message
+    assert PAIRING in message
+    assert excinfo.value.reason == "harness_major_below_pairing"
+
+
+def test_a_4x_harness_starts_no_session_and_says_why_in_telemetry(run_dir):
+    harness = Harness(standing_text=STANDING, schema_version="4.7.0")
+    adapter = ScriptedAdapter()
+    with pytest.raises(HarnessPairingError) as excinfo:
+        run(run_dir, harness, adapter)
+    assert adapter.requests == []
+    assert harness.executed == []
+    assert harness.closed
+    stream = list(read_events(run_dir / "telemetry.jsonl"))
+    assert [e["event"] for e in stream] == ["session_refused"]
+    (refused,) = stream
+    validate_event(refused)
+    assert refused["reason"] == "harness_major_below_pairing"
+    assert refused["message"] == str(excinfo.value)
+    assert refused["harness_schema_version"] == "4.7.0"
+    assert refused["session"] == 0
+
+
+def test_the_standing_text_refusal_names_the_pairing_too():
+    with pytest.raises(HarnessPairingError) as excinfo:
+        check_pairing("5.0.0", "")
+    assert PAIRING in str(excinfo.value)
+    assert excinfo.value.reason == "standing_text_missing"
 
 
 def _cli_manifest(tmp_path, instructions):
@@ -638,14 +684,23 @@ def _cli_manifest(tmp_path, instructions):
 
 
 def test_bring_up_refuses_the_same_pairing_with_the_same_plain_message(tmp_path):
-    manifest, _ = _cli_manifest(tmp_path, LINE_ONE_4X)
+    manifest, _ = _cli_manifest(tmp_path, LINE_ONE_5X)
     with pytest.raises(SystemExit) as excinfo:
         cli.check_harness(manifest)
     assert str(excinfo.value).startswith("refusing to start:")
 
 
-def test_bring_up_reports_the_text_it_will_show(tmp_path):
+def test_bring_up_refuses_a_4x_harness_with_the_pairing_named(tmp_path):
+    """A real MCP child stating 4.7.0, standing text and all."""
     manifest, _ = _cli_manifest(tmp_path, INSTRUCTIONS_4X)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.check_harness(manifest)
+    assert str(excinfo.value).startswith("refusing to start: kami-harness 4.7.0 does not pair")
+    assert PAIRING in str(excinfo.value)
+
+
+def test_bring_up_reports_the_text_it_will_show(tmp_path):
+    manifest, _ = _cli_manifest(tmp_path, INSTRUCTIONS_5X)
     line, names = cli.check_harness(manifest)
     assert f"standing text {len(STANDING)} chars" in line
     assert "lens_roster" in names
@@ -653,7 +708,7 @@ def test_bring_up_reports_the_text_it_will_show(tmp_path):
 
 def test_run_session_exits_with_the_plain_message_not_a_traceback(tmp_path, monkeypatch):
     """Through the real CLI and a real MCP child that sends line 1 only."""
-    _, manifest_path = _cli_manifest(tmp_path, LINE_ONE_4X)
+    _, manifest_path = _cli_manifest(tmp_path, LINE_ONE_5X)
     run_dir = tmp_path / "run"
     assert cli.main(["init", "--manifest", str(manifest_path), "--run-dir", str(run_dir),
                      "--skip-connectivity"]) == 0  # fmt: skip
@@ -669,8 +724,8 @@ def test_run_session_exits_with_the_plain_message_not_a_traceback(tmp_path, monk
 
 
 def test_run_session_through_the_cli_shows_a_real_childs_text(tmp_path, monkeypatch):
-    """The happy path end to end: real CLI, real MCP child, 4.x handshake."""
-    _, manifest_path = _cli_manifest(tmp_path, INSTRUCTIONS_4X)
+    """The happy path end to end: real CLI, real MCP child, 5.x handshake."""
+    _, manifest_path = _cli_manifest(tmp_path, INSTRUCTIONS_5X)
     run_dir = tmp_path / "run"
     cli.main(["init", "--manifest", str(manifest_path), "--run-dir", str(run_dir),
               "--skip-connectivity"])  # fmt: skip

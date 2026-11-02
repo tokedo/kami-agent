@@ -1,0 +1,31 @@
+# The `shell_keeper` rung's override (SPEC D8): the keeper daemon beside the
+# lens, its socket relayed into the environment and into the agent.
+#   docker compose -f compose.yaml -f compose.keeper.yaml up -d
+services:
+  keeper:                    # kami-keeper at the pin, built from its own Dockerfile
+    image: kami-keeper:${KEEPER_SHA}
+    container_name: kami-keeper
+    network_mode: host
+    volumes: ["/srv/lens:/srv/lens", "/srv/keys:/srv/keys:ro", "/srv/keeper:/data"]
+    command: ["--max-books-per-account", "1", "--armed"]
+    depends_on: {lens: {condition: service_healthy}}
+    healthcheck: {test: ["CMD", "python", "-m", "keeper", "status", "--socket", "/data/keeper.sock"], interval: 30s, timeout: 30s, retries: 10}
+    restart: unless-stopped
+  sockets:
+    command:
+      - >-
+        socat UNIX-LISTEN:/srv/sockets/lens/kami-lens.sock,fork,mode=666,unlink-early
+        UNIX-CONNECT:/srv/lens/kami-lens.sock &
+        socat UNIX-LISTEN:/srv/sockets/keeper/keeper.sock,fork,mode=666,unlink-early
+        UNIX-CONNECT:/srv/keeper/keeper.sock &
+        wait
+    volumes: ["/srv/keeper:/srv/keeper:ro"]
+    depends_on: {keeper: {condition: service_healthy}}
+  env:
+    volumes:
+      - /srv/sockets/keeper:/srv/keeper      # the relay's keeper socket only
+  agent:
+    volumes:
+      - /srv/sockets/keeper:/srv/keeper      # the scaffold's own keeper client (revoke, ledger)
+    environment:
+      KAMI_KEEPER_SOCKET: /srv/keeper/keeper.sock

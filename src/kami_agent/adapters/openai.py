@@ -12,6 +12,11 @@ Provider quirks handled here and nowhere else:
   subset when reported;
 - the client is built with ``max_retries=0``: retries are the loop's
   job (SPEC P8), never the SDK's;
+- the same adapter serves any OpenAI-compatible endpoint (SPEC D2, D3):
+  ``base_url`` and ``default_headers`` are passed to the client as given
+  (a router such as OpenRouter is one such endpoint), and its usage is
+  read exactly as OpenAI's — ``prompt_tokens_details.cached_tokens``
+  included, which such routers serve in the same place;
 - provider-side automatic caching is measured, not managed (SPEC D2):
   nothing is requested, but ``prompt_tokens_details.cached_tokens`` is
   normalized into ``cache_read_tokens``. ``prompt_tokens`` already
@@ -58,10 +63,19 @@ class OpenAIAdapter:
         model: str,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
+        http_client: Any = None,
         client: openai.OpenAI | None = None,
     ) -> None:
         self.model = model
-        self._client = client or openai.OpenAI(api_key=api_key, max_retries=0)
+        self._client = client or openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=default_headers,
+            http_client=http_client,
+            max_retries=0,
+        )
 
     def complete(
         self,
