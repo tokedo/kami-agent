@@ -9,6 +9,11 @@ Provider quirks handled here and nowhere else:
   per-response IDs and resolves ``tool_call_id`` back to the function
   name when sending results (Gemini matches responses by name);
 - parallel function responses are grouped into one user-role content;
+- a function call the adapter holds no thought signature for — the
+  scaffold's session-start injections (SPEC P1.12), or a turn the model
+  returned unsigned — carries the API's documented skip-validation
+  signature: Gemini 3.x rejects an unsigned function call in the current
+  turn (F-TS9, 0.8.1);
 - ``finish_reason`` STOP with function calls present is a tool_use turn;
   safety-class terminations map to ``refusal``;
 - ``reasoning_effort`` has no native equivalent and is not sent
@@ -46,6 +51,19 @@ from kami_agent.adapters.base import (
 )
 
 PROVIDER = "google"
+
+# The thought signature for a function call no Gemini response produced
+# (F-TS9, 0.8.1). Gemini 3.x rejects any function call in the current turn
+# that carries no signature (400 INVALID_ARGUMENT, "Function call is
+# missing a thought_signature in functionCall parts"), and the scaffold's
+# session-start injections (SPEC P1.12) are exactly such calls: assistant
+# turns the loop synthesizes, with no provider state to replay. This is
+# the value the API documents for client-injected calls. Live probe on
+# gemini-3.8-flash, 2026-11-04: an unsigned injected call → 400; this
+# value → 200, sent as these bytes (the SDK base64-encodes them) and as
+# the literal wire string alike; an arbitrary value → 400 "Corrupted
+# thought signature."; gemini-2.5-flash accepts it as well.
+INJECTED_CALL_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
 _REFUSAL_FINISHES = {
     "SAFETY",
@@ -131,13 +149,18 @@ def _to_wire_contents(messages: list[Message]) -> list[genai_types.Content]:
                 # unchanged.
                 contents.append(genai_types.Content(role="model", parts=list(state.payload)))
                 continue
+            # No Google state to replay: a scaffold injection, or a turn
+            # the model returned unsigned. Each call part carries the
+            # documented skip-validation signature (F-TS9); a text part
+            # carries none.
             parts: list[genai_types.Part] = []
             if message.text:
                 parts.append(genai_types.Part(text=message.text))
             for call in message.tool_calls:
                 parts.append(
                     genai_types.Part(
-                        function_call=genai_types.FunctionCall(name=call.name, args=call.args)
+                        function_call=genai_types.FunctionCall(name=call.name, args=call.args),
+                        thought_signature=INJECTED_CALL_THOUGHT_SIGNATURE,
                     )
                 )
             contents.append(genai_types.Content(role="model", parts=parts))
