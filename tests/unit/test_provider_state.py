@@ -178,6 +178,81 @@ def test_google_replays_signatures_and_keeps_response_matching():
     assert contents[2].parts[0].function_response.name == "workspace_list"
 
 
+def test_google_signs_the_scaffolds_injected_calls_and_keeps_the_models_own():
+    """Gemini 3.x rejects an unsigned function call in the current turn (F-TS9).
+
+    The session-start injections (P1.12) are assistant turns no Google
+    response produced, so they carry no provider state and, before 0.8.1,
+    reached the wire with no ``thought_signature`` — a 400 INVALID_ARGUMENT
+    on the first call of every Gemini 3.x session. Each such function-call
+    part now carries the API's documented skip-validation value; the
+    model's own turn is replayed verbatim with its real signature.
+    """
+    first = load("google", "thought_signature")
+    adapter, _ = google_adapter(first)
+    state = adapter.complete("s", [UserMessage(text="hi")], [], PARAMS).provider_state
+
+    adapter2, recorder2 = google_adapter(load("google", "text_stop"))
+    conversation = [
+        UserMessage(text="Session start."),
+        AssistantMessage(
+            tool_calls=(ToolCall(id="brief_1", name="lens_roster", args={}),),
+            initiator="scaffold",
+        ),
+        ToolResultMessage(tool_call_id="brief_1", content="{}", initiator="scaffold"),
+        AssistantMessage(
+            tool_calls=(ToolCall(id="balance_1", name="get_gas_balance", args={}),),
+            initiator="scaffold",
+        ),
+        ToolResultMessage(tool_call_id="balance_1", content="{}", initiator="scaffold"),
+        AssistantMessage(
+            text="Listing the workspace.",
+            tool_calls=(ToolCall(id="call_1", name="workspace_list", args={}),),
+            provider_state=state,
+        ),
+        ToolResultMessage(tool_call_id="call_1", content="workspace/ (empty)"),
+    ]
+    adapter2.complete("s", conversation, [], PARAMS)
+    contents = recorder2.calls[0]["contents"]
+
+    for index, name in ((1, "lens_roster"), (3, "get_gas_balance")):
+        (part,) = contents[index].parts
+        assert part.function_call.name == name
+        assert part.thought_signature == b"skip_thought_signature_validator"
+        # The paired result still resolves to the call's name.
+        assert contents[index + 1].parts[0].function_response.name == name
+
+    model_turn = contents[5]
+    assert model_turn.parts == list(first.candidates[0].content.parts)
+    assert model_turn.parts[1].thought_signature == b"CtQBaThoughtSignature"  # the real one
+
+
+def test_google_signs_every_call_of_an_unsigned_turn_and_no_text():
+    """A turn with no Google state signs each call part, never a text part."""
+    adapter, recorder = google_adapter(load("google", "text_stop"))
+    adapter.complete(
+        "s",
+        [
+            UserMessage(text="Session start."),
+            AssistantMessage(
+                text="Checking.",
+                tool_calls=(
+                    ToolCall(id="call_1", name="workspace_list", args={}),
+                    ToolCall(id="call_2", name="workspace_read", args={"path": "a.md"}),
+                ),
+            ),
+            ToolResultMessage(tool_call_id="call_1", content="workspace/ (empty)"),
+            ToolResultMessage(tool_call_id="call_2", content="boom", is_error=True),
+        ],
+        [],
+        PARAMS,
+    )
+    text, call_a, call_b = recorder.calls[0]["contents"][1].parts
+    assert text.text == "Checking." and text.thought_signature is None
+    assert call_a.thought_signature == b"skip_thought_signature_validator"
+    assert call_b.thought_signature == b"skip_thought_signature_validator"
+
+
 def test_google_ignores_foreign_state():
     foreign = ProviderState(provider="anthropic", payload=("blob",))
     adapter, recorder = google_adapter(load("google", "text_stop"))
