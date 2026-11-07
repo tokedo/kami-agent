@@ -25,8 +25,9 @@ daemon's own data, the docker socket — is outside it, in `agent`, `keeper`
 and the host. What is not mounted into `env` does not exist there: not the
 run directory's internals (`/srv/run`: `.env`, `state.json`,
 `telemetry.jsonl`, `errors.jsonl`, `prompts/`, `transcripts/`, `shell/`,
-`harness-lanes/`), not `/srv/keys`, not the docker socket, not the lens's or
-the keeper's data directories, and no network route (`network_mode: none`).
+`harness-lanes/`, `harness-cache/`), not `/srv/keys`, not the docker
+socket, not the lens's or the keeper's data directories, and no network
+route (`network_mode: none`).
 A later loop swap adds a `harness` service reachable from `env` and replaces
 `agent`; nothing here changes shape for it.
 
@@ -50,6 +51,8 @@ Root-owned, mode 755 unless stated:
 ```
 /srv/run                 the run directory (SPEC P12); the agent container's /srv/run
 /srv/run/workspace       created by `kami-agent init`, then given to uid 1000
+/srv/run/harness-cache   the harness's order-book cache (kwob_trades.json), the agent
+                         container's /opt/kami-harness/executor/.cache; seeded by `init`
 /srv/keys/.env           the keys file (0600) — KAMI_KEYS_FILE for the harness, read-only for the keeper
 /srv/lens                the lens daemon's data directory (its socket: kami-lens.sock)
 /srv/keeper              the keeper's data directory and socket (shell_keeper only), at the
@@ -103,7 +106,12 @@ first `up`.
    engine has started (`status.engine`: an armed keeper without its chain
    settings refuses to start it, and init prints `keeper engine not
    started:` with the keeper's own reason); `kami-lens` answers from
-   inside. A mismatch starts no run.
+   inside. A mismatch starts no run. Before them, on every rung, `init`
+   seeds the harness's order-book cache when `/srv/run/harness-cache` has
+   none (the harness's own `executor/kwob_bootstrap.py`, from the Kamigaze
+   snapshot; `orderbook cache seeded (…)`, or `orderbook cache ok (…)` when
+   present) — without it `get_item_orderbook` fails on every call — and a
+   failed seeding starts no run.
 
    ```sh
    docker compose -f compose.yaml [-f compose.keeper.yaml] run --rm agent \

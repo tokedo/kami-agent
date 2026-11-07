@@ -110,7 +110,14 @@ names the kamigotchi-gdd commit that matches its harness and lens pins.
 
 Run-directory internals no agent path reaches (SPEC P11, D8): `.env`,
 `config.yaml`, `state.json`, `telemetry.jsonl`, `errors.jsonl`, `prompts/`,
-`transcripts/`, `shell/`, `harness-lanes/`, `run.lock`.
+`transcripts/`, `shell/`, `harness-lanes/`, `harness-cache/`, `run.lock`.
+`harness-cache/` (0.8.2, F-TS7) is the harness's order-book cache
+(`kwob_trades.json`, the trade ids `get_item_orderbook` reads), mounted at
+`/opt/kami-harness/executor/.cache` in the agent container: `kami-agent
+init` seeds it once with the harness's own `executor/kwob_bootstrap.py`
+from the Kamigaze snapshot (network: `api.prod.kamigotchi.io`, below) and
+the harness keeps it current from the chain's logs after that. On the
+volume it survives a container recreate and is pulled with the run.
 
 ## Egress allowlist (SPEC I20/N6, enforced at the host level)
 

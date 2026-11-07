@@ -2,7 +2,8 @@
 # For `shell_keeper` add the override:
 #   docker compose -f compose.yaml -f compose.keeper.yaml up -d
 # Every ${VAR} is named in .env.example. Host layout (root-owned, 755):
-#   /srv/run (the run directory), /srv/keys (the keys file, 0600),
+#   /srv/run (the run directory; /srv/run/harness-cache the harness's
+#   order-book cache), /srv/keys (the keys file, 0600),
 #   /srv/lens (the lens daemon's data), /srv/keeper (the keeper's data),
 #   /srv/sockets/lens and /srv/sockets/keeper (the relay's sockets).
 name: kami-agent-run
@@ -59,6 +60,8 @@ services:
       - /srv/keys:/srv/keys
       - /srv/lens:/srv/lens:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      # F-TS7: the harness's order-book cache (kwob_trades.json), seeded by init, a run-dir internal.
+      - /srv/run/harness-cache:/opt/kami-harness/executor/.cache
     environment:
       KAMI_KEYS_FILE: /srv/keys/.env
       KAMI_LENS_SOCKET: /srv/lens/kami-lens.sock

@@ -2,8 +2,8 @@
 
 - ``init``: validate the manifest, write the run directory from it, run
   connectivity checks (chain RPC, mainnet RPC, provider API, MCP
-  handshake, and on the shell rungs the environment container), emit
-  ``run_start``. init never generates, imports, or
+  handshake, the harness's order-book cache, and on the shell rungs the
+  environment container), emit ``run_start``. init never generates, imports, or
   writes any key — operator-wallet creation is a harness tool
   (``create_operator_wallet``) the agent calls in-run, and the key is
   generated and persisted inside the harness server process.
@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from dataclasses import asdict
 from importlib import resources
@@ -80,6 +81,16 @@ DEFAULT_KEEPER_CONTAINER = "kami-keeper"
 # none: the OpenAI SDK's own variable, read explicitly so the choice is
 # visible here (SPEC D2, D3).
 OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL"
+
+# The harness's order-book trade-id cache (F-TS7). Its get_item_orderbook
+# reads <executor>/.cache/kwob_trades.json — {"block", "trade_ids"} — which
+# the harness's own executor/kwob_bootstrap.py seeds once from the Kamigaze
+# state snapshot and the harness keeps current by log scan after that.
+# Without it every call of the tool fails. `init` seeds it when missing.
+ORDERBOOK_CACHE = Path(".cache") / "kwob_trades.json"
+ORDERBOOK_BOOTSTRAP = "kwob_bootstrap.py"
+ORDERBOOK_BOOTSTRAP_TIMEOUT_S = 300
+ORDERBOOK_ERROR_TAIL_CHARS = 1500
 
 
 def _prompts_source() -> Any:
@@ -388,6 +399,84 @@ def check_lens(manifest: dict[str, Any]) -> str:
     return f"lens ok (daemon serving at {client.socket_path})"
 
 
+def harness_executor_dir(manifest: dict[str, Any]) -> Path | None:
+    """The directory of the harness's server script, as its stdio child is spawned.
+
+    ``harness_factory`` runs ``command args…`` in ``cwd``; the script is the
+    first ``.py`` argument, resolved against ``cwd``. The harness keeps its
+    order-book cache beside that script, so this is where it is looked for.
+    """
+    harness = manifest.get("harness")
+    if not harness:
+        return None
+    cwd = harness.get("cwd")
+    for arg in harness.get("args", []):
+        if str(arg).endswith(".py"):
+            script = Path(str(arg))
+            if not script.is_absolute():
+                script = (Path(cwd) if cwd else Path.cwd()) / script
+            return script.parent
+    return None
+
+
+def _orderbook_cache_facts(cache: Path) -> tuple[int, Any]:
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        return len(data["trade_ids"]), data["block"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"orderbook cache {cache} is unreadable ({exc})") from exc
+
+
+def check_orderbook_cache(manifest: dict[str, Any]) -> str:
+    """Bring-up: the harness's order-book cache exists, seeded here if missing (F-TS7).
+
+    Present → reported, never re-seeded (the harness keeps it current).
+    Missing → the harness's own ``executor/kwob_bootstrap.py`` is run once,
+    with the interpreter and working directory the harness child runs with,
+    network allowed (its Kamigaze host is on the egress allowlist), under a
+    time bound. A failure is an operator's problem, before any run exists:
+    init stops with the script's own error.
+    """
+    harness = manifest.get("harness")
+    if not harness:
+        return "orderbook cache check skipped (no harness configured)"
+    executor = harness_executor_dir(manifest)
+    if executor is None:
+        raise SystemExit(
+            "orderbook cache: harness.args names no .py server script, "
+            "so the harness's executor directory cannot be located"
+        )
+    cache = executor / ORDERBOOK_CACHE
+    if cache.exists():
+        n, block = _orderbook_cache_facts(cache)
+        return f"orderbook cache ok ({n} trade ids, block {block})"
+    script = executor / ORDERBOOK_BOOTSTRAP
+    if not script.is_file():
+        raise SystemExit(f"orderbook cache {cache} is missing and {script} is not there to seed it")
+    try:
+        proc = subprocess.run(
+            [harness["command"], str(script)],
+            cwd=harness.get("cwd") or str(executor.parent),
+            env={**os.environ, **harness.get("env", {})},
+            capture_output=True,
+            text=True,
+            timeout=ORDERBOOK_BOOTSTRAP_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(
+            f"orderbook cache seeding timed out after {ORDERBOOK_BOOTSTRAP_TIMEOUT_S} s ({script})"
+        ) from exc
+    except OSError as exc:
+        raise SystemExit(f"orderbook cache seeding could not run {script}: {exc}") from exc
+    if proc.returncode != 0:
+        said = (proc.stderr or proc.stdout or "").strip()[-ORDERBOOK_ERROR_TAIL_CHARS:]
+        raise SystemExit(f"orderbook cache seeding failed (exit {proc.returncode}): {said}")
+    if not cache.exists():
+        raise SystemExit(f"orderbook cache seeding exited 0 and wrote no {cache}")
+    n, block = _orderbook_cache_facts(cache)
+    return f"orderbook cache seeded ({n} trade ids, block {block})"
+
+
 def check_environment(manifest: dict[str, Any], run_dir: Path) -> list[str]:
     """Bring-up assertions at ≥ ``shell`` (D8, P12): a mismatch starts no run.
 
@@ -523,6 +612,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     harness_tool_names: list[str] = []
     if args.skip_connectivity:
         print("connectivity checks skipped")
+        print("orderbook cache check skipped")
     else:
         rpc_url = manifest.get("chain_rpc_url")
         if rpc_url:
@@ -537,6 +627,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(check_provider(manifest))
         harness_line, harness_tool_names = check_harness(manifest)
         print(harness_line)
+        print(check_orderbook_cache(manifest))
         print(check_lens(manifest))
         for line in check_environment(manifest, run_dir):
             print(line)

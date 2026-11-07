@@ -1139,7 +1139,19 @@ run/
   harness's standing text is, and exits with the pairing message when a
   4.x harness's standing text did not arrive, D1), emits
   `run_start` (and, from 0.8.0, exits with the pairing message for a
-  harness whose MAJOR is below 5). **On the shell rungs** (0.8.0) the
+  harness whose MAJOR is below 5). **The harness's order-book cache**
+  (0.8.2, F-TS7): after the handshake, `init` looks for
+  `<executor>/.cache/kwob_trades.json` beside the harness's server script
+  (the first `.py` of `harness.args`, resolved against `harness.cwd`) —
+  the trade ids `get_item_orderbook` needs, which no image ships — and
+  prints `orderbook cache ok (<n> trade ids, block <b>)` when it is there;
+  when it is not, it runs the harness's own `executor/kwob_bootstrap.py`
+  once (the harness's command and working directory, network allowed,
+  300 s), prints `orderbook cache seeded (<n> trade ids, block <b>)`, and
+  on any failure exits with the script's error before `run_start`. The
+  deployment keeps the cache on the run directory (`harness-cache/`,
+  `docs/packaging.md`); the harness keeps it current after that.
+  **On the shell rungs** (0.8.0) the
   checks also assert the
   environment, the I30 pattern — a mismatch starts no run: the container
   the manifest names exists and runs; `command -v keeper` inside it FAILS
@@ -1156,8 +1168,9 @@ run/
   it. From 0.8.0 `init` also refuses an unknown rung, and a shell rung that
   names no environment container, before it writes anything of the run's
   record (D3). **There is no key path through init**: it never generates, imports,
-  or writes key material. `--skip-connectivity` skips the four checks and
-  the environment's (and leaves `run_start.harness_tools` empty).
+  or writes key material. `--skip-connectivity` skips the four checks,
+  the order-book cache's (`orderbook cache check skipped`) and the
+  environment's (and leaves `run_start.harness_tools` empty).
 - `kami-agent run-session --run-dir DIR [--manual]` — one session (P1).
 - `kami-agent status --run-dir DIR` — prints the `state.json` summary.
   Operator-facing; never an agent channel.

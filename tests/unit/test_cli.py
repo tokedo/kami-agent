@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -414,3 +415,120 @@ def test_load_env_file_existing_env_wins(tmp_path, monkeypatch):
     assert os.environ["A_KEY"] == "from_env"
     assert os.environ["B_KEY"] == "b"
     monkeypatch.delenv("B_KEY")
+
+
+# --- 0.8.2 (F-TS7): init seeds the harness's order-book cache ------------------------------
+
+
+@pytest.fixture
+def harness_tree(tmp_path):
+    """A harness checkout as the manifest names it: cwd + executor/server.py."""
+    root = tmp_path / "kami-harness"
+    executor = root / "executor"
+    executor.mkdir(parents=True)
+    (executor / "server.py").write_text("")
+    (executor / "kwob_bootstrap.py").write_text("")
+    manifest = {
+        "harness": {"command": "python3", "args": ["executor/server.py"], "cwd": str(root)},
+    }
+    return manifest, executor / ".cache" / "kwob_trades.json"
+
+
+def write_cache(path, n, block):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    trade_ids = [hex(0x10 + i) for i in range(n)]
+    path.write_text(json.dumps({"block": block, "trade_ids": trade_ids}))
+
+
+def test_a_present_order_book_cache_is_reported_and_not_reseeded(harness_tree, monkeypatch):
+    manifest, cache = harness_tree
+    write_cache(cache, 2, 123)
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)))
+    assert cli.check_orderbook_cache(manifest) == "orderbook cache ok (2 trade ids, block 123)"
+    assert calls == []
+
+
+def test_a_missing_order_book_cache_is_seeded_by_the_harness_script(harness_tree, monkeypatch):
+    manifest, cache = harness_tree
+    calls = []
+
+    def bootstrap(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        write_cache(cache, 3, 456)
+        return subprocess.CompletedProcess(cmd, 0, stdout="wrote it\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", bootstrap)
+    assert cli.check_orderbook_cache(manifest) == "orderbook cache seeded (3 trade ids, block 456)"
+    ((cmd, kwargs),) = calls
+    executor = cache.parent.parent
+    assert cmd == ["python3", str(executor / "kwob_bootstrap.py")]
+    assert kwargs["cwd"] == manifest["harness"]["cwd"]
+    assert kwargs["timeout"] == 300
+
+
+def test_a_failed_seeding_fails_init_with_the_scripts_error(harness_tree, monkeypatch):
+    manifest, cache = harness_tree
+
+    def bootstrap(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="Traceback ...\nhttpx.ConnectError: name resolution failed\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", bootstrap)
+    with pytest.raises(SystemExit) as failed:
+        cli.check_orderbook_cache(manifest)
+    assert "orderbook cache seeding failed (exit 1)" in str(failed.value)
+    assert "httpx.ConnectError: name resolution failed" in str(failed.value)
+    assert not cache.exists()
+
+
+def test_a_seeding_that_times_out_fails_init(harness_tree, monkeypatch):
+    manifest, _ = harness_tree
+
+    def bootstrap(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", bootstrap)
+    with pytest.raises(SystemExit, match="timed out after 300 s"):
+        cli.check_orderbook_cache(manifest)
+
+
+def test_init_fails_before_run_start_when_seeding_fails(
+    tmp_path, manifest_path, harness_tree, monkeypatch
+):
+    """An operator's problem, found at bring-up: no run exists afterwards."""
+    harness_manifest, _ = harness_tree
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(harness_manifest)
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    monkeypatch.setenv("MAINNET_RPC_URL", "http://example.test")
+    monkeypatch.setattr(cli, "check_mainnet_rpc", lambda url: "mainnet RPC ok (chain id 1)")
+    monkeypatch.setattr(cli, "check_provider", lambda m: "provider API ok")
+    monkeypatch.setattr(cli, "check_harness", lambda m: ("harness ok", []))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="boom"),
+    )
+    run_dir = tmp_path / "run"
+    with pytest.raises(SystemExit, match="orderbook cache seeding failed"):
+        cli.main(["init", "--manifest", str(manifest_path), "--run-dir", str(run_dir)])
+    assert not (run_dir / "telemetry.jsonl").exists()
+
+
+def test_init_skips_the_order_book_cache_check_without_connectivity_checks(
+    tmp_path, manifest_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("ran the bootstrap"))
+    cli.main(
+        [
+            "init",
+            "--manifest",
+            str(manifest_path),
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--skip-connectivity",
+        ]
+    )
+    assert "orderbook cache check skipped" in capsys.readouterr().out.splitlines()
