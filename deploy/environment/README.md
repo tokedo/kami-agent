@@ -52,7 +52,9 @@ Root-owned, mode 755 unless stated:
 /srv/run/workspace       created by `kami-agent init`, then given to uid 1000
 /srv/keys/.env           the keys file (0600) — KAMI_KEYS_FILE for the harness, read-only for the keeper
 /srv/lens                the lens daemon's data directory (its socket: kami-lens.sock)
-/srv/keeper              the keeper's data directory (shell_keeper only)
+/srv/keeper              the keeper's data directory and socket (shell_keeper only), at the
+                         same path inside the keeper container, so the paths its `status`
+                         reports are the ones a client dials
 /srv/sockets/lens        the relay's lens socket
 /srv/sockets/keeper      the relay's keeper socket (shell_keeper only)
 ```
@@ -79,7 +81,12 @@ first `up`.
    key, `MAINNET_RPC_URL`, and the owner key only in the owner + operator
    key shape. `/srv/keys/.env` — the operator key (see the two key shapes in
    `docs/packaging.md`). `/srv/run/reference/` — the documentation snapshot.
-   `.env` beside the compose files — from `.env.example`.
+   `.env` beside the compose files — from `.env.example`; on `shell_keeper`
+   it also names the chain the keeper signs on (`KEEPER_RPC_URL`,
+   `KEEPER_WS_RPC_URL`, `KEEPER_WORLD_ADDRESS`, `KEEPER_CHAIN_ID`, the
+   public Yominet values as shipped). The keeper runs armed, and armed it
+   starts its engine only with all of them set: without them the daemon is
+   healthy and answers `status`, and nothing runs.
 3. **The services the run needs before it exists:**
 
    ```sh
@@ -117,7 +124,7 @@ layer). The teardown repeats the revoke before anything is removed:
 
 ```sh
 docker compose -f compose.yaml -f compose.keeper.yaml exec keeper \
-    python -m keeper revoke --account main --socket /data/keeper.sock
+    python -m keeper revoke --account main --socket /srv/keeper/keeper.sock
 docker compose -f compose.yaml [-f compose.keeper.yaml] down
 ```
 

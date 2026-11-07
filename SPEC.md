@@ -1929,7 +1929,14 @@ probed from inside at every session boundary (`shell_state`, P9):
   its own in root-owned directories, so a daemon restart never strands it
   and their data is never in reach. The keeper runs its `lab` profile,
   armed, at most one book per account, ungranted until the agent grants
-  it — the grant is the agent's act through its shell.
+  it — the grant is the agent's act through its shell. From 0.8.2 the
+  definition also gives it the chain it signs on (RPC URL, WebSocket URL,
+  world address, chain id, named in `.env`; armed without the RPC URL,
+  the world address or the chain id its engine never starts while the
+  daemon still answers `status` — F-TS4) and runs it on the paths the
+  environment sees (data directory `/srv/keeper`, socket
+  `/srv/keeper/keeper.sock`, the host path unchanged), so the paths its
+  `status` reports are the ones a client dials (O-TS28).
 - **The scaffold's side of the boundary**: it reaches the container only
   through the Docker Engine API on the socket mounted into its own
   container (no docker CLI), and the keeper through the relay's keeper

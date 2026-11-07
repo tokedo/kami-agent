@@ -6,10 +6,19 @@ services:
     image: kami-keeper:${KEEPER_SHA}
     container_name: kami-keeper
     network_mode: host
-    volumes: ["/srv/lens:/srv/lens", "/srv/keys:/srv/keys:ro", "/srv/keeper:/data"]
+    # F-TS4: armed, the keeper starts its engine only once RPC URL, world and chain id are set (.env).
+    # O-TS28: its data and socket at the paths env and agent see, not the image's /data defaults.
+    environment:
+      KAMI_KEEPER_RPC_URL: ${KEEPER_RPC_URL}
+      KAMI_KEEPER_WS_RPC_URL: ${KEEPER_WS_RPC_URL}
+      KAMI_KEEPER_WORLD_ADDRESS: ${KEEPER_WORLD_ADDRESS}
+      KAMI_KEEPER_CHAIN_ID: ${KEEPER_CHAIN_ID}
+      KAMI_KEEPER_DATA_DIR: /srv/keeper
+      KAMI_KEEPER_SOCKET: /srv/keeper/keeper.sock
+    volumes: ["/srv/lens:/srv/lens", "/srv/keys:/srv/keys:ro", "/srv/keeper:/srv/keeper"]
     command: ["--max-books-per-account", "1", "--armed"]
     depends_on: {lens: {condition: service_healthy}}
-    healthcheck: {test: ["CMD", "python", "-m", "keeper", "status", "--socket", "/data/keeper.sock"], interval: 30s, timeout: 30s, retries: 10}
+    healthcheck: {test: ["CMD", "python", "-m", "keeper", "status", "--socket", "/srv/keeper/keeper.sock"], interval: 30s, timeout: 30s, retries: 10}
     restart: unless-stopped
   sockets:
     command:
