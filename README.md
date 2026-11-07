@@ -145,7 +145,8 @@ up no session number. Against a harness that states no version at all it
 injects nothing and sends exactly the prompt 0.6.0 sent.
 Contract: [SPEC.md](SPEC.md) D1.
 
-The pinned and tested harness is **kami-harness 5.0.0**: the image
+The pinned and tested harness is **kami-harness 5.0.1** (5.0.0's 100 tools
+and `tools_hash`, its quest catalogs at the world pin): the image
 default, the example manifest, the recorded tool surface and the live
 tier all name it, and its standing text is the same, byte for byte, as
 4.0.0's. From 4.4.0 a read called with no account — the
@@ -156,7 +157,7 @@ is the harness's plain error that no account is registered. Against
 4.0.0–4.3.0 the same call answers for the daemon's configured default
 operator, so on those harnesses the roster fails until that is set.
 
-**kami-lens 1.0.1 or newer is required for correct reads; 1.1.0 is
+**kami-lens 1.0.1 or newer is required for correct reads; 1.1.1 is
 recommended and pinned.** kami-lens 1.0.0 could keep an earlier
 transaction's value when several transactions in one block wrote the same
 thing — a kami's health, a timestamp, a harvest's state — and serve that

@@ -160,7 +160,7 @@ is visible rather than silent — `tool_call` with `initiator: "scaffold"`
 and `ok: false` on the first event of every session — so check that
 field before concluding a run is healthy.
 
-**Install kami-lens 1.1.0** (the pinned version; **1.0.1 at the least**).
+**Install kami-lens 1.1.1** (the pinned version; **1.0.1 at the least**).
 kami-lens 1.0.0 could serve a stale value — a kami's health, a timestamp,
 a harvest's state — when several transactions in one block wrote it,
 with nothing marked degraded, until it was written again; 1.0.1 fixed
