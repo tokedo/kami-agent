@@ -672,7 +672,11 @@ Reader notes (stable semantics):
   of each. `shell_log` is the run-dir path of the call's whole output. A
   docker failure (no container, exec refused) is `ok: false` with the
   daemon's own words in `error`, and carries none of the five fields.
-  `source` is `scaffold`, as for every scaffold tool.
+  `source` is `scaffold`, as for every scaffold tool. **Lens reads the
+  model makes through the shell** (the `kami-lens` CLI, or the socket from
+  python) are `tool_call` rows with `tool: shell` (O-TS27): per-tool lens
+  counts under-count on the shell rungs, and carry no `lens_stale` /
+  `lens_block` — count the shell log (`shell_log`) when it matters.
 
 - `llm_call.stop_reason` accepts the P8 enum **plus `error`**, which
   marks a failed-but-logged attempt with no provider stop reason.
@@ -1001,6 +1005,15 @@ opened:
   `SHELL_LOG_MAX_BYTES`, 32 MiB per call, the log saying where it cut) — a
   run-directory internal never mounted into the environment. The
   `tool_call` row names it (`shell_log`, P9).
+- **What the command reaches is not a row of its own** (O-TS27). A lens
+  read the model makes through the shell — the `kami-lens` CLI, or the
+  lens socket from python — and on `shell_keeper` every keeper call the
+  model makes is one `tool_call` row with `tool: shell`, never a `lens_*`
+  or keeper row (the scaffold's own two keeper rows at `run_complete` are
+  `source: keeper`); the
+  call's own text and output are in its `shell/` log. So per-tool lens
+  counts under-count on the shell rungs: count the shell logs when it
+  matters.
 
 `search_reference` in detail, because every number in it is a pinned
 artifact of the arms it serves: the index is built lazily, once per
