@@ -99,8 +99,11 @@ first `up`.
    rungs, the environment's assertions: the container runs; `command -v
    keeper` fails on `shell` and succeeds on `shell_keeper`; on
    `shell_keeper` `keeper status` answers from inside with the `lab`
-   profile and the keeper container's image names `pins.keeper_sha`;
-   `kami-lens` answers from inside. A mismatch starts no run.
+   profile, the keeper container's image names `pins.keeper_sha`, and its
+   engine has started (`status.engine`: an armed keeper without its chain
+   settings refuses to start it, and init prints `keeper engine not
+   started:` with the keeper's own reason); `kami-lens` answers from
+   inside. A mismatch starts no run.
 
    ```sh
    docker compose -f compose.yaml [-f compose.keeper.yaml] run --rm agent \

@@ -6,12 +6,22 @@ grant revoked, the environment stopped — against a stand-in Docker Engine
 API and a stand-in keeper socket.
 """
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fake_docker import ExecReply, FakeContainer, FakeDocker
-from fake_keeper import FakeKeeper, Ledger, Refuse, tx_row
+from fake_keeper import (
+    ENGINE_REFUSED,
+    ENGINE_STARTED,
+    NO_ENGINE_BLOCK,
+    FakeKeeper,
+    Ledger,
+    Refuse,
+    status_data,
+    tx_row,
+)
 
 from kami_agent import cli
 from kami_agent.adapters.base import AdapterResponse, SamplingParams, StopReason, ToolCall, Usage
@@ -66,11 +76,20 @@ def shell_call(command, id_="s1"):
 class Machine:
     """A container that keeps a process table, enough to watch persistence."""
 
-    def __init__(self, *, keeper=False, lens_state="LIVE", keeper_exit=0, keeper_profile="lab"):
+    def __init__(
+        self,
+        *,
+        keeper=False,
+        lens_state="LIVE",
+        keeper_exit=0,
+        keeper_profile="lab",
+        keeper_engine=ENGINE_STARTED,
+    ):
         self.keeper = keeper
         self.lens_state = lens_state
         self.keeper_exit = keeper_exit
         self.keeper_profile = keeper_profile
+        self.keeper_engine = keeper_engine
         self.next_pid = 500
 
     def __call__(self, container, call):
@@ -92,10 +111,13 @@ class Machine:
             if text.endswith("keeper status"):
                 if not self.keeper:
                     return ExecReply(stderr=b"keeper: not found\n", exit_code=127)
-                body = (
-                    '{"id": 1, "ok": true, "data": {"grants": []}, '
-                    f'"meta": {{"profile": "{self.keeper_profile}", "keeperVersion": "1.0.0"}}}}'
-                ).encode()
+                frame = {
+                    "id": 1,
+                    "ok": True,
+                    "data": status_data(self.keeper_engine),
+                    "meta": {"profile": self.keeper_profile, "keeperVersion": "1.0.0"},
+                }
+                body = json.dumps(frame).encode()
                 return ExecReply(stdout=body, exit_code=self.keeper_exit)
             return ExecReply(exit_code=0)
         if command.startswith("nohup sleep"):
@@ -203,7 +225,65 @@ def test_init_passes_a_keeper_rung_whose_keeper_image_names_the_pin(run_dir):
     )
     with FakeDocker(env, keeper) as docker:
         lines = cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
-    assert "keeper ok (profile lab, version 1.0.0, image kami-keeper:bbe3929aa11)" in lines
+    assert (
+        "keeper ok (profile lab, version 1.0.0, image kami-keeper:bbe3929aa11, engine started)"
+        in lines
+    )
+
+
+# --- 0.8.2 (F-TS4): an armed keeper whose engine did not start starts no run -------------
+
+
+def keeper_rung_with_engine(engine):
+    keeper = FakeContainer("kami-keeper", image=f"kami-keeper:{KEEPER_PIN}")
+    env = FakeContainer("kami-env", on_exec=Machine(keeper=True, keeper_engine=engine))
+    return FakeDocker(env, keeper)
+
+
+def test_init_passes_a_keeper_whose_engine_started(run_dir):
+    with keeper_rung_with_engine(ENGINE_STARTED) as docker:
+        lines = cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
+    assert (
+        f"keeper ok (profile lab, version 1.0.0, image kami-keeper:{KEEPER_PIN}, engine started)"
+        in lines
+    )
+
+
+def test_init_refuses_a_keeper_whose_engine_refused_to_start(run_dir):
+    """F-TS4: armed with no chain settings, the keeper's daemon is healthy,
+    `status` answers ok with the `lab` profile and its image names the pin —
+    and the engine runs nothing. Only `status.engine.refusals` says so; init
+    says it too, in the keeper's own words, and starts no run."""
+    with keeper_rung_with_engine(ENGINE_REFUSED) as docker:
+        environment = Environment(
+            DockerClient(docker.socket_path),
+            "kami-env",
+            run_dir,
+            keeper_rung=True,
+            keeper_container="kami-keeper",
+        )
+        with pytest.raises(EnvironmentCheckError) as refused:
+            environment.bring_up_checks(keeper_sha=KEEPER_PIN)
+        with pytest.raises(SystemExit, match="keeper engine not started"):
+            cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
+    assert str(refused.value) == "keeper engine not started: " + ENGINE_REFUSED["refusals"][0]
+
+
+def test_init_refuses_a_keeper_whose_status_has_no_engine_block(run_dir):
+    """A status frame without the engine block is read as not started: the
+    rung's keeper (1.0.1 and newer) always states it."""
+    with keeper_rung_with_engine(NO_ENGINE_BLOCK) as docker:
+        with pytest.raises(SystemExit) as refused:
+            cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
+    message = str(refused.value)
+    assert message.startswith("keeper engine not started")
+    assert "1.0.1" in message
+
+
+def test_init_refuses_a_keeper_whose_engine_is_stopped_with_no_refusal(run_dir):
+    with keeper_rung_with_engine({"started": False, "refusals": []}) as docker:
+        with pytest.raises(SystemExit, match="keeper engine not started"):
+            cli.check_environment(manifest(docker, "shell_keeper"), run_dir)
 
 
 def test_init_refuses_a_keeper_image_that_does_not_name_the_pin(run_dir):

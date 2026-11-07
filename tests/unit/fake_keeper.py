@@ -39,6 +39,30 @@ def meta() -> dict[str, Any]:
     }
 
 
+ENGINE_STARTED = {"started": True, "refusals": []}
+# The refusal an armed keeper with no chain settings states (keeper/config.py).
+ENGINE_REFUSED = {
+    "started": False,
+    "refusals": [
+        "signing requested, but rpcUrl / worldAddress / chainId are not all set; "
+        "nothing runs until they are"
+    ],
+}
+NO_ENGINE_BLOCK = object()
+
+
+def status_data(engine: Any = ENGINE_STARTED, grants: list[str] | None = None) -> dict[str, Any]:
+    """The ``data`` of a keeper ``status`` frame, in the keeper's shape (core.py ``h_status``).
+
+    Only the keys the scaffold reads: ``engine`` (``{started, refusals}``)
+    and ``grants``. ``engine=NO_ENGINE_BLOCK`` leaves the block out.
+    """
+    data: dict[str, Any] = {"grants": list(grants or [])}
+    if engine is not NO_ENGINE_BLOCK:
+        data["engine"] = engine
+    return data
+
+
 class FakeKeeper:
     def __init__(
         self,

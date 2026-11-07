@@ -393,9 +393,10 @@ def check_environment(manifest: dict[str, Any], run_dir: Path) -> list[str]:
 
     The container runs; ``command -v keeper`` fails on ``shell`` and
     succeeds on ``shell_keeper``; on ``shell_keeper`` the keeper answers
-    from inside with the ``lab`` profile and its container's image names
-    ``pins.keeper_sha``; ``kami-lens`` answers from inside; the rung's
-    prompt appendices are in the run directory.
+    from inside with the ``lab`` profile, its container's image names
+    ``pins.keeper_sha`` and its engine has started (F-TS4); ``kami-lens``
+    answers from inside; the rung's prompt appendices are in the run
+    directory.
     """
     factory = environment_factory(manifest, run_dir)
     if factory is None:

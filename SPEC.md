@@ -1145,7 +1145,12 @@ run/
   the manifest names exists and runs; `command -v keeper` inside it FAILS
   on `shell` and SUCCEEDS on `shell_keeper`; on `shell_keeper` `keeper
   status` answers from inside with `meta.profile == "lab"` and the keeper
-  container's image reference names `pins.keeper_sha`; `kami-lens health`
+  container's image reference names `pins.keeper_sha`, and (0.8.2, F-TS4)
+  its `data.engine` says `started: true` with no `refusals` — an armed
+  keeper missing its chain settings is a healthy daemon whose engine runs
+  nothing, so init refuses it with `keeper engine not started: <the
+  keeper's refusals>`, and a frame with no engine block reads as not
+  started; `kami-lens health`
   answers from inside; the rung's appendices are in the run directory.
   `run_start` records `pins.keeper_sha` on `shell_keeper` and `""` below
   it. From 0.8.0 `init` also refuses an unknown rung, and a shell rung that
