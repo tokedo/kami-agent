@@ -278,7 +278,7 @@
         "txs": {
           "type": "array",
           "items": { "type": "object" },
-          "description": "Per-transaction receipt evidence a multi-transaction result carried in band, verbatim and in document order — one entry per hop or per item, each with whatever of tx_hash / status / block / gas_used the harness reported, INCLUDING the step that failed. Those transactions are final on-chain whether or not the call as a whole succeeded, so a transaction-keyed reconciliation that ignores them comes up short. Absent when the payload carried none. Entries are copied, never normalized or summed"
+          "description": "Per-transaction receipt evidence a multi-transaction result carried in band, and (0.8.2) the per-step receipts of a batch tool (steps[] rows that carry a tx_hash), verbatim and in document order — one entry per hop, per item or per step, each with whatever of tx_hash / status / block / gas_used the harness reported, INCLUDING the step that failed. Those transactions are final on-chain whether or not the call as a whole succeeded, so a transaction-keyed reconciliation that ignores them comes up short. Absent when the payload carried none. Entries are copied, never normalized or summed"
         },
         "lens_stale": {
           "type": "boolean",

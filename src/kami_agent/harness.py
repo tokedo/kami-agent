@@ -379,6 +379,13 @@ def _extract_txs(structured: Any, text: str) -> tuple[dict[str, Any], ...]:
     one per row inside a batch's result list — so this walks rather than
     reading a fixed path, in document order, bounded depth. Entries are
     copied verbatim; nothing is normalized or summed.
+
+    A pipelined batch (``act_sequence``) reports no ``txs``: each step is a
+    row of its ``steps`` list with its own status and, when a transaction
+    exists, its ``tx_hash`` and receipt fields (F-TS6, 0.8.2). The same walk
+    copies every such row that carries a string ``tx_hash`` — a step that
+    was never sent has none and is no receipt — after the ``txs`` entries of
+    the same object, and never a second row for a hash already collected.
     """
     for candidate in (structured, _maybe_json(text)):
         found: list[dict[str, Any]] = []
@@ -395,6 +402,14 @@ def _collect_txs(node: Any, out: list[dict[str, Any]], depth: int) -> None:
         entries = node.get("txs")
         if isinstance(entries, list):
             out.extend(e for e in entries if isinstance(e, dict))
+        steps = node.get("steps")
+        if isinstance(steps, list):
+            seen = {e.get("tx_hash") for e in out}
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("tx_hash"), str):
+                    if step["tx_hash"] not in seen:
+                        seen.add(step["tx_hash"])
+                        out.append(step)
         for key, value in node.items():
             if key != "txs":
                 _collect_txs(value, out, depth + 1)

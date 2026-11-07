@@ -795,10 +795,21 @@ Reader notes (stable semantics):
   tells readers not to parse. Batch errors and validation rejections
   still carry none, because neither is one transaction.
 - **`tool_call.txs[]`** carries the per-transaction receipts a
-  multi-transaction result reported in band, verbatim and in document
-  order, including the step that failed. Those transactions are final
-  on-chain regardless of the call's overall outcome; a transaction-keyed
-  reconciliation that ignores them comes up short.
+  multi-transaction result reported in band, and the per-step receipts of
+  a batch tool (`steps[]`), verbatim and in document order, including the
+  step that failed. Those transactions are final on-chain regardless of
+  the call's overall outcome; a transaction-keyed reconciliation that
+  ignores them comes up short. **From 0.8.2 (F-TS6)** an `act_sequence`
+  result — which reports each step as a row of `steps[]` with its own
+  status and, when a transaction exists, its `tx_hash` / `block` /
+  `gas_used` / `fee_wei` and no `txs` at all — contributes every step row
+  that carries a hash, copied verbatim after any `txs` entries of the same
+  object; a step that was never sent carries no hash and is not lifted,
+  and a hash already collected is not lifted twice. Through 0.8.1 a
+  7-transaction batch left no hash in telemetry (run 3 s1: 46 hashes
+  recorded against 53 chain transactions). The session journal's
+  `tx_hashes` (P15) are read from the same list, so they name a batch's
+  step hashes too.
 - `session_start.harness_tools_hash` is the hash the **harness**
   published of its **own** registry, taken verbatim from the handshake
   (bare hex). It answers a different question over different bytes than

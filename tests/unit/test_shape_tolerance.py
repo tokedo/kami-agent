@@ -1298,6 +1298,23 @@ def test_cooldowns_reach_the_model_untouched(run_dir, tool, result):
     assert "result_error_shaped" not in row
 
 
+def test_a_sequence_row_records_each_steps_receipt(run_dir):
+    """F-TS6 through a session: the act_sequence tool_call row carries every
+    step that has a hash in `txs`, verbatim, and the session's journal entry
+    names those hashes (P15: the hashes the session's results carried) —
+    the result the model was shown is untouched."""
+    _, adapter, events = run(run_dir, {"act_sequence": SEQUENCE_STOP_THEN_REVERT}, "act_sequence")
+    assert results_seen(adapter)["c0"].content == json.dumps(
+        SEQUENCE_STOP_THEN_REVERT, ensure_ascii=False
+    )
+    row = next(e for e in events if e["event"] == "tool_call" and e["tool"] == "act_sequence")
+    assert row["txs"] == SEQUENCE_STOP_THEN_REVERT["steps"]
+    assert "tx_hash" not in row  # many transactions, no single one
+    assert "tx_terminal_state" not in row
+    (entry,) = journal.read_entries(run_dir)
+    assert entry["tx_hashes"] == [H1, H2]
+
+
 def test_sequence_cooldown_rows_reach_the_model_untouched(run_dir):
     _, adapter, events = run(run_dir, {"act_sequence": SEQUENCE_WITH_COOLDOWNS}, "act_sequence")
     seen = results_seen(adapter)["c0"]
