@@ -25,8 +25,9 @@ daemon's own data, the docker socket — is outside it, in `agent`, `keeper`
 and the host. What is not mounted into `env` does not exist there: not the
 run directory's internals (`/srv/run`: `.env`, `state.json`,
 `telemetry.jsonl`, `errors.jsonl`, `prompts/`, `transcripts/`, `shell/`,
-`harness-lanes/`), not `/srv/keys`, not the docker socket, not the lens's or
-the keeper's data directories, and no network route (`network_mode: none`).
+`harness-lanes/`, `harness-cache/`), not `/srv/keys`, not the docker
+socket, not the lens's or the keeper's data directories, and no network
+route (`network_mode: none`).
 A later loop swap adds a `harness` service reachable from `env` and replaces
 `agent`; nothing here changes shape for it.
 
@@ -50,9 +51,13 @@ Root-owned, mode 755 unless stated:
 ```
 /srv/run                 the run directory (SPEC P12); the agent container's /srv/run
 /srv/run/workspace       created by `kami-agent init`, then given to uid 1000
+/srv/run/harness-cache   the harness's order-book cache (kwob_trades.json), the agent
+                         container's /opt/kami-harness/executor/.cache; seeded by `init`
 /srv/keys/.env           the keys file (0600) — KAMI_KEYS_FILE for the harness, read-only for the keeper
 /srv/lens                the lens daemon's data directory (its socket: kami-lens.sock)
-/srv/keeper              the keeper's data directory (shell_keeper only)
+/srv/keeper              the keeper's data directory and socket (shell_keeper only), at the
+                         same path inside the keeper container, so the paths its `status`
+                         reports are the ones a client dials
 /srv/sockets/lens        the relay's lens socket
 /srv/sockets/keeper      the relay's keeper socket (shell_keeper only)
 ```
@@ -79,7 +84,12 @@ first `up`.
    key, `MAINNET_RPC_URL`, and the owner key only in the owner + operator
    key shape. `/srv/keys/.env` — the operator key (see the two key shapes in
    `docs/packaging.md`). `/srv/run/reference/` — the documentation snapshot.
-   `.env` beside the compose files — from `.env.example`.
+   `.env` beside the compose files — from `.env.example`; on `shell_keeper`
+   it also names the chain the keeper signs on (`KEEPER_RPC_URL`,
+   `KEEPER_WS_RPC_URL`, `KEEPER_WORLD_ADDRESS`, `KEEPER_CHAIN_ID`, the
+   public Yominet values as shipped). The keeper runs armed, and armed it
+   starts its engine only with all of them set: without them the daemon is
+   healthy and answers `status`, and nothing runs.
 3. **The services the run needs before it exists:**
 
    ```sh
@@ -92,8 +102,16 @@ first `up`.
    rungs, the environment's assertions: the container runs; `command -v
    keeper` fails on `shell` and succeeds on `shell_keeper`; on
    `shell_keeper` `keeper status` answers from inside with the `lab`
-   profile and the keeper container's image names `pins.keeper_sha`;
-   `kami-lens` answers from inside. A mismatch starts no run.
+   profile, the keeper container's image names `pins.keeper_sha`, and its
+   engine has started (`status.engine`: an armed keeper without its chain
+   settings refuses to start it, and init prints `keeper engine not
+   started:` with the keeper's own reason); `kami-lens` answers from
+   inside. A mismatch starts no run. Before them, on every rung, `init`
+   seeds the harness's order-book cache when `/srv/run/harness-cache` has
+   none (the harness's own `executor/kwob_bootstrap.py`, from the Kamigaze
+   snapshot; `orderbook cache seeded (…)`, or `orderbook cache ok (…)` when
+   present) — without it `get_item_orderbook` fails on every call — and a
+   failed seeding starts no run.
 
    ```sh
    docker compose -f compose.yaml [-f compose.keeper.yaml] run --rm agent \
@@ -117,8 +135,22 @@ layer). The teardown repeats the revoke before anything is removed:
 
 ```sh
 docker compose -f compose.yaml -f compose.keeper.yaml exec keeper \
-    python -m keeper revoke --account main --socket /data/keeper.sock
+    python -m keeper revoke --account main --socket /srv/keeper/keeper.sock
 docker compose -f compose.yaml [-f compose.keeper.yaml] down
 ```
+
+To end a run before its budget or horizon does, run the same end by
+hand inside the agent container (`exec`, so the run lock's process check
+sees the loop's own sessions):
+
+```sh
+docker compose -f compose.yaml [-f compose.keeper.yaml] exec agent \
+    kami-agent end-run --run-dir /srv/run
+```
+
+It prints `run_complete manual` (the event's `reason` is `manual`),
+`already_complete` on a run that has ended, or `lock_held` with exit 1
+while a session is running — then try again after it. Every later poll of
+the loop answers `already_complete`.
 
 Pull `/srv/run` (see `docs/packaging.md`), `shell/` included.

@@ -154,6 +154,11 @@ BRIEF_TOOL = "lens_roster"
 BRIEF_ARGS: dict[str, Any] = {}
 BRIEF_CALL_ID = "brief_1"
 
+# The harness's world-state reads: every tool named so answers the kami-lens
+# daemon's envelope, passed through, whose meta carries the daemon's own
+# freshness (stale, blockNumber). Recorded on each such row (P9, O-TS26).
+LENS_TOOL_PREFIX = "lens_"
+
 # Session-start gas balances (SPEC P1.12, D1). Gas is an in-world resource
 # and the wallets that hold it belong to the run's account, so the balances
 # are a world fact the agent is shown at session start on every profile.
@@ -716,7 +721,7 @@ class AgentLoop:
         except Exception as exc:
             content = f"tool execution failed: {exc}"
             ok = False
-        stale, block, data = _roster_provenance(content) if ok else (None, None, None)
+        stale, block, data = _lens_envelope(content) if ok else (None, None, None)
         # Kept for this session's journal entry (P15): the roster the
         # session opened on, so a successor can see what changed rather
         # than inferring it. Operator-side reuse of a value the agent
@@ -1085,6 +1090,8 @@ class AgentLoop:
                 error_shaped=outcome.get("error_shaped", False),
                 provider_call_id=intent.id,
                 provider_call_id_duplicate=duplicate_id,
+                lens_stale=outcome.get("lens_stale"),
+                lens_block=outcome.get("lens_block"),
                 query=search[0] if search is not None else None,
                 hits=search[1] if search is not None else None,
                 wait_requested_s=waited[0] if waited is not None else None,
@@ -1204,6 +1211,11 @@ class AgentLoop:
             return failure(f"tool execution failed: {exc}")
 
         content, tx_hash, terminal_state, txs = raw
+        # A lens read's freshness, as its envelope stated it (P9, O-TS26):
+        # read off the raw content, before the byte cap can cut the JSON.
+        lens_stale = lens_block = None
+        if source == SOURCE_HARNESS and intent.name.startswith(LENS_TOOL_PREFIX):
+            lens_stale, lens_block, _ = _lens_envelope(content)
         # Slice-hint only where re-readable via workspace_read (I16).
         reread_path = intent.args.get("path") if intent.name == "workspace_read" else None
         capped = cap_tool_result(
@@ -1221,6 +1233,8 @@ class AgentLoop:
             "tx_hash": tx_hash,
             "terminal_state": terminal_state,
             "txs": txs,
+            "lens_stale": lens_stale,
+            "lens_block": lens_block,
             # Classified on the raw (pre-truncation) content: success-shaped
             # harness results can still carry an on-chain revert.
             "error_or_revert": is_error_or_revert(True, content),
@@ -1459,16 +1473,18 @@ def _signature_args(intent: ToolCall) -> dict[str, Any]:
     return intent.args
 
 
-def _roster_provenance(content: str) -> tuple[bool | None, int | None, Any]:
-    """Freshness and payload of a roster answer, best-effort (SPEC P9).
+def _lens_envelope(content: str) -> tuple[bool | None, int | None, Any]:
+    """Freshness and payload of a lens answer, best-effort (SPEC P9).
 
-    The daemon's envelope reaches the scaffold through the harness now, so
-    these are read out of the serialized result rather than off a response
-    object. Operator-side only (I1): the same values are already inside
-    the payload the agent was shown, and this only saves analysis a
-    transcript parse. Anything unparseable yields nothing — a harness free
-    to change its serialization must never be able to break a session over
-    a field nobody depends on.
+    Every ``lens_*`` result is the daemon's envelope, passed through by the
+    harness, so these are read out of the serialized result rather than off
+    a response object — for the roster brief (whose ``data`` the journal
+    keeps) and, from 0.8.2, for every lens-backed row (O-TS26). Operator-
+    side only (I1): the same values are already inside the payload the
+    agent was shown, and this only saves analysis a transcript parse.
+    Anything unparseable yields nothing — a harness free to change its
+    serialization must never be able to break a session over a field
+    nobody depends on.
     """
     try:
         envelope = json.loads(content)

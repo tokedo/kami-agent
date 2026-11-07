@@ -113,6 +113,10 @@ SESSION_ABORTED = "session_aborted"
 TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_MANUAL = "manual"
 
+# run_complete.reason of the operator-side end (SPEC P9; `kami-agent end-run`).
+# The boundary path's reasons are governor.boundary_check's: budget, t_max.
+END_REASON_MANUAL = "manual"
+
 # session_refused reasons (SPEC P9; closed enum in the schema) live beside
 # the pairing check that raises them (harness.py), on HarnessPairingError.
 
@@ -211,52 +215,7 @@ def run_session(
         telemetry = TelemetryWriter(telemetry_path, run_id=config.run_id, clock=clock)
         with telemetry as writer, error_log:
             # 2. Recover: unmatched session_start → synthetic crash end (P3).
-            crashed = crashed_session(events)
-            if crashed is not None:
-                # Phantom model requests first, so the crash session_end
-                # totals below count them. A request written ahead but never
-                # completed may have been billed; its usage is unknowable, so
-                # it is recorded on exactly the terms any other
-                # failed-but-billed attempt is (cost 0, usage_unknown) and
-                # flagged as synthetic. Idempotent: the row it writes carries
-                # the same request_seq, so a second pass finds it completed.
-                for seq in phantom_requests(events, crashed):
-                    events.append(
-                        writer.emit(
-                            "llm_call",
-                            session=crashed,
-                            model=config.model,
-                            input_tokens=0,
-                            output_tokens=0,
-                            cache_read_tokens=0,
-                            cache_write_tokens=0,
-                            cost_usd=0.0,
-                            cumulative_usd=state.cumulative_usd,
-                            cumulative_tokens=state.cumulative_tokens,
-                            latency_ms=0.0,
-                            stop_reason="error",
-                            retry_count=0,
-                            usage_unknown=True,
-                            request_seq=seq,
-                            phantom=True,
-                        )
-                    )
-                record = writer.emit(
-                    "session_end",
-                    session=crashed,
-                    reason="crash",
-                    **session_totals(events, crashed),
-                )
-                events.append(record)
-                # A crashed session wrote no journal entry of its own — the
-                # process died before session end. Without this the elapsed
-                # time the NEXT entry reports would silently span two
-                # sessions, which is the one number the journal exists to
-                # make honest (P15). Written from the folded stream, so it
-                # carries what telemetry knows and nothing it does not: the
-                # roster is absent, because the brief's answer lived only
-                # in a transcript that was never written.
-                _journal_crashed_session(run_dir, events, crashed, config.caps.journal_max_bytes)
+            _recover(writer=writer, config=config, state=state, events=events, run_dir=run_dir)
             save_state(state, state_path)  # cache refresh from the fold
 
             if state.run_status == RUN_COMPLETE:
@@ -271,39 +230,18 @@ def run_session(
                 now=clock(),
             )
             if stop_reason is not None:
-                # The end of the run on the shell rungs (SPEC P1): the
-                # keeper's books stopped and its grant revoked, the last of
-                # its transactions read, the environment stopped — all
-                # BEFORE run_complete, which records how that went. A run
-                # that dies in here has no run_complete, so the next
-                # invocation trips the same boundary and does it all again:
-                # every step is idempotent.
-                end_fields = _end_of_run(
+                _complete_run(
                     writer=writer,
-                    session=state.session_counter,
+                    config=config,
                     state=state,
+                    state_path=state_path,
                     events=events,
                     run_dir=run_dir,
-                    environment=environment_factory() if environment_factory else None,
-                    keeper=keeper_factory() if keeper_factory else None,
-                )
-                writer.emit(
-                    "run_complete",
-                    session=state.session_counter,
                     reason=stop_reason,
-                    totals={
-                        "sessions": state.session_counter,
-                        "llm_calls": sum(1 for e in events if e.get("event") == "llm_call"),
-                        "cumulative_usd": state.cumulative_usd,
-                        "cumulative_tokens": state.cumulative_tokens,
-                        "overspend_usd": overspend_usd(state.cumulative_usd, config.budget_usd),
-                    },
-                    **end_fields,
+                    environment_factory=environment_factory,
+                    keeper_factory=keeper_factory,
+                    disable_supervisor=disable_supervisor,
                 )
-                state.run_status = RUN_COMPLETE
-                save_state(state, state_path)
-                if disable_supervisor is not None:
-                    disable_supervisor()
                 return RUN_COMPLETED
 
             # 4. Start session: increment and persist the counter before any
@@ -332,6 +270,170 @@ def run_session(
             )
     finally:
         release_lock(lock_path)
+
+
+def end_run(
+    config: RunConfig,
+    *,
+    environment_factory: Callable[[], Environment] | None = None,
+    keeper_factory: Callable[[], KeeperClient] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    disable_supervisor: Callable[[], None] | None = None,
+) -> str:
+    """The operator-side end of a run, ``run_complete`` reason ``manual`` (P1, P12).
+
+    ``kami-agent end-run`` (0.8.2, F-TS5). The schema always named
+    ``manual``; no code path emitted it, so a run ended only at a due wake
+    by ``budget`` or ``t_max``. This is the boundary path's end with the
+    operator as the trigger: the lock acquired as ``run_session`` acquires
+    it (held → ``lock_held``, nothing written), the stream folded and
+    recovered as it recovers it, ``already_complete`` when the run is, and
+    otherwise the same end of the run, the same ``run_complete`` and the
+    same persisted state through :func:`_complete_run` — one function, so
+    the two paths cannot drift. No wake gate, no session, no model call.
+    Idempotent: a second call finds the run complete and writes nothing.
+    """
+    clock = clock or (lambda: datetime.now(UTC))
+    run_dir = Path(config.run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    telemetry_path = run_dir / "telemetry.jsonl"
+    state_path = run_dir / "state.json"
+    lock_path = run_dir / LOCK_FILENAME
+
+    if not acquire_lock(lock_path, stale_s=config.lock_stale_s, clock=clock):
+        return LOCK_HELD
+    try:
+        events = list(read_events(telemetry_path)) if telemetry_path.exists() else []
+        state = fold_telemetry(events)
+        carry_keeper_cursor(state, state_path)
+        telemetry = TelemetryWriter(telemetry_path, run_id=config.run_id, clock=clock)
+        with telemetry as writer:
+            _recover(writer=writer, config=config, state=state, events=events, run_dir=run_dir)
+            save_state(state, state_path)
+            if state.run_status == RUN_COMPLETE:
+                return ALREADY_COMPLETE
+            _complete_run(
+                writer=writer,
+                config=config,
+                state=state,
+                state_path=state_path,
+                events=events,
+                run_dir=run_dir,
+                reason=END_REASON_MANUAL,
+                environment_factory=environment_factory,
+                keeper_factory=keeper_factory,
+                disable_supervisor=disable_supervisor,
+            )
+            return RUN_COMPLETED
+    finally:
+        release_lock(lock_path)
+
+
+def _recover(
+    *,
+    writer: TelemetryWriter,
+    config: RunConfig,
+    state: RunState,
+    events: list[dict[str, Any]],
+    run_dir: Path,
+) -> None:
+    """P3 recovery: an unmatched ``session_start`` gets its synthetic crash end."""
+    crashed = crashed_session(events)
+    if crashed is None:
+        return
+    # Phantom model requests first, so the crash session_end totals below
+    # count them. A request written ahead but never completed may have been
+    # billed; its usage is unknowable, so it is recorded on exactly the
+    # terms any other failed-but-billed attempt is (cost 0, usage_unknown)
+    # and flagged as synthetic. Idempotent: the row it writes carries the
+    # same request_seq, so a second pass finds it completed.
+    for seq in phantom_requests(events, crashed):
+        events.append(
+            writer.emit(
+                "llm_call",
+                session=crashed,
+                model=config.model,
+                input_tokens=0,
+                output_tokens=0,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
+                cost_usd=0.0,
+                cumulative_usd=state.cumulative_usd,
+                cumulative_tokens=state.cumulative_tokens,
+                latency_ms=0.0,
+                stop_reason="error",
+                retry_count=0,
+                usage_unknown=True,
+                request_seq=seq,
+                phantom=True,
+            )
+        )
+    record = writer.emit(
+        "session_end",
+        session=crashed,
+        reason="crash",
+        **session_totals(events, crashed),
+    )
+    events.append(record)
+    # A crashed session wrote no journal entry of its own — the process
+    # died before session end. Without this the elapsed time the NEXT entry
+    # reports would silently span two sessions, which is the one number the
+    # journal exists to make honest (P15). Written from the folded stream,
+    # so it carries what telemetry knows and nothing it does not: the
+    # roster is absent, because the brief's answer lived only in a
+    # transcript that was never written.
+    _journal_crashed_session(run_dir, events, crashed, config.caps.journal_max_bytes)
+
+
+def _complete_run(
+    *,
+    writer: TelemetryWriter,
+    config: RunConfig,
+    state: RunState,
+    state_path: Path,
+    events: list[dict[str, Any]],
+    run_dir: Path,
+    reason: str,
+    environment_factory: Callable[[], Environment] | None,
+    keeper_factory: Callable[[], KeeperClient] | None,
+    disable_supervisor: Callable[[], None] | None,
+) -> None:
+    """End the run, emit ``run_complete``, persist it (P1 step 6; ``end-run``).
+
+    The one place a run completes, whatever ended it — a tripped boundary
+    (``budget`` / ``t_max``) or the operator (``manual``). The end of the
+    run on the shell rungs: the keeper's books stopped and its grant
+    revoked, the last of its transactions read, the environment stopped —
+    all BEFORE ``run_complete``, which records how that went. A run that
+    dies in here has no ``run_complete``, so the next invocation does it
+    all again: every step is idempotent.
+    """
+    end_fields = _end_of_run(
+        writer=writer,
+        session=state.session_counter,
+        state=state,
+        events=events,
+        run_dir=run_dir,
+        environment=environment_factory() if environment_factory else None,
+        keeper=keeper_factory() if keeper_factory else None,
+    )
+    writer.emit(
+        "run_complete",
+        session=state.session_counter,
+        reason=reason,
+        totals={
+            "sessions": state.session_counter,
+            "llm_calls": sum(1 for e in events if e.get("event") == "llm_call"),
+            "cumulative_usd": state.cumulative_usd,
+            "cumulative_tokens": state.cumulative_tokens,
+            "overspend_usd": overspend_usd(state.cumulative_usd, config.budget_usd),
+        },
+        **end_fields,
+    )
+    state.run_status = RUN_COMPLETE
+    save_state(state, state_path)
+    if disable_supervisor is not None:
+        disable_supervisor()
 
 
 def _run_one_session(

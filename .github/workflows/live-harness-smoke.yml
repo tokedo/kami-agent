@@ -30,7 +30,7 @@ env:
   # live-vs-recorded assertions below compare that text byte for byte. No
   # kami-lens daemon runs here, so the roster brief degrades to the
   # harness's own unavailability error, as tier 4 always has.
-  HARNESS_PIN: e92df166632468dcf50d0cc4b3717d3cfb43d639 # kami-harness 5.0.0 (e92df16)
+  HARNESS_PIN: d0d36ce5b24892a5b42b049abdeb8c29fdd9577b # kami-harness 5.0.1 (d0d36ce)
 
 jobs:
   live:

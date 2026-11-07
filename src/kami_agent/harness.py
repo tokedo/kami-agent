@@ -19,7 +19,8 @@ background thread and exposes the synchronous surface the loop needs
 transport's context managers are entered and exited inside a single
 manager task, as anyio requires.
 
-Dev pin: kami-harness 5.0.0 surface (``e92df16``) — the run manifest
+Dev pin: kami-harness 5.0.1 surface (``d0d36ce``; 5.0.0's 100 tools and
+``tools_hash``) — the run manifest
 re-pins at launch; the SHA is manifest metadata, recorded on run_start.
 The pairing check keys on the handshake's ``schema_version`` MAJOR, never
 on this pin: kami-harness 5.0.0 and newer pair with kami-agent 0.8.0 and
@@ -45,7 +46,7 @@ from kami_agent.loop import GameToolResult
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.receipts import classify_success
 
-HARNESS_DEV_PIN_SHA = "e92df16"
+HARNESS_DEV_PIN_SHA = "d0d36ce"
 
 DEFAULT_HANDSHAKE_TIMEOUT_S = 60.0
 
@@ -379,6 +380,13 @@ def _extract_txs(structured: Any, text: str) -> tuple[dict[str, Any], ...]:
     one per row inside a batch's result list — so this walks rather than
     reading a fixed path, in document order, bounded depth. Entries are
     copied verbatim; nothing is normalized or summed.
+
+    A pipelined batch (``act_sequence``) reports no ``txs``: each step is a
+    row of its ``steps`` list with its own status and, when a transaction
+    exists, its ``tx_hash`` and receipt fields (F-TS6, 0.8.2). The same walk
+    copies every such row that carries a string ``tx_hash`` — a step that
+    was never sent has none and is no receipt — after the ``txs`` entries of
+    the same object, and never a second row for a hash already collected.
     """
     for candidate in (structured, _maybe_json(text)):
         found: list[dict[str, Any]] = []
@@ -395,6 +403,14 @@ def _collect_txs(node: Any, out: list[dict[str, Any]], depth: int) -> None:
         entries = node.get("txs")
         if isinstance(entries, list):
             out.extend(e for e in entries if isinstance(e, dict))
+        steps = node.get("steps")
+        if isinstance(steps, list):
+            seen = {e.get("tx_hash") for e in out}
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("tx_hash"), str):
+                    if step["tx_hash"] not in seen:
+                        seen.add(step["tx_hash"])
+                        out.append(step)
         for key, value in node.items():
             if key != "txs":
                 _collect_txs(value, out, depth + 1)

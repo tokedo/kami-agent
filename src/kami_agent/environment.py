@@ -91,6 +91,9 @@ PROBE_TIMEOUT_S = 40
 
 # The keeper profile the shell_keeper rung requires (the keeper's SPEC P10).
 KEEPER_PROFILE = "lab"
+# The keeper release the shell_keeper rung is written against: its status
+# states the engine block init reads (F-TS4).
+KEEPER_MIN_VERSION = "1.0.1"
 
 
 class EnvironmentCheckError(Exception):
@@ -447,8 +450,9 @@ class Environment:
                 f"keeper container {self.keeper_container!r} runs image {image!r}, "
                 f"which does not name pins.keeper_sha {keeper_sha!r}"
             )
+        _check_keeper_engine(frame.get("data"))
         version = meta.get("keeperVersion") if isinstance(meta, dict) else None
-        return f"keeper ok (profile {profile}, version {version}, image {image})"
+        return f"keeper ok (profile {profile}, version {version}, image {image}, engine started)"
 
     # --- the end of the run (P1, run_complete) -------------------------------------
 
@@ -459,6 +463,30 @@ class Environment:
         except DockerError:
             return False
         return True
+
+
+def _check_keeper_engine(data: Any) -> None:
+    """The keeper's engine must be running, or the rung's keeper runs nothing (F-TS4).
+
+    An armed keeper missing its chain settings (or any other refused
+    configuration) stays a healthy daemon: ``status`` answers ok, with the
+    ``lab`` profile, from an image that names the pin — and its engine
+    never starts. Only ``data.engine`` (``{started, refusals}``) says so,
+    so ``init`` reads it and refuses the run in the keeper's own words. A
+    frame with no engine block is read as not started.
+    """
+    engine = data.get("engine") if isinstance(data, dict) else None
+    if not isinstance(engine, dict):
+        raise EnvironmentCheckError(
+            "keeper engine not started: the keeper's status states no engine block "
+            f"(shell_keeper needs kami-keeper {KEEPER_MIN_VERSION} or newer)"
+        )
+    refusals = [str(r) for r in engine.get("refusals") or [] if r]
+    if engine.get("started") is not True or refusals:
+        raise EnvironmentCheckError(
+            "keeper engine not started: "
+            + ("; ".join(refusals) if refusals else "no refusal stated")
+        )
 
 
 def clamp_shell_timeout(requested: Any, upper: float) -> float:

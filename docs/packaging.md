@@ -110,7 +110,14 @@ names the kamigotchi-gdd commit that matches its harness and lens pins.
 
 Run-directory internals no agent path reaches (SPEC P11, D8): `.env`,
 `config.yaml`, `state.json`, `telemetry.jsonl`, `errors.jsonl`, `prompts/`,
-`transcripts/`, `shell/`, `harness-lanes/`, `run.lock`.
+`transcripts/`, `shell/`, `harness-lanes/`, `harness-cache/`, `run.lock`.
+`harness-cache/` (0.8.2, F-TS7) is the harness's order-book cache
+(`kwob_trades.json`, the trade ids `get_item_orderbook` reads), mounted at
+`/opt/kami-harness/executor/.cache` in the agent container: `kami-agent
+init` seeds it once with the harness's own `executor/kwob_bootstrap.py`
+from the Kamigaze snapshot (network: `api.prod.kamigotchi.io`, below) and
+the harness keeps it current from the chain's logs after that. On the
+volume it survives a container recreate and is pulled with the run.
 
 ## Egress allowlist (SPEC I20/N6, enforced at the host level)
 
@@ -153,7 +160,7 @@ is visible rather than silent — `tool_call` with `initiator: "scaffold"`
 and `ok: false` on the first event of every session — so check that
 field before concluding a run is healthy.
 
-**Install kami-lens 1.1.0** (the pinned version; **1.0.1 at the least**).
+**Install kami-lens 1.1.1** (the pinned version; **1.0.1 at the least**).
 kami-lens 1.0.0 could serve a stale value — a kami's health, a timestamp,
 a harvest's state — when several transactions in one block wrote it,
 with nothing marked degraded, until it was written again; 1.0.1 fixed

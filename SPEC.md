@@ -1,7 +1,7 @@
 ---
 module: kami-agent
-version: 2.11
-describes: v0.8.1
+version: 2.12
+describes: v0.8.2
 ---
 
 # kami-agent — Contract Registry
@@ -34,7 +34,9 @@ exits. It returns exactly one outcome (printed on stdout, `runner.py`):
 `session_aborted` | `session_ran`. The one exception is an attempt
 refused at the pairing check (step 9, new at 0.7.0): it writes one
 `session_refused` event and exits non-zero with the refusal on stderr,
-printing no outcome.
+printing no outcome. `kami-agent end-run` (0.8.2, P12) is the operator's
+way to the same end: steps 1, 2, 4 and 5 as below, then step 6's end of
+the run with `run_complete` reason `manual` — no wake gate, no session.
 
 Ordered steps, as implemented:
 
@@ -670,7 +672,11 @@ Reader notes (stable semantics):
   of each. `shell_log` is the run-dir path of the call's whole output. A
   docker failure (no container, exec refused) is `ok: false` with the
   daemon's own words in `error`, and carries none of the five fields.
-  `source` is `scaffold`, as for every scaffold tool.
+  `source` is `scaffold`, as for every scaffold tool. **Lens reads the
+  model makes through the shell** (the `kami-lens` CLI, or the socket from
+  python) are `tool_call` rows with `tool: shell` (O-TS27): per-tool lens
+  counts under-count on the shell rungs, and carry no `lens_stale` /
+  `lens_block` — count the shell log (`shell_log`) when it matters.
 
 - `llm_call.stop_reason` accepts the P8 enum **plus `error`**, which
   marks a failed-but-logged attempt with no provider stop reason.
@@ -762,6 +768,16 @@ Reader notes (stable semantics):
   the host. **They are recorded, never asserted**: the scaffold compares
   nothing against the manifest's pins, and absence means *not recorded* —
   never agreement with a pin (N10).
+- **`tool_call.lens_stale` / `lens_block` are on every lens-backed row**
+  (0.8.2, O-TS26): every `lens_*` harness call, model- or
+  scaffold-initiated, records the `meta.stale` / `meta.blockNumber` of the
+  daemon envelope it answered — the envelope the harness passes through,
+  read off the raw result, best-effort; absent when the call raised or the
+  result was no envelope, and never on a non-lens tool, whatever `meta`
+  its result carries. Through 0.8.1 only the session-start brief's row
+  carried them, so the record of the flag the model saw on its own lens
+  reads was partial. A lens read the model makes through the shell is a
+  `shell` row, not a lens-backed one.
 - `session_start.scaffold_profile` is the rung the manifest pinned (D3),
   and it is what explains a `tools_hash` that differs between arms of one
   family: a profile at or above `search` carries one more scaffold tool by
@@ -795,10 +811,21 @@ Reader notes (stable semantics):
   tells readers not to parse. Batch errors and validation rejections
   still carry none, because neither is one transaction.
 - **`tool_call.txs[]`** carries the per-transaction receipts a
-  multi-transaction result reported in band, verbatim and in document
-  order, including the step that failed. Those transactions are final
-  on-chain regardless of the call's overall outcome; a transaction-keyed
-  reconciliation that ignores them comes up short.
+  multi-transaction result reported in band, and the per-step receipts of
+  a batch tool (`steps[]`), verbatim and in document order, including the
+  step that failed. Those transactions are final on-chain regardless of
+  the call's overall outcome; a transaction-keyed reconciliation that
+  ignores them comes up short. **From 0.8.2 (F-TS6)** an `act_sequence`
+  result — which reports each step as a row of `steps[]` with its own
+  status and, when a transaction exists, its `tx_hash` / `block` /
+  `gas_used` / `fee_wei` and no `txs` at all — contributes every step row
+  that carries a hash, copied verbatim after any `txs` entries of the same
+  object; a step that was never sent carries no hash and is not lifted,
+  and a hash already collected is not lifted twice. Through 0.8.1 a
+  7-transaction batch left no hash in telemetry (run 3 s1: 46 hashes
+  recorded against 53 chain transactions). The session journal's
+  `tx_hashes` (P15) are read from the same list, so they name a batch's
+  step hashes too.
 - `session_start.harness_tools_hash` is the hash the **harness**
   published of its **own** registry, taken verbatim from the handshake
   (bare hex). It answers a different question over different bytes than
@@ -891,6 +918,11 @@ Reader notes (stable semantics):
   reading only `telemetry.jsonl` should alert on any `session_refused`:
   under a scheduler they repeat every poll until the deployment is fixed.
 - `session_end reason=crash` is synthetic (P3).
+- **`run_complete.reason: manual` is the operator's `kami-agent end-run`**
+  (0.8.2, P12); `budget` and `t_max` are the boundary check's. The value
+  was in the schema from the start and no code path emitted it through
+  0.8.1: a run ended only at a due wake, by `budget` or `t_max`
+  (`--manual` bypasses the wake gate and nothing else).
 - Telemetry is not an agent-visible channel: budget fields recorded here
   never reach the agent.
 - Tool arguments and results live in transcripts, not telemetry — except
@@ -973,6 +1005,15 @@ opened:
   `SHELL_LOG_MAX_BYTES`, 32 MiB per call, the log saying where it cut) — a
   run-directory internal never mounted into the environment. The
   `tool_call` row names it (`shell_log`, P9).
+- **What the command reaches is not a row of its own** (O-TS27). A lens
+  read the model makes through the shell — the `kami-lens` CLI, or the
+  lens socket from python — and on `shell_keeper` every keeper call the
+  model makes is one `tool_call` row with `tool: shell`, never a `lens_*`
+  or keeper row (the scaffold's own two keeper rows at `run_complete` are
+  `source: keeper`); the
+  call's own text and output are in its `shell/` log. So per-tool lens
+  counts under-count on the shell rungs: count the shell logs when it
+  matters.
 
 `search_reference` in detail, because every number in it is a pinned
 artifact of the arms it serves: the index is built lazily, once per
@@ -1139,21 +1180,50 @@ run/
   harness's standing text is, and exits with the pairing message when a
   4.x harness's standing text did not arrive, D1), emits
   `run_start` (and, from 0.8.0, exits with the pairing message for a
-  harness whose MAJOR is below 5). **On the shell rungs** (0.8.0) the
+  harness whose MAJOR is below 5). **The harness's order-book cache**
+  (0.8.2, F-TS7): after the handshake, `init` looks for
+  `<executor>/.cache/kwob_trades.json` beside the harness's server script
+  (the first `.py` of `harness.args`, resolved against `harness.cwd`) —
+  the trade ids `get_item_orderbook` needs, which no image ships — and
+  prints `orderbook cache ok (<n> trade ids, block <b>)` when it is there;
+  when it is not, it runs the harness's own `executor/kwob_bootstrap.py`
+  once (the harness's command and working directory, network allowed,
+  300 s), prints `orderbook cache seeded (<n> trade ids, block <b>)`, and
+  on any failure exits with the script's error before `run_start`. The
+  deployment keeps the cache on the run directory (`harness-cache/`,
+  `docs/packaging.md`); the harness keeps it current after that.
+  **On the shell rungs** (0.8.0) the
   checks also assert the
   environment, the I30 pattern — a mismatch starts no run: the container
   the manifest names exists and runs; `command -v keeper` inside it FAILS
   on `shell` and SUCCEEDS on `shell_keeper`; on `shell_keeper` `keeper
   status` answers from inside with `meta.profile == "lab"` and the keeper
-  container's image reference names `pins.keeper_sha`; `kami-lens health`
+  container's image reference names `pins.keeper_sha`, and (0.8.2, F-TS4)
+  its `data.engine` says `started: true` with no `refusals` — an armed
+  keeper missing its chain settings is a healthy daemon whose engine runs
+  nothing, so init refuses it with `keeper engine not started: <the
+  keeper's refusals>`, and a frame with no engine block reads as not
+  started; `kami-lens health`
   answers from inside; the rung's appendices are in the run directory.
   `run_start` records `pins.keeper_sha` on `shell_keeper` and `""` below
   it. From 0.8.0 `init` also refuses an unknown rung, and a shell rung that
   names no environment container, before it writes anything of the run's
   record (D3). **There is no key path through init**: it never generates, imports,
-  or writes key material. `--skip-connectivity` skips the four checks and
-  the environment's (and leaves `run_start.harness_tools` empty).
+  or writes key material. `--skip-connectivity` skips the four checks,
+  the order-book cache's (`orderbook cache check skipped`) and the
+  environment's (and leaves `run_start.harness_tools` empty).
 - `kami-agent run-session --run-dir DIR [--manual]` — one session (P1).
+- `kami-agent end-run --run-dir DIR` (0.8.2, F-TS5) — the operator-side
+  end of the run: the lock acquired as `run-session` acquires it (held →
+  prints `lock_held`, exits 1, writes nothing), the stream folded and
+  recovered as P1 steps 2 and 4 do (no wake gate), `already_complete`
+  when the run has ended, and otherwise exactly P1 step 6's end — on the
+  shell rungs the keeper's `stop --all` and `revoke`, the last keeper
+  read, the environment stopped — with `run_complete` `reason: manual`,
+  the same `totals`, the run disabled and `state.json` at `run_status:
+  complete`; prints `run_complete manual`. One function ends the run on
+  both paths. Idempotent: a second call answers `already_complete` and
+  writes nothing.
 - `kami-agent status --run-dir DIR` — prints the `state.json` summary.
   Operator-facing; never an agent channel.
 
@@ -1637,7 +1707,9 @@ answer lived only in a transcript, and a crashed session never wrote one.
   shape reaches every game action, D6), `transfer_items` refuses a target
   that is not a registered account, the soulbind refusals, and refusal
   texts reworded (P9's classifier keys on their stable clauses). **The dev
-  pin is kami-harness 5.0.0** (`659c205`): the image default, the example
+  pin is kami-harness 5.0.1** (`d0d36ce`, from 0.8.2; 5.0.0 `659c205` /
+  `e92df16` at 0.8.0–0.8.1 — 5.0.1 is a catalog refresh with the same 100
+  tools and `tools_hash`): the image default, the example
   manifest, the recorded surface fixture and the live tier name it. Its
   standing text is byte-identical to 4.0.0's (957 characters, sha256
   `7c0e7ca6…ae4b`), so moving between any of 4.0.0 through 5.0.0 leaves
@@ -1833,8 +1905,10 @@ the same daemon over the same socket.
 - **Construction cannot fail.** A client opens no connection until it is
   queried, so an unreachable daemon can never abort a session; it is
   discovered by the brief and degrades there.
-- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.1.0
-  recommended and pinned** (`379d2e7`, new at 0.8.0; 1.0.5 `e604290` from
+- **Version requirement: kami-lens ≥ 1.0.1 for correct reads; 1.1.1
+  recommended and pinned** (`3fec1e0`, new at 0.8.2 — a PATCH over 1.1.0:
+  `meta.stale` keys on the daemon's gating classes, the CLI gains usage
+  lines, no field moves; 1.1.0 `379d2e7` from 0.8.0; 1.0.5 `e604290` from
   0.7.5, 1.0.3 `7f9be7b` from 0.7.1). kami-lens 1.0.0 could keep an EARLIER transaction's
   write when several transactions in
   one block wrote the same key — a kami's health, a timestamp, a
@@ -1929,7 +2003,14 @@ probed from inside at every session boundary (`shell_state`, P9):
   its own in root-owned directories, so a daemon restart never strands it
   and their data is never in reach. The keeper runs its `lab` profile,
   armed, at most one book per account, ungranted until the agent grants
-  it — the grant is the agent's act through its shell.
+  it — the grant is the agent's act through its shell. From 0.8.2 the
+  definition also gives it the chain it signs on (RPC URL, WebSocket URL,
+  world address, chain id, named in `.env`; armed without the RPC URL,
+  the world address or the chain id its engine never starts while the
+  daemon still answers `status` — F-TS4) and runs it on the paths the
+  environment sees (data directory `/srv/keeper`, socket
+  `/srv/keeper/keeper.sock`, the host path unchanged), so the paths its
+  `status` reports are the ones a client dials (O-TS28).
 - **The scaffold's side of the boundary**: it reaches the container only
   through the Docker Engine API on the socket mounted into its own
   container (no docker CLI), and the keeper through the relay's keeper
@@ -2327,6 +2408,7 @@ a bug; changing one is a spec change, not a fix.
 
 | version | describes | change |
 |---|---|---|
+| 2.12 | v0.8.2 | **The keeper-rung deployment runs an armed keeper as shipped and reports the environment's socket path; `init` refuses a keeper whose engine did not start and seeds the harness's order-book cache; batch receipts and lens freshness on every lens-backed row in telemetry; `kami-agent end-run`; the smoke tier on Gemini 3.x. No prompt asset or telemetry schema field moves; the pins move to kami-harness 5.0.1 (`d0d36ce` — the quest catalogs at the world pin, the same 100 tools and `tools_hash` as 5.0.0) and kami-lens 1.1.1 (`3fec1e0` — `meta.stale` on the gating classes, usage lines) in the lab's pin commit; the keeper stays 1.0.1 `710b93e`.** *Cause: the test stage of release 2026-11-shell-keeper — the shipped `compose.keeper.yaml` started the keeper armed with no chain, so its engine refused to start while `init` printed `keeper ok` (F-TS4); the keeper's `status` named its container's `/data` socket, which a model dialled (O-TS28); `get_item_orderbook` was dead on the compose deployment for want of the harness's seeded cache (F-TS7); a 7-transaction `act_sequence` left no hash in telemetry (F-TS6); model-initiated `lens_*` rows carried no `lens_stale` / `lens_block` (O-TS26); `run_complete` reason `manual` had no code path (F-TS5); lens reads through the shell are `shell` rows (O-TS27); and the Gemini 3.x thought-signature contract was found by a live run, not by CI (F-TS9).* **Deployment** (D8, `deploy/environment/`): the `keeper` service gets `KAMI_KEEPER_RPC_URL` / `KAMI_KEEPER_WS_RPC_URL` / `KAMI_KEEPER_WORLD_ADDRESS` / `KAMI_KEEPER_CHAIN_ID` from `.env` (`KEEPER_RPC_URL`, `KEEPER_WS_RPC_URL`, `KEEPER_WORLD_ADDRESS`, `KEEPER_CHAIN_ID`, named in `.env.example` with the public Yominet values kami-lens 1.1.0 ships as defaults) and runs on the paths the environment sees (`KAMI_KEEPER_DATA_DIR=/srv/keeper`, `KAMI_KEEPER_SOCKET=/srv/keeper/keeper.sock`, volume `/srv/keeper:/srv/keeper`, healthcheck and teardown revoke on that socket; the host path and the relay unchanged); the `agent` service mounts `/srv/run/harness-cache` at `/opt/kami-harness/executor/.cache`, a run-dir internal (`docs/packaging.md`). **`init`** (P12): on `shell_keeper` the keeper's `status.data.engine` must say `started: true` with no `refusals` — else `keeper engine not started: <the keeper's refusals>` and no run; a frame with no engine block reads as not started; the ok line gains `engine started`. On every rung with a harness, after the handshake, the harness's order-book cache (`<executor>/.cache/kwob_trades.json`, the executor directory located as the stdio child is spawned) is reported when present and otherwise seeded once by the harness's own `executor/kwob_bootstrap.py` (its command and cwd, network allowed, 300 s) — `orderbook cache ok|seeded (<n> trade ids, block <b>)`; a failure exits with the script's error before `run_start`; `--skip-connectivity` skips it. **Telemetry** (P9): `tool_call.txs[]` also carries the per-step receipts of a batch tool — every `steps[]` row with a string `tx_hash`, verbatim, after any `txs` entries, no hash twice; `lens_stale` / `lens_block` are on every lens-backed row (a harness `lens_*` call, model- or scaffold-initiated), read off the raw result; the schema's `txs`, `lens_stale` and `lens_block` descriptions say so — descriptions only, schema `version` stays 0.8.0. **`kami-agent end-run --run-dir DIR`** (P1, P12): the run lock as `run-session` takes it (`lock_held`, exit 1), the fold and the crash recovery, `already_complete`, else the boundary path's end of the run with `run_complete` `reason: manual` and the same totals, state complete, supervisor disabled; prints `run_complete manual`; idempotent. The boundary branch's end + emit + persist and the P3 recovery are now one function each (`_complete_run`, `_recover`), shared by both paths. **CI**: `SMOKE_GEMINI_MODEL` `gemini-2.5-flash` → `gemini-3.8-flash`; the adapter and the smoke tier key nothing else on the model; same sessions. **One briefing content change follows from F-TS6**: the session journal's `tx_hashes` (P15) are read from the same `txs` list, so a session whose results carried a batch now names that batch's step hashes in its journal entry — the entry the next session is shown at its start. No scaffold-authored agent-visible string is added or reworded. **Known, not changed:** `init` checks the order-book cache's presence, not its age (the harness itself refuses a cache whose last scan is older than the RPC's ~1M-block log retention and names the bootstrap); an `act_sequence` result's `filled[]` rows (zero-value self-transfers that filled a refused step's nonce) carry hashes and are not lifted; the keeper image still declares a `/data` volume, now unused. **Consequences for readers:** `session_start.tools_hash`, the floors, the standing-text hash and the prompt assets are 0.8.1's; an `act_sequence` row's `txs` and its session's journal `tx_hashes` grow by the batch's hashed steps, so tx-keyed reconciliation of a 0.8.2 stream matches the chain where a 0.8.1 stream came up short; model-initiated `lens_*` rows carry `lens_stale` / `lens_block` from 0.8.2 (absent before); a `run_complete` with `reason: manual` is an operator's `end-run`. PATCH by this repo's practice: fixes and operator-side additions, no new telemetry field, no prompt asset, no pin move (kami-harness 5.0.0 `e92df16`, kami-lens 1.1.0 `379d2e7`, kami-keeper 1.0.1 `710b93e`). |
 | 2.11 | v0.8.1 | **google adapter: Gemini 3.x thought signatures on scaffold-initiated function calls (F-TS9). No prompt asset, briefing content, pin or telemetry schema moves, and nothing changes for the other providers.** *Cause: the first call of a `gemini-3.8-flash` run was refused — 400 INVALID_ARGUMENT, "Function call is missing a thought_signature in functionCall parts", naming the roster brief's injected `lens_roster` call — and the session ended `errors` with 0 tokens.* Gemini 3.x validates a thought signature on every function call in the current turn. The session-start injections (P1.12) are assistant turns no Gemini response produced, so they hold no provider state (I17) and reached the wire unsigned; Gemini 2.5 never enforced the rule, which is why 0.8.0 ran clean on it and the live smoke tier (2.5) passed. **The rule** (P8): a Google assistant turn with no Google state — an injection, or a turn the model returned unsigned — carries the API's documented skip-validation value on each function-call part (`INJECTED_CALL_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"` in `adapters/google.py`), never on a text part; a turn with the model's own state is still replayed verbatim with its real signatures. Probed live on `gemini-3.8-flash`, 2026-11-04: an unsigned injected call → 400; the value → 200, as SDK bytes and as the literal wire string alike; an arbitrary value → 400 "Corrupted thought signature."; `gemini-2.5-flash` accepts it too. Enforced by two new I17 tests. |
 | 2.10 | v0.8.0 | **Two capability rungs — `shell` and `shell_keeper` — a persistent environment container for the agent, the keeper behind it, telemetry schema 0.8.0, and the pins moved to kami-harness 5.0.0 and kami-lens 1.1.0.** *Cause: the shell rung is the first step of "play as code" — a persistent coding environment the agent is free in, with the stack's documentation, in which a script is as legitimate as a tool call — and the keeper is its scriptable write path.* **The rungs** (D3, P10, P13): `PROFILES` gains `shell` and `shell_keeper` above `planning`, cumulative as every rung is, and they are CAPABILITY rungs — they add a channel, not documentation — measured against `planning` (X32). `shell` adds one scaffold tool, `shell(command, timeout_s?)`, and the appendix `prompts/shell.txt`; `shell_keeper` adds no tool (the keeper is reached through the shell) and the appendix `prompts/shell_keeper.txt`. Both appendices and the tool description are frozen byte-exact and pass the keeper's own policy-word scrub plus `should`/`best`/`recommend`/`good` with zero hits (I3); `init` materializes all seven assets, and a missing one starts no session. **The `shell` tool** (P10, I38): one `docker exec` into the run's environment container through the Docker Engine API (stdlib HTTP over the mounted socket — no new dependency, no docker CLI in the image) as uid 1000 in `/workspace` with `HOME=/workspace`, under `timeout -k 5 <t> bash -c`, `t` clamped to `[1, caps.shell_timeout_s]` (default 120); stdout and stderr capped separately at half of `tool_result_max_bytes` less a 1 KiB reserve, the result in a fixed shape (`exit_code`, `timed_out`, `duration_s`, both streams with their byte counts); the whole output in `run_dir/shell/<session:03d>-<call_seq:04d>.log` (each stream up to 32 MiB, X34); exempt from `tool_timeout_s`'s watchdog as `wait` is; counts against `session_tool_cap`; a non-zero exit is a result, a docker failure is `ok: false` with the daemon's words; the repetition signature is the command text (P5.1). **The environment** (new D8, I39, `deploy/environment/`): one container per run, persistent across sessions, no network, no key, `--init`, read-only root, the workspace / reference / journal mounted and the daemons reached only through a socket relay; `Dockerfile.env` builds it per rung (no keeper client at all on `shell`), `compose.yaml` and `compose.keeper.yaml` define the lens, the relay (pinned by digest), the environment, the agent and on `shell_keeper` the keeper. `init` asserts at ≥ `shell` that the container runs, that `command -v keeper` fails on `shell` and succeeds on `shell_keeper`, that the keeper answers from inside with the `lab` profile and its image names `pins.keeper_sha`, and that the lens answers from inside — a mismatch starts no run — and gives the workspace to uid 1000. Every session start and end writes one `shell_state` (the container started again if it stopped; its process table; the socket probes from inside); `run_complete` stops the keeper's books and revokes the run's grant (two `tool_call` rows, `source: keeper`, `initiator: scaffold`; a silent keeper is `ok: false` and the run still completes), reads the ledger a last time, and stops the environment — no process the agent left running survives the run (X33). Sessions never revoke. **The keeper read** (`kami_agent/keeper.py`, D8, I40): at every session start and at `run_complete` the scaffold reads the run account's books and their ledgers over the keeper's socket and writes one `keeper_tx` per final receipt not yet recorded; `session_start` carries `keeper_version`. Never shown to the agent (I1). **The file index is bounded** (P1 step 11, I41): hidden entries and `__pycache__` / `node_modules` / `.venv` / `venv` left out, 200 entries then `… and N more entries`, on every profile; the `workspace_list` tool still lists everything; listings and byte counts never follow a symlink (P11). **Telemetry schema 0.7.0 → 0.8.0** (P9): two new events (`keeper_tx`, `shell_state`), the two rung values, `source` and `initiator` gain `keeper`, `tool_call` gains `exit_code` / `timed_out` / `stdout_bytes` / `stderr_bytes` / `shell_log` and `keeper_books_stopped` / `keeper_grants_after`, `session_start` gains `keeper_version` / `environment_image`, `run_start` gains `keeper_sha`, `run_complete` gains `environment_stopped` / `keeper_grants_after`, `session_refused.reason` gains `harness_major_below_pairing`; additive, and `unevaluatedProperties: false` is what forces the bump. `state.json` gains the keeper cursor (`keeper_cursor`, `keeper_open`), a cache like the rest of it. **The pins** (D1, D7): **kami-agent 0.8.0 pairs with kami-harness 5.0.0 or newer, and enforces it**: a harness stating a MAJOR below 5 is refused at `init` and at every session start — one `session_refused` per attempt, new reason `harness_major_below_pairing`, a plain message naming the pairing — because the classifier, the recorded surface and the brief are written against 5.0.0 and a 4.x harness still serves the strategy-service tools; the standing-text refusal stays for MAJOR ≥ 5, and a harness that states no version still passes — and the dev pins are kami-harness 5.0.0 `659c205`, kami-lens 1.1.0 `7131a52`, kami-keeper `bbe3929`, kamigotchi-gdd `746be11` (image default, example manifest, live tier, recorded fixture). The recorded surface fixture is re-recorded at `659c205` under Python 3.13: 100 tools (the nine strategy-service tools gone; 18 descriptions reworded — the operator now signs trades, transfers, auction buys and gacha; the soulbind and `transfer_items` target refusals), published `tools_hash` `3291008d…a02a`, this scaffold's harness-only hash `sha256:ddbf03d8…a503`, standing text byte-identical to 4.0.0's (957 characters, sha256 `7c0e7ca6…ae4b`), `schema_version` 5.0.0. kami-lens 1.1.0 adds node and soulbind facts and serves the chain's own integer arithmetic; nothing the scaffold reads from it changes shape. **The small items.** (1) The terminal-state classifier keys on the harness's stable clauses — the earliest `transaction <hash> …` clause is the outcome and its hash, `no transaction sent` counts only in a refusal's first clause — so 5.0.0's deposit outcome after a landed approve is the deposit's own state, a refusal that quotes another transaction's clause stays a refusal, and every 5.0.0 text classifies as 0.7.5 classified it (I22, held to 5.0.0's own texts as a fixture). (2) `tests/smoke/conftest.py` names a manifest and a model that exist. (3) `session_start.lens_default_operator`'s schema description says what the field records and why it is still recorded: the roster brief has not depended on it since kami-harness 4.4.0. (4) Two key shapes documented end to end (D6, `docs/packaging.md`): owner + operator, or operator only; the keeper only ever receives the operator key. (5) The OpenAI-compatible path's cached tokens: the adapter already read `prompt_tokens_details.cached_tokens` and the accounting already applied the cache-read rate — no code change was needed, and both are now pinned against a recorded router response. (6) `provider: openai` gains `openai.base_url` (else `OPENAI_BASE_URL`) and `openai.extra_headers` (D2, D3), tested offline end to end, and the live tier gains an `openrouter` leg that runs only when `OPENROUTER_API_KEY` is set. Packaging (`docs/packaging.md`) is rewritten around the environment: the keys file `KAMI_KEYS_FILE=/srv/keys/.env`, the two key shapes, `shell/` among the run-dir internals, the environment's `network_mode: none`, and the `api.kamibots.xyz` egress row removed (5.0.0 contacts it no more). **Known, not changed (carried from 0.7.x):** usage an adapter discards on a response it cannot normalize is still recorded at cost 0 (P7.4); the window between deciding to send a model request and its write-ahead line reaching disk is still unobservable (P3); a deposit refused after its approve landed still records no terminal state and the approve's hash only in the message, now also when 5.0.0 reports the deposit's own outcome after it (the deposit's hash is lifted, the approve's is not); the dry-run "not performed" verdict is still `validation_rejected` with nothing marking it an infrastructure failure (a field for it would be a schema change); the repetition breaker still clips some productive loops (X1, X2); Google still serves no per-call request id (D2). **Consequences for readers:** `session_start.tools_hash` moves on every profile (the harness surface moved: 100 tools; per rung over the recorded surface — `control` = `orientation` `sha256:6c37a391…51dc`, `search` = `pushed` = `planning` `sha256:37e63fd5…cb4d`, `shell` = `shell_keeper` `sha256:00fc636c…61a4`) and so does every floor; `session_start.harness_standing_text_sha256` does not; the file index — and with it call-1 context — can differ on any profile for an agent that writes hidden files or more than 200 of them; `initiator=scaffold` also marks the two keeper rows at `run_complete` (`source: keeper`); agent behaviour excludes `keeper_tx` from tool counts and includes it in gas sums. MINOR by this repo's practice: new rungs, a new scaffold tool, new telemetry events, nothing removed. New D8, invariants I38–I41, deviations X32–X35; N6 restated. |
 | 2.9 | v0.7.5 | **Pinned to kami-harness 4.7.0 and kami-lens 1.0.5 — the same 109 tools and the same standing text as 4.6.0, and three kinds of result now say what happened. No scaffold behaviour, prompt asset or telemetry schema moves.** *Cause: kami-harness 4.7.0 is published (by way of 4.6.1, which this scaffold never pinned) and pins kami-lens 1.0.5.* What 4.7.0 changes in what the model is told: a transport failure — an HTTP error, a timeout, a dropped connection — never stands in for a revert reason (a reverted `act_sequence` row always carries `reason`, "revert reason unavailable (replay inconclusive)" when nothing was recovered; a dry-run that meets one is refused as not performed, never as reverted; `quest_state`'s `revert_reason` is null on one); a roster label matches in any case on every tool that takes one, writes as well as reads; and a deposit refused after its approve landed says so first, naming the approve's hash, never "no transaction sent". No tool is added, removed, renamed or reworded: 109 tools (ACT 59 / PERCEIVE 34 / OUTSOURCE 9 / META 7), registry mass 76,197, published `tools_hash` `5a31220d…21a4` and the standing text (957 characters, sha256 `7c0e7ca6…ae4b`) are all 4.6.0's; `schema_version` 4.6.0 → 4.7.0. What kami-lens 1.0.5 changes: it serves `cooldownSec` rounded up, so it reads 0 only once the chain accepts the next action, and logs each write it skips as older; there is no query, field or envelope change (1.0.4 changed documentation only), so nothing this scaffold reads from the daemon moves, the lens pin is a text move, and 1.0.1 or newer stays required for correct reads (D7). *What this scaffold changes.* Nothing it does. The pins move — the image default, the example manifest's harness and lens pins, the live tier and the dev pin (D1, D7, README, `docs/packaging.md`) — and the recorded surface fixture is re-recorded at `df7129f` under Python 3.13: only its `harness` header moves (version and `schema_version` 4.6.0 → 4.7.0, sha `cf8c1bf` → `df7129f`); its 109 entries, its standing text, the published hash and this scaffold's harness-only hash (`sha256:c2b506db…4cd5`) are 4.6.0's byte for byte. The roster-brief fixture's provenance note is re-checked at 1.0.5: `roster` and the envelope's `meta` keys are unchanged. **Pairing rule unchanged: kami-agent ≥ 0.7.0 ↔ kami-harness ≥ 4.0.0** — the check keys on the MAJOR — with the dev pin now 4.7.0. **Consequences for readers:** `session_start.tools_hash`, `session_start.harness_tools_hash`, `session_start.harness_standing_text_sha256` and every context floor are the same on 4.6.0 and 4.7.0 runs, so a floor measured on one holds on the other; `session_start.harness_schema_version` reads 4.7.0, and `lens_version` 1.0.5 on a daemon at the pin. One operator-side record moves with the harness's text: the terminal-state classifier (P9) recognises a pre-send refusal by the harness's "validation failed; no transaction sent:" prefix, and 4.7.0 drops that prefix from a deposit refused after its approve landed, so that call's `tool_call.tx_terminal_state` is absent on 4.7.0 where earlier harnesses got `validation_rejected` — which was false, because the approve had landed and spent gas; the approve's hash is in the message, not in `tx_hash`. Telemetry schema unchanged (0.7.0). PATCH by this repo's practice: a pin bump that moves no scaffold behaviour, prompt asset or telemetry schema (as 0.2.1, 0.3.1 and 0.7.1–0.7.4 were). Pins: kami-harness 4.7.0 `df7129f`, kami-lens 1.0.5 `e604290`. |

@@ -208,10 +208,11 @@ def recorded():
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
-def test_the_fixture_is_the_5_0_0_surface():
+def test_the_fixture_is_the_5_0_1_surface():
+    # 5.0.1 = 5.0.0's 100 tools and tools_hash (a catalog refresh); the pin moved
     surface = recorded()
-    assert surface["harness"]["version"] == "5.0.0"
-    assert surface["harness"]["schema_version"] == "5.0.0"
+    assert surface["harness"]["version"] == "5.0.1"
+    assert surface["harness"]["schema_version"] == "5.0.1"
     assert surface["harness"]["recorded_under_python"] == "3.13"
     assert len(surface["tools"]) == 100
     assert surface["harness_published_tools_hash"] == (

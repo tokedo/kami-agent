@@ -401,6 +401,87 @@ def test_the_lens_healthcheck_waits_out_a_cold_boot():
         assert _service(file, name)["depends_on"]["lens"]["condition"] == "service_healthy"
 
 
+# --- 0.8.2: the keeper as shipped (F-TS4, O-TS28) ------------------------------------------
+
+# The chain the armed keeper signs on: compose names a variable for each of
+# the keeper's four chain settings, and .env.example gives each the public
+# Yominet constant kami-lens 1.1.0 ships as its default (src/config.ts).
+KEEPER_CHAIN_ENV = {
+    "KAMI_KEEPER_RPC_URL": (
+        "KEEPER_RPC_URL",
+        "https://jsonrpc-yominet-1.anvil.asia-southeast.initia.xyz",
+    ),
+    "KAMI_KEEPER_WS_RPC_URL": (
+        "KEEPER_WS_RPC_URL",
+        "wss://jsonrpc-ws-yominet-1.anvil.asia-southeast.initia.xyz",
+    ),
+    "KAMI_KEEPER_WORLD_ADDRESS": (
+        "KEEPER_WORLD_ADDRESS",
+        "0x2729174c265dbBd8416C6449E0E813E88f43D0E7",
+    ),
+    "KAMI_KEEPER_CHAIN_ID": ("KEEPER_CHAIN_ID", "428962654539583"),
+}
+
+
+def _env_example() -> dict[str, str]:
+    values: dict[str, str] = {}
+    text = (REPO / "deploy" / "environment" / ".env.example").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def test_the_armed_keeper_is_given_the_chain_it_signs_on():
+    """F-TS4: armed without rpcUrl / worldAddress / chainId the keeper refuses
+    to start its engine while the daemon stays healthy and `status` answers.
+    The definition passes all four chain settings, and every one is named in
+    .env.example with the public Yominet value."""
+    keeper = _service("compose.keeper.yaml", "keeper")
+    assert "--armed" in keeper["command"]
+    example = _env_example()
+    for name, (variable, value) in KEEPER_CHAIN_ENV.items():
+        assert keeper["environment"][name] == "${" + variable + "}"
+        assert example[variable] == value
+
+
+def test_the_keeper_runs_on_the_paths_the_environment_sees():
+    """O-TS28: the keeper's `status` reports its own config.dataDir and
+    config.socketPath; they must be the paths the environment and the agent
+    reach its socket at, not the image's /data defaults."""
+    keeper = _service("compose.keeper.yaml", "keeper")
+    assert keeper["environment"]["KAMI_KEEPER_DATA_DIR"] == "/srv/keeper"
+    assert keeper["environment"]["KAMI_KEEPER_SOCKET"] == "/srv/keeper/keeper.sock"
+    assert sorted(keeper["volumes"]) == sorted(
+        ["/srv/lens:/srv/lens", "/srv/keys:/srv/keys:ro", "/srv/keeper:/srv/keeper"]
+    )
+    test = keeper["healthcheck"]["test"]
+    assert test[test.index("--socket") + 1] == "/srv/keeper/keeper.sock"
+    readme = (REPO / "deploy" / "environment" / "README.md").read_text(encoding="utf-8")
+    assert "/data/keeper.sock" not in readme
+    assert "revoke --account main --socket /srv/keeper/keeper.sock" in readme
+
+
+# --- 0.8.2: the harness's order-book cache (F-TS7) ------------------------------------------
+
+
+def test_the_harness_order_book_cache_lives_in_the_run_directory():
+    """F-TS7: get_item_orderbook needs executor/.cache/kwob_trades.json beside
+    the harness, which the image does not ship. The agent mounts a run-dir
+    internal there, so the cache survives a recreate and is archived with the
+    run — and the environment, which mounts nothing of /srv/run but its three
+    trees, never sees it."""
+    harness = yaml.safe_load((REPO / "manifests" / "example.yaml").read_text())["harness"]
+    assert harness["cwd"] == "/opt/kami-harness"
+    assert '"$HARNESS_REPO" /opt/kami-harness' in (REPO / "Dockerfile").read_text()
+    agent = _service("compose.yaml", "agent")
+    assert "/srv/run/harness-cache:/opt/kami-harness/executor/.cache" in agent["volumes"]
+    env = _env_service("compose.yaml", "compose.keeper.yaml")
+    assert not any("harness-cache" in v for v in env["volumes"])
+
+
 def test_one_filesystem_seen_two_ways(run_dir):
     """A file the environment's shell writes to /workspace is the workspace
     tools' file: the definition mounts run_dir/workspace there."""

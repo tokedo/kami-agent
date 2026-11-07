@@ -278,16 +278,16 @@
         "txs": {
           "type": "array",
           "items": { "type": "object" },
-          "description": "Per-transaction receipt evidence a multi-transaction result carried in band, verbatim and in document order — one entry per hop or per item, each with whatever of tx_hash / status / block / gas_used the harness reported, INCLUDING the step that failed. Those transactions are final on-chain whether or not the call as a whole succeeded, so a transaction-keyed reconciliation that ignores them comes up short. Absent when the payload carried none. Entries are copied, never normalized or summed"
+          "description": "Per-transaction receipt evidence a multi-transaction result carried in band, and (0.8.2) the per-step receipts of a batch tool (steps[] rows that carry a tx_hash), verbatim and in document order — one entry per hop, per item or per step, each with whatever of tx_hash / status / block / gas_used the harness reported, INCLUDING the step that failed. Those transactions are final on-chain whether or not the call as a whole succeeded, so a transaction-keyed reconciliation that ignores them comes up short. Absent when the payload carried none. Entries are copied, never normalized or summed"
         },
         "lens_stale": {
           "type": "boolean",
-          "description": "Session-start brief only: the meta.stale flag of the daemon envelope that was injected — true when the answer was served from last-synced state while the daemon was degraded or catching up. Operator-side convenience only; the same value is already inside the injected envelope the agent saw, so this is not a separate channel (SPEC I1)"
+          "description": "Any lens-backed tool_call row (a lens_* harness tool, model- or scaffold-initiated; through 0.8.1 the session-start brief only): the meta.stale flag of the daemon envelope the call answered — true when the answer was served from last-synced state while the daemon was degraded or catching up. Absent when the call raised or its result was not an envelope. Operator-side convenience only; the same value is already inside the envelope the agent saw, so this is not a separate channel (SPEC I1)"
         },
         "lens_block": {
           "type": "integer",
           "minimum": 0,
-          "description": "Session-start brief only: the meta.blockNumber of the injected daemon envelope, on the same terms as lens_stale"
+          "description": "Any lens-backed tool_call row (as lens_stale; through 0.8.1 the session-start brief only): the meta.blockNumber of the daemon envelope the call answered, on the same terms as lens_stale"
         },
         "path": {
           "type": "string",

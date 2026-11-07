@@ -84,11 +84,14 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      # Deliberate (not a quota stopgap; the key is billed now):
-      # 2.5-flash is a thinking model, so every CI run exercises the
-      # reasoning-token fold and the thought-signature round-trip live,
-      # which flash-lite would not.
-      SMOKE_GEMINI_MODEL: gemini-2.5-flash
+      # Deliberate (not a quota stopgap; the key is billed now): a Gemini
+      # 3.x thinking model, so every CI run exercises the reasoning-token
+      # fold, the thought-signature round-trip, and the 3.x contract that
+      # every function call in the current turn carries a thought
+      # signature — the scaffold's injected session-start calls included.
+      # 2.5 never enforced that rule, so a 2.5 smoke passed while the first
+      # call of a gemini-3.8-flash run was refused (F-TS9, kami-agent 0.8.1).
+      SMOKE_GEMINI_MODEL: gemini-3.8-flash
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
