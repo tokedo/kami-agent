@@ -34,7 +34,9 @@ exits. It returns exactly one outcome (printed on stdout, `runner.py`):
 `session_aborted` | `session_ran`. The one exception is an attempt
 refused at the pairing check (step 9, new at 0.7.0): it writes one
 `session_refused` event and exits non-zero with the refusal on stderr,
-printing no outcome.
+printing no outcome. `kami-agent end-run` (0.8.2, P12) is the operator's
+way to the same end: steps 1, 2, 4 and 5 as below, then step 6's end of
+the run with `run_complete` reason `manual` — no wake gate, no session.
 
 Ordered steps, as implemented:
 
@@ -912,6 +914,11 @@ Reader notes (stable semantics):
   reading only `telemetry.jsonl` should alert on any `session_refused`:
   under a scheduler they repeat every poll until the deployment is fixed.
 - `session_end reason=crash` is synthetic (P3).
+- **`run_complete.reason: manual` is the operator's `kami-agent end-run`**
+  (0.8.2, P12); `budget` and `t_max` are the boundary check's. The value
+  was in the schema from the start and no code path emitted it through
+  0.8.1: a run ended only at a due wake, by `budget` or `t_max`
+  (`--manual` bypasses the wake gate and nothing else).
 - Telemetry is not an agent-visible channel: budget fields recorded here
   never reach the agent.
 - Tool arguments and results live in transcripts, not telemetry — except
@@ -1193,6 +1200,17 @@ run/
   the order-book cache's (`orderbook cache check skipped`) and the
   environment's (and leaves `run_start.harness_tools` empty).
 - `kami-agent run-session --run-dir DIR [--manual]` — one session (P1).
+- `kami-agent end-run --run-dir DIR` (0.8.2, F-TS5) — the operator-side
+  end of the run: the lock acquired as `run-session` acquires it (held →
+  prints `lock_held`, exits 1, writes nothing), the stream folded and
+  recovered as P1 steps 2 and 4 do (no wake gate), `already_complete`
+  when the run has ended, and otherwise exactly P1 step 6's end — on the
+  shell rungs the keeper's `stop --all` and `revoke`, the last keeper
+  read, the environment stopped — with `run_complete` `reason: manual`,
+  the same `totals`, the run disabled and `state.json` at `run_status:
+  complete`; prints `run_complete manual`. One function ends the run on
+  both paths. Idempotent: a second call answers `already_complete` and
+  writes nothing.
 - `kami-agent status --run-dir DIR` — prints the `state.json` summary.
   Operator-facing; never an agent channel.
 

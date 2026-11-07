@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fake_docker import FakeContainer, FakeDocker
+from fake_keeper import FakeKeeper, Ledger, status_data, tx_row
 
 from kami_agent import cli
 from kami_agent.adapters.anthropic import AnthropicAdapter
@@ -532,3 +534,147 @@ def test_init_skips_the_order_book_cache_check_without_connectivity_checks(
         ]
     )
     assert "orderbook cache check skipped" in capsys.readouterr().out.splitlines()
+
+
+# --- 0.8.2 (F-TS5): the operator-side run end --------------------------------------------
+
+
+class OneBookKeeper:
+    """A keeper holding one grant and one running book with one final receipt."""
+
+    def __init__(self):
+        self.grants = ["main"]
+        self.state = "running"
+        self.ledger = Ledger(
+            {
+                "auto-1": [
+                    tx_row(
+                        "auto-1",
+                        "0x" + "7" * 64,
+                        stage="receipt",
+                        status="success",
+                        lens_block=100,
+                        block=101,
+                    )
+                ]
+            }
+        )
+
+    def __call__(self, cmd, args):
+        if cmd == "stop":
+            stopped = ["auto-1"] if self.state == "running" else []
+            self.state = "stopped"
+            return {"stopped": stopped, "quiescence": {"quiescent": True}}
+        if cmd == "revoke":
+            had = bool(self.grants)
+            self.grants = []
+            return {"revoked": had, "stopped": [], "quiescence": {"quiescent": True}}
+        if cmd == "status":
+            return status_data(grants=self.grants)
+        return self.ledger(cmd, args)
+
+
+@pytest.fixture
+def keeper_run(tmp_path, manifest_path, monkeypatch):
+    """A shell_keeper run directory initialized against a fake docker and keeper."""
+    disabled = []
+    monkeypatch.setattr(cli, "uninstall_cron", lambda: disabled.append(True))
+    container = FakeContainer("kami-env", image="kami-agent-env:0.8.2-shell_keeper")
+    with FakeDocker(container) as docker, FakeKeeper(OneBookKeeper()) as keeper:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        manifest["scaffold_profile"] = "shell_keeper"
+        manifest["environment"] = {
+            "container": "kami-env",
+            "keeper_container": "kami-keeper",
+            "docker_socket": docker.socket_path,
+            "keeper_socket": keeper.socket_path,
+        }
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+        run_dir = tmp_path / "run"
+        assert (
+            cli.main(
+                [
+                    "init",
+                    "--manifest",
+                    str(manifest_path),
+                    "--run-dir",
+                    str(run_dir),
+                    "--skip-connectivity",
+                ]
+            )
+            == 0
+        )
+        yield run_dir, container, keeper, disabled
+
+
+def test_end_run_ends_the_run_as_the_boundary_does_with_reason_manual(keeper_run, capsys):
+    run_dir, container, keeper, disabled = keeper_run
+    capsys.readouterr()
+    assert cli.main(["end-run", "--run-dir", str(run_dir)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["run_complete manual"]
+    events = list(read_events(run_dir / "telemetry.jsonl"))
+    for event in events:
+        validate_event(event)
+    assert [e["event"] for e in events] == [
+        "run_start",
+        "tool_call",
+        "tool_call",
+        "keeper_tx",
+        "shell_state",
+        "run_complete",
+    ]
+    stop_row, revoke_row = events[1], events[2]
+    assert (stop_row["tool"], stop_row["source"], stop_row["initiator"]) == (
+        "keeper_stop_all",
+        "keeper",
+        "scaffold",
+    )
+    assert stop_row["keeper_books_stopped"] == 1
+    assert revoke_row["tool"] == "keeper_revoke"
+    assert revoke_row["keeper_grants_after"] == 0
+    assert keeper.commands[:2] == ["stop", "revoke"]
+    assert events[3]["tx_hash"] == "0x" + "7" * 64
+    assert events[4]["phase"] == "run_complete"
+    complete = events[5]
+    assert complete["reason"] == "manual"
+    assert complete["environment_stopped"] is True
+    assert complete["keeper_grants_after"] == 0
+    assert complete["totals"] == {
+        "sessions": 0,
+        "llm_calls": 0,
+        "cumulative_usd": 0.0,
+        "cumulative_tokens": 0,
+        "overspend_usd": 0.0,
+    }
+    assert container.stops == 1
+    assert json.loads((run_dir / "state.json").read_text())["run_status"] == "complete"
+    assert not (run_dir / "run.lock").exists()
+    assert disabled == [True]
+
+
+def test_end_run_twice_is_already_complete_and_writes_nothing(keeper_run, capsys):
+    run_dir, container, keeper, _ = keeper_run
+    assert cli.main(["end-run", "--run-dir", str(run_dir)]) == 0
+    before = (run_dir / "telemetry.jsonl").read_bytes()
+    asked = len(keeper.requests)
+    capsys.readouterr()
+    assert cli.main(["end-run", "--run-dir", str(run_dir)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["already_complete"]
+    assert (run_dir / "telemetry.jsonl").read_bytes() == before
+    assert len(keeper.requests) == asked
+    assert container.stops == 1
+    # And a scheduled poll after it finds the run complete, as after a boundary.
+    assert cli.main(["run-session", "--run-dir", str(run_dir)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["already_complete"]
+
+
+def test_end_run_refuses_while_a_session_holds_the_lock(keeper_run, capsys):
+    run_dir, container, keeper, _ = keeper_run
+    lock = run_dir / "run.lock"
+    lock.write_text(json.dumps({"pid": os.getpid(), "created": "2999-01-01T00:00:00+00:00"}))
+    capsys.readouterr()
+    assert cli.main(["end-run", "--run-dir", str(run_dir)]) == 1
+    assert capsys.readouterr().out.splitlines() == ["lock_held"]
+    assert [e["event"] for e in read_events(run_dir / "telemetry.jsonl")] == ["run_start"]
+    assert keeper.requests == []
+    assert lock.exists()

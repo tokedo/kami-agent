@@ -139,4 +139,18 @@ docker compose -f compose.yaml -f compose.keeper.yaml exec keeper \
 docker compose -f compose.yaml [-f compose.keeper.yaml] down
 ```
 
+To end a run before its budget or horizon does, run the same end by
+hand inside the agent container (`exec`, so the run lock's process check
+sees the loop's own sessions):
+
+```sh
+docker compose -f compose.yaml [-f compose.keeper.yaml] exec agent \
+    kami-agent end-run --run-dir /srv/run
+```
+
+It prints `run_complete manual` (the event's `reason` is `manual`),
+`already_complete` on a run that has ended, or `lock_held` with exit 1
+while a session is running — then try again after it. Every later poll of
+the loop answers `already_complete`.
+
 Pull `/srv/run` (see `docs/packaging.md`), `shell/` included.

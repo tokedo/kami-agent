@@ -199,6 +199,10 @@ uv run kami-agent run-session --run-dir /srv/run --manual
   key material.
 - `kami-agent run-session` — execute one session (what the scheduler
   invokes).
+- `kami-agent end-run` — end the run now (`run_complete` reason
+  `manual`): the same end as a tripped budget or horizon — on the shell
+  rungs the keeper's books stopped and its grant revoked, the environment
+  stopped. Operator-facing; idempotent; refused while a session runs.
 - `kami-agent status` — operator-facing state summary.
 
 Contract: [SPEC.md](SPEC.md) P12.

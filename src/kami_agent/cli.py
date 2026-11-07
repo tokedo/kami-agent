@@ -1,4 +1,4 @@
-"""CLI entry points: kami-agent init | run-session | status (SPEC P12).
+"""CLI entry points: kami-agent init | run-session | end-run | status (SPEC P12).
 
 - ``init``: validate the manifest, write the run directory from it, run
   connectivity checks (chain RPC, mainnet RPC, provider API, MCP
@@ -9,6 +9,9 @@
   generated and persisted inside the harness server process.
 - ``run-session``: execute one session — what the supervisor's cron
   entry invokes.
+- ``end-run``: end the run now, as a tripped boundary would, with
+  ``run_complete`` reason ``manual`` (the keeper stopped and revoked, the
+  environment stopped). Operator-facing; idempotent.
 - ``status``: print the state.json summary. Operator-facing only; never
   an agent channel (I1).
 
@@ -45,7 +48,15 @@ from kami_agent.harness import HarnessClient, HarnessPairingError, check_pairing
 from kami_agent.keeper import KeeperClient
 from kami_agent.lens import ROSTER_QUERY, LensClient, LensQueryError, LensUnavailableError
 from kami_agent.loop import BALANCE_TOOL, BRIEF_TOOL, LoopCaps
-from kami_agent.runner import ENVIRONMENT_OWNER, RunConfig, _load_prompts, run_session
+from kami_agent.runner import (
+    ALREADY_COMPLETE,
+    ENVIRONMENT_OWNER,
+    LOCK_HELD,
+    RunConfig,
+    _load_prompts,
+    end_run,
+    run_session,
+)
 from kami_agent.state import load_state
 from kami_agent.supervisor import uninstall_cron
 from kami_agent.telemetry import TelemetryWriter
@@ -681,6 +692,31 @@ def cmd_run_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_end_run(args: argparse.Namespace) -> int:
+    """The operator-side run end (SPEC P1, P12; F-TS5): ``run_complete`` reason ``manual``.
+
+    The same end of the run, the same factories and the same lock as a
+    scheduled ``run-session`` whose boundary tripped. ``lock_held`` (a
+    session is running) exits 1 and changes nothing; ``already_complete``
+    exits 0, as does the end itself.
+    """
+    run_dir = Path(args.run_dir)
+    load_env_file(run_dir / ".env")
+    manifest = load_manifest(run_dir / "config.yaml")
+    config = build_run_config(manifest, run_dir)
+    outcome = end_run(
+        config,
+        environment_factory=environment_factory(manifest, run_dir),
+        keeper_factory=keeper_factory(manifest),
+        disable_supervisor=uninstall_cron,
+    )
+    if outcome == LOCK_HELD:
+        print(outcome)
+        return 1
+    print(outcome if outcome == ALREADY_COMPLETE else f"{outcome} manual")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     state = load_state(Path(args.run_dir) / "state.json")
     print(json.dumps(asdict(state), indent=2))
@@ -707,6 +743,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--run-dir", required=True)
     p_run.add_argument("--manual", action="store_true", help="bypass wake gating")
     p_run.set_defaults(func=cmd_run_session)
+
+    p_end = sub.add_parser(
+        "end-run", help="end the run now: run_complete reason manual (operator only)"
+    )
+    p_end.add_argument("--run-dir", required=True)
+    p_end.set_defaults(func=cmd_end_run)
 
     p_status = sub.add_parser("status", help="print the state.json summary")
     p_status.add_argument("--run-dir", required=True)
