@@ -762,6 +762,16 @@ Reader notes (stable semantics):
   the host. **They are recorded, never asserted**: the scaffold compares
   nothing against the manifest's pins, and absence means *not recorded* —
   never agreement with a pin (N10).
+- **`tool_call.lens_stale` / `lens_block` are on every lens-backed row**
+  (0.8.2, O-TS26): every `lens_*` harness call, model- or
+  scaffold-initiated, records the `meta.stale` / `meta.blockNumber` of the
+  daemon envelope it answered — the envelope the harness passes through,
+  read off the raw result, best-effort; absent when the call raised or the
+  result was no envelope, and never on a non-lens tool, whatever `meta`
+  its result carries. Through 0.8.1 only the session-start brief's row
+  carried them, so the record of the flag the model saw on its own lens
+  reads was partial. A lens read the model makes through the shell is a
+  `shell` row, not a lens-backed one.
 - `session_start.scaffold_profile` is the rung the manifest pinned (D3),
   and it is what explains a `tools_hash` that differs between arms of one
   family: a profile at or above `search` carries one more scaffold tool by
