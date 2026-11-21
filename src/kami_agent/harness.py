@@ -19,7 +19,7 @@ background thread and exposes the synchronous surface the loop needs
 transport's context managers are entered and exited inside a single
 manager task, as anyio requires.
 
-Dev pin: kami-harness 5.0.1 surface (``d0d36ce``; 5.0.0's 100 tools and
+Dev pin: kami-harness 5.1.0 surface (``4b66238``; 5.0.0's 100 tools and
 ``tools_hash``) — the run manifest
 re-pins at launch; the SHA is manifest metadata, recorded on run_start.
 The pairing check keys on the handshake's ``schema_version`` MAJOR, never
@@ -46,7 +46,7 @@ from kami_agent.loop import GameToolResult
 from kami_agent.tools.errors import ToolError
 from kami_agent.tools.receipts import classify_success
 
-HARNESS_DEV_PIN_SHA = "d0d36ce"
+HARNESS_DEV_PIN_SHA = "4b66238"
 
 DEFAULT_HANDSHAKE_TIMEOUT_S = 60.0
 
