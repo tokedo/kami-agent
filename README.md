@@ -5,7 +5,7 @@ The model-agnostic reference agent scaffold for
 frontier models into Kamigotchi, a live on-chain world, and measures what
 they do under controlled conditions.
 
-**Status: v0.8.3.** [SPEC.md](SPEC.md) is the contract registry — what the
+**Status: v0.8.4.** [SPEC.md](SPEC.md) is the contract registry — what the
 scaffold provides, what it depends on, the invariants and how each one is
 enforced, and the behaviors that are accepted by design.
 
@@ -145,7 +145,7 @@ up no session number. Against a harness that states no version at all it
 injects nothing and sends exactly the prompt 0.6.0 sent.
 Contract: [SPEC.md](SPEC.md) D1.
 
-The pinned and tested harness is **kami-harness 5.1.0** (5.0.0's 100 tools
+The pinned and tested harness is **kami-harness 5.1.1** (5.0.0's 100 tools
 and `tools_hash`, its catalogs at the world pin): the image
 default, the example manifest, the recorded tool surface and the live
 tier all name it, and its standing text is the same, byte for byte, as
@@ -157,7 +157,7 @@ is the harness's plain error that no account is registered. Against
 4.0.0–4.3.0 the same call answers for the daemon's configured default
 operator, so on those harnesses the roster fails until that is set.
 
-**kami-lens 1.0.1 or newer is required for correct reads; 1.2.0 is
+**kami-lens 1.0.1 or newer is required for correct reads; 1.2.1 is
 recommended and pinned.** kami-lens 1.0.0 could keep an earlier
 transaction's value when several transactions in one block wrote the same
 thing — a kami's health, a timestamp, a harvest's state — and serve that
@@ -171,7 +171,7 @@ once the chain accepts the next action, and 1.1.0 serves what patch 0.4.5
 added (a node's yield item, requirements and level cap, a kami's soulbind)
 with every value it checks equal to the chain's own integer arithmetic;
 1.2.0 serves a node's harvest multiplier (`harvestMultiplier`) and caps
-a liquidation's payout at 100 %.
+a liquidation's payout at 100 %, and 1.2.1 serves the same answers.
 On the shell rungs the same daemon is what the `kami-lens` command inside
 the environment reaches. The scaffold does not refuse an
 older daemon; it records the serving daemon's version on every
