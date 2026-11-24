@@ -160,7 +160,7 @@ is visible rather than silent — `tool_call` with `initiator: "scaffold"`
 and `ok: false` on the first event of every session — so check that
 field before concluding a run is healthy.
 
-**Install kami-lens 1.2.0** (the pinned version; **1.0.1 at the least**).
+**Install kami-lens 1.2.1** (the pinned version; **1.0.1 at the least**).
 kami-lens 1.0.0 could serve a stale value — a kami's health, a timestamp,
 a harvest's state — when several transactions in one block wrote it,
 with nothing marked degraded, until it was written again; 1.0.1 fixed
@@ -171,7 +171,8 @@ level cap and scavenge cost, a kami's `soulboundUntil` — and every value
 it checks equal to the chain's own integer arithmetic. 1.2.0 serves a
 node's harvest multiplier (`harvestMultiplier`), caps a liquidation's
 payout at 100 %, and loads the world cold once when upgraded (plan the
-first start's memory below for that start). Every
+first start's memory below for that start); 1.2.1 serves the same
+answers, and a restart from 1.2.0 is a warm start. Every
 `session_start` records the serving daemon's `lens_version`; check it
 reads `1.0.1` or later.
 
