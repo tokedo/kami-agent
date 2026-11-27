@@ -135,5 +135,5 @@ pins: # recorded on run_start; provisioning enforces them
   agent_sha: ""
   harness_sha: 8b6a84319eb66e7dde425c12dfaba7ea3eb55219 # kami-harness 5.1.1 (pairs with kami-agent 0.8.0 and newer; the same 100 tools and tools_hash as 5.0.0)
   lens_sha: 6828a11040725c6c7b62a97f5f42f48f59c8418f # kami-lens 1.2.1 (1.0.1+ required for correct reads)
-  keeper_sha: d500f5d2874dd5bc4836bacf29e2b244428592a5 # kami-keeper 1.0.2 (shell_keeper only; checked at init against the keeper image)
+  keeper_sha: 85d00b5fa32a30ffa0b0fba642242f66e84521fd # kami-keeper 1.1.0 (shell_keeper only; checked at init against the keeper image)
   gdd_sha: 2a40250b2a0e01f277f6e2c210e108446df2ee71 # kamigotchi-gdd main (2026-11-23), the world documentation matching the harness and lens above
